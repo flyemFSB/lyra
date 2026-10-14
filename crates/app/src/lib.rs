@@ -7,5 +7,5 @@ pub mod fetcher;
 pub mod service;
 
 pub use error::{Error, Result};
-pub use fetcher::{BlobFetcher, shared};
-pub use service::Kugou;
+pub use fetcher::BlobFetcher;
+pub use service::{Kugou, is_mobile};

@@ -109,13 +109,33 @@ impl Request {
         }
     }
 
-    /// 不参与缓存键计算的易变参数列表。
-    const VOLATILE_QUERY: &'static [&'static str] = &["clienttime", "signature", "_lyra_t"];
+    /// 不参与缓存键计算的易变查询参数列表。
+    const VOLATILE_QUERY: &'static [&'static str] = &[
+        "clienttime",
+        "clienttime_ms",
+        "visit_time",
+        "last_time",
+        "key",
+        "p",
+        "signature",
+        "_lyra_t",
+    ];
 
-    /// `host + path + 稳定 query`，用作缓存 key。
+    /// 不参与缓存键计算的易变请求体字段列表。
+    const VOLATILE_BODY: &'static [&'static str] = &[
+        "clienttime",
+        "clienttime_ms",
+        "visit_time",
+        "last_time",
+        "key",
+        "p",
+        "_lyra_t",
+    ];
+
+    /// 生成包含主机、路径、稳定查询参数与请求体摘要的唯一缓存键。
     #[must_use]
     pub fn cache_key(&self) -> String {
-        match url::Url::parse(&self.url) {
+        let mut key = match url::Url::parse(&self.url) {
             Ok(parsed) => {
                 let mut key = String::from(parsed.host_str().unwrap_or_default());
                 key.push_str(parsed.path());
@@ -133,7 +153,24 @@ impl Request {
                 key
             }
             Err(_) => self.url.clone(),
+        };
+        if let Some(body) = &self.body {
+            key.push('#');
+            key.push_str(&Self::body_digest(body));
         }
+        key
+    }
+
+    /// 剔除易变字段后的请求体摘要（非 JSON 体直接哈希原始字节）。
+    fn body_digest(body: &[u8]) -> String {
+        let normalized = match serde_json::from_slice::<serde_json::Value>(body) {
+            Ok(serde_json::Value::Object(mut map)) => {
+                map.retain(|key, _| !Self::VOLATILE_BODY.contains(&key.as_str()));
+                serde_json::Value::Object(map).to_string().into_bytes()
+            }
+            _ => body.to_vec(),
+        };
+        lyra_proto::sha256_hex(&normalized)
     }
 }
 
@@ -184,11 +221,6 @@ impl Response {
         String::from_utf8_lossy(&self.body).into_owned()
     }
 
-    /// 响应体解析为 JSON。
-    pub fn json(&self) -> Result<serde_json::Value> {
-        serde_json::from_slice(&self.body).map_err(|e| Error::Decode(format!("invalid json body: {e}")))
-    }
-
     /// `ssa-code` 响应头：出现即表示需要行为验证。
     #[must_use]
     pub fn ssa_code(&self) -> Option<&str> {
@@ -198,18 +230,11 @@ impl Response {
 
 /// 流式抓取的分块接收端。
 pub trait ChunkSink: Send {
+    /// 收到响应体长度声明（`Content-Length`），供接收端校验下载是否完整。
+    fn expected_len(&mut self, _len: Option<u64>) {}
+
     /// 收到一块数据。
     fn chunk(&mut self, bytes: &[u8]);
-}
-
-/// 把分块写进 `Vec`（测试 / 小响应用）。
-#[derive(Debug, Default)]
-pub struct VecSink(pub Vec<u8>);
-
-impl ChunkSink for VecSink {
-    fn chunk(&mut self, bytes: &[u8]) {
-        self.0.extend_from_slice(bytes);
-    }
 }
 
 /// HTTP 传输实现。
@@ -224,9 +249,11 @@ pub trait Transport: Send + Sync + 'static {
         if !(200..300).contains(&response.status) {
             return Err(Error::Http {
                 status: response.status,
-                body: String::from_utf8_lossy(&response.body).into_owned(),
+                // 与 http 实现保持同一条界：上游错误体可能是一整页 HTML。
+                body: crate::codec::truncate(&String::from_utf8_lossy(&response.body), 512),
             });
         }
+        sink.expected_len(Some(response.body.len() as u64));
         sink.chunk(&response.body);
         Ok(())
     }
@@ -254,10 +281,49 @@ mod tests {
     }
 
     #[test]
+    fn cache_key_includes_the_request_body() {
+        // 同一端点、同一 query，只有请求体不同（点第二首歌 / 删第二首）必须得到不同键。
+        let a = Request::new(Method::Post, "https://g.kugou.com/v2/get_res_privilege/lite")
+            .query("userid", "1")
+            .body(
+                serde_json::json!({"resource": [{"hash": "a"}]})
+                    .to_string()
+                    .into_bytes(),
+            );
+        let b = Request::new(Method::Post, "https://g.kugou.com/v2/get_res_privilege/lite")
+            .query("userid", "1")
+            .body(
+                serde_json::json!({"resource": [{"hash": "b"}]})
+                    .to_string()
+                    .into_bytes(),
+            );
+        assert_ne!(a.cache_key(), b.cache_key(), "换歌曲不能共用缓存");
+        assert_eq!(a.cache_key(), a.clone().cache_key(), "同请求必须稳定");
+    }
+
+    #[test]
+    fn cache_key_ignores_volatile_body_fields() {
+        let build = |clienttime: i64| {
+            Request::new(Method::Post, "https://g.kugou.com/v2/personal_recommend").body(
+                serde_json::json!({"clienttime": clienttime, "key": format!("k{clienttime}"), "mode": "normal"})
+                    .to_string()
+                    .into_bytes(),
+            )
+        };
+        assert_eq!(build(1).cache_key(), build(2).cache_key());
+    }
+
+    #[test]
     fn cache_key_keeps_identity_params() {
         let a = Request::new(Method::Get, "https://g.kugou.com/v1/x").query("userid", "1");
         let b = Request::new(Method::Get, "https://g.kugou.com/v1/x").query("userid", "2");
         assert_ne!(a.cache_key(), b.cache_key(), "换账号不能共用缓存");
+        // 删歌的身份在 body 的 fileid 上。
+        let c = Request::new(Method::Post, "https://g.kugou.com/v4/delete_songs")
+            .body(serde_json::json!({"data": [{"fileid": 1}]}).to_string().into_bytes());
+        let d = Request::new(Method::Post, "https://g.kugou.com/v4/delete_songs")
+            .body(serde_json::json!({"data": [{"fileid": 2}]}).to_string().into_bytes());
+        assert_ne!(c.cache_key(), d.cache_key(), "删不同歌曲不能共用单飞键");
     }
 
     #[test]

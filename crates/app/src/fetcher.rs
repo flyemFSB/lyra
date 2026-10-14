@@ -1,7 +1,5 @@
 //! Blob 缓存与音频引擎之间的流式数据桥接。
 
-use std::sync::Arc;
-
 use lyra_api::blob::BlobCache;
 use lyra_audio::{FetchError, FetchResult, Fetcher, ReadSeek, TrackRef};
 
@@ -31,27 +29,4 @@ impl Fetcher for BlobFetcher {
         self.runtime.spawn(download);
         Ok(Box::new(view))
     }
-
-    fn prefetch(&self, track: &TrackRef) {
-        // 异步预下载整首音频以备快速切歌。
-        let blobs = self.blobs.clone();
-        let url = track.url.clone();
-        let hash = track.hash.clone();
-        let ext = if track.ext.is_empty() {
-            "mp3".to_owned()
-        } else {
-            track.ext.clone()
-        };
-        self.runtime.spawn(async move {
-            if let Err(error) = blobs.ensure(&url, &hash, &ext).await {
-                tracing::warn!(%error, "预取失败");
-            }
-        });
-    }
-}
-
-/// 供 `Arc<dyn Fetcher>` 直接使用。
-#[must_use]
-pub fn shared(fetcher: BlobFetcher) -> Arc<dyn Fetcher> {
-    Arc::new(fetcher)
 }
