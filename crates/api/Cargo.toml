@@ -21,7 +21,7 @@ async-trait = { workspace = true }
 moka        = { workspace = true }
 dashmap     = { workspace = true }
 parking_lot = { workspace = true }
-async-channel = "2"
+async-channel = { workspace = true }
 url         = { workspace = true }
 reqwest     = { workspace = true, optional = true }
 

@@ -403,12 +403,6 @@ pub async fn claim_daily_vip(api: &Api) -> Result<VipClaim> {
     }
 }
 
-/// 查询月度 VIP 领奖历史记录。
-pub async fn month_vip_record(api: &Api) -> Result<Value> {
-    let spec = RequestSpec::get("/youth/v1/activity/get_month_vip_record").param("latest_limit", 100);
-    api.call(spec, Freshness::ACCOUNT).await
-}
-
 #[cfg(test)]
 mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used)]

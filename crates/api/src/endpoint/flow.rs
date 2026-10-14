@@ -15,32 +15,6 @@ use crate::spec::now_millis;
 /// 首页发现端点专属客户端版本号。
 pub const DISCOVER_CLIENTVER: u32 = 20_809;
 
-/// 流的种类。
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum FlowKind {
-    /// 每日推荐。
-    Daily,
-    /// 个人电台。
-    Personal,
-    /// 首页发现。
-    Discover,
-    /// 卡片推荐（`card_id`）。
-    Card(u32),
-}
-
-impl FlowKind {
-    /// 缓存命名空间。
-    #[must_use]
-    pub const fn cache_ns(self) -> &'static str {
-        match self {
-            Self::Daily => "flow:daily",
-            Self::Personal => "flow:fm",
-            Self::Discover => "flow:discover",
-            Self::Card(_) => "flow:card",
-        }
-    }
-}
-
 /// 获取每日个性化推荐歌曲列表。
 pub async fn daily(api: &Api, platform: &str) -> Result<Page<Song>> {
     let body = serde_json::json!({

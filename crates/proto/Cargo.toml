@@ -8,7 +8,6 @@ license.workspace      = true
 
 [dependencies]
 md-5       = { workspace = true }
-sha1       = { workspace = true }
 sha2       = { workspace = true }
 aes        = { workspace = true }
 cbc        = { workspace = true }

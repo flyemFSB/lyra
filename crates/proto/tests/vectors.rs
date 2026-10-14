@@ -185,11 +185,6 @@ fn krc_decode_matches_reference() {
     assert_eq!(cipher::krc_decode_base64(blob).unwrap(), "<krc>hello 歌词</krc>");
 }
 
-#[test]
-fn sha1_matches_reference() {
-    assert_eq!(cipher::sha1_hex(b"lyra"), "6228efa674da92e19efbfb3b25804b736858b580");
-}
-
 // 设备与指纹测试
 
 #[test]
