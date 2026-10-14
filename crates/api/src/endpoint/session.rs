@@ -1,0 +1,396 @@
+//! 会话与认证端点：验证码发送、短信登录、设备注册及用户信息。
+
+use lyra_proto::consts::{APPID, CLIENTVER, GITVERSION, RSA_PUBLIC, T1_IV, T1_KEY, T2_IV, T2_KEY, T2_MIDDLE, UA_LOGIN};
+use lyra_proto::{
+    aes_decrypt_derived, aes_encrypt_derived, aes_encrypt_with_key_iv, rsa_raw_encrypt_hex, sign_params_key,
+};
+use serde_json::Value;
+
+use crate::client::Api;
+use crate::codec;
+use crate::error::{Error, Result};
+use crate::spec::RequestSpec;
+use crate::spec::{CAPTCHA_BASE, LOGIN_GATEWAY, RELATION_BASE, USER_SERVICE, VERIFY_BASE, now_millis};
+
+/// 登录结果。
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct LoginResult {
+    /// 用户 ID。
+    pub userid: i64,
+    /// 令牌。
+    pub token: String,
+    /// 会员类型（概念版恒为 0，判定会员请用 `/v1/get_union_vip`）。
+    pub vip_type: i64,
+    /// 会员令牌。
+    pub vip_token: String,
+    /// 昵称，若上游返回。
+    pub nickname: String,
+}
+
+/// 发送短信登录验证码。
+pub async fn send_mobile_code(api: &Api, mobile: &str) -> Result<Value> {
+    let spec = RequestSpec::post("/v7/send_mobile_code")
+        .base(CAPTCHA_BASE)
+        .body(serde_json::json!({
+            "businessid": 5,
+            "mobile": mobile,
+            "plat": 3,
+        }))
+        .timeout(std::time::Duration::from_secs(20));
+    api.call_side_effect(spec).await
+}
+
+/// 使用手机号与短信验证码执行登录。
+pub async fn login_cellphone(api: &Api, mobile: &str, code: &str) -> Result<LoginResult> {
+    let session = api.session();
+    let date_time = now_millis();
+
+    let encrypted = aes_encrypt_derived(
+        &serde_json::json!({
+            "mobile": mobile,
+            "code": code,
+        })
+        .to_string(),
+    )?;
+
+    let t2_plain = format!(
+        "{}|{T2_MIDDLE}|{}|{}|{date_time}",
+        session.device.guid, session.device.mac, session.device.dev
+    );
+    let t2 = aes_encrypt_with_key_iv(&t2_plain, T2_KEY, T2_IV)?;
+    let t1 = aes_encrypt_with_key_iv(&format!("|{date_time}"), T1_KEY, T1_IV)?;
+
+    let pk_plain = serde_json::json!({
+        "clienttime_ms": date_time,
+        "key": encrypted.key,
+    })
+    .to_string();
+
+    let body = serde_json::json!({
+        "plat": 1,
+        "support_multi": 1,
+        "t1": t1,
+        "t2": t2,
+        "clienttime_ms": date_time,
+        "mobile": mask_mobile(mobile),
+        "key": sign_params_key(date_time, APPID, CLIENTVER),
+        "pk": rsa_raw_encrypt_hex(pk_plain.as_bytes(), RSA_PUBLIC)?.to_uppercase(),
+        "params": encrypted.hex,
+        "dfid": session.dfid(),
+        "dev": session.device.dev,
+        "gitversion": GITVERSION,
+    });
+
+    let spec = RequestSpec::post("/v7/login_by_verifycode")
+        .base(LOGIN_GATEWAY)
+        .body(body)
+        .header("support-calm", "1")
+        .header("User-Agent", UA_LOGIN)
+        .timeout(std::time::Duration::from_secs(30));
+
+    let value = api.call_side_effect(spec).await?;
+    parse_login(&value, &encrypted.key)
+}
+
+/// 解析登录响应体并解密敏感安全参数。
+pub fn parse_login(value: &Value, temp_key: &str) -> Result<LoginResult> {
+    let data = codec::pick(value, &["data"]).cloned().unwrap_or(Value::Null);
+    let mut result = LoginResult {
+        userid: codec::pick_i64(&data, &["userid", "user_id", "kugouid"]),
+        vip_type: codec::pick_i64(&data, &["vip_type"]),
+        vip_token: codec::pick_str(&data, &["vip_token"]),
+        nickname: codec::pick_str(&data, &["nickname", "name"]),
+        token: codec::pick_str(&data, &["token"]),
+    };
+
+    if let Some(secu) = codec::pick(&data, &["secu_params"]).map(codec::as_str) {
+        if secu.is_empty() {
+            return finish(result);
+        }
+        let plain = aes_decrypt_derived(&secu, temp_key)?;
+        let text = String::from_utf8_lossy(&plain).into_owned();
+        match serde_json::from_str::<Value>(&text) {
+            Ok(Value::Object(map)) => {
+                for (key, item) in map {
+                    match key.as_str() {
+                        "token" => result.token = codec::as_str(&item),
+                        "userid" => result.userid = codec::as_i64(&item),
+                        "vip_type" => result.vip_type = codec::as_i64(&item),
+                        "vip_token" => result.vip_token = codec::as_str(&item),
+                        "nickname" => result.nickname = codec::as_str(&item),
+                        _ => {}
+                    }
+                }
+            }
+            _ => result.token = text,
+        }
+    }
+    finish(result)
+}
+
+fn finish(result: LoginResult) -> Result<LoginResult> {
+    if result.token.is_empty() || result.userid == 0 {
+        return Err(Error::Decode(format!(
+            "登录响应缺少 token/userid（userid={}, token_empty={}）",
+            result.userid,
+            result.token.is_empty()
+        )));
+    }
+    Ok(result)
+}
+
+/// 手机号格式脱敏，保留前两位与末尾位。
+#[must_use]
+pub fn mask_mobile(mobile: &str) -> String {
+    let chars: Vec<char> = mobile.chars().collect();
+    if chars.len() <= 2 {
+        return mobile.to_owned();
+    }
+    let head: String = chars[..2].iter().collect();
+    let tail: String = chars.get(10..11).map_or(String::new(), |s| s.iter().collect());
+    format!("{head}*****{tail}")
+}
+
+/// 向风控服务注册设备身份并获取 dfid 凭据。
+pub async fn register_dev(api: &Api, extra: Option<Value>) -> Result<String> {
+    let session = api.session();
+    let mut device_map = serde_json::json!({
+        "availableRamSize": 4_983_533_568_i64,
+        "availableRomSize": 48_114_719_i64,
+        "availableSDSize": 48_114_717_i64,
+        "basebandVer": "",
+        "batteryLevel": 100,
+        "batteryStatus": 3,
+        "brand": "Redmi",
+        "buildSerial": "unknown",
+        "device": "marble",
+        "imei": session.device.guid,
+        "imsi": "",
+        "manufacturer": "Xiaomi",
+        "uuid": session.device.guid,
+    });
+    // 默认关闭各硬件传感器上报。
+    if let (Some(map), Some(extra)) = (device_map.as_object_mut(), extra.as_ref().and_then(Value::as_object)) {
+        for (key, value) in extra {
+            map.insert(key.clone(), value.clone());
+        }
+        for sensor in [
+            "accelerometer",
+            "gravity",
+            "gyroscope",
+            "light",
+            "magnetic",
+            "orientation",
+            "pressure",
+            "step_counter",
+            "temperature",
+        ] {
+            map.insert(sensor.to_owned(), Value::Bool(false));
+            map.insert(format!("{sensor}Value"), Value::String(String::new()));
+        }
+    }
+
+    let encrypted = lyra_proto::secret_encrypt(&device_map.to_string())?;
+    let portrait = serde_json::json!({
+        "aes": encrypted.key,
+        "uid": session.userid(),
+        "token": session.token(),
+    })
+    .to_string();
+    let p = lyra_proto::rsa_pkcs1_encrypt_hex(portrait.as_bytes(), RSA_PUBLIC)?;
+
+    let spec = RequestSpec::post("/risk/v2/r_register_dev")
+        .base(USER_SERVICE)
+        .param("part", 1)
+        .param("platid", 1)
+        .param("p", p)
+        .header("x-router", "userservice.kugou.com")
+        .timeout(std::time::Duration::from_secs(30));
+    let request = spec.build(&session)?;
+
+    // 请求体采用 Base64 编码密文。
+    let mut request = request;
+    request.body = Some(encrypted.base64.clone().into_bytes());
+    let response = api.transport().execute(request).await?;
+    if !(200..300).contains(&response.status) {
+        return Err(Error::Http {
+            status: response.status,
+            body: response.text(),
+        });
+    }
+    let plain = lyra_proto::secret_decrypt_bytes(&response.body, &encrypted.key)?;
+    let value: Value =
+        serde_json::from_slice(&plain).map_err(|e| Error::Decode(format!("register_dev 响应解密后不是 JSON: {e}")))?;
+    codec::check_business(&value)?;
+    let dfid = codec::pick_str_paths(&value, &[&["data", "dfid"], &["dfid"]]);
+    if dfid.is_empty() {
+        return Err(Error::Decode("register_dev 未返回 dfid".to_owned()));
+    }
+    Ok(dfid)
+}
+
+/// 提交人机验证或二次校验验证码。
+pub async fn verify_user_info(api: &Api, sid: &str, edt: &str, verifycode: &str, v_type: i64) -> Result<Value> {
+    let session = api.session();
+    let encrypted = if v_type == 32 {
+        aes_encrypt_derived(&serde_json::json!({ "code": verifycode }).to_string())?
+    } else {
+        aes_encrypt_derived("{}")?
+    };
+    let pk_plain = serde_json::json!({ "key": encrypted.key }).to_string();
+
+    let body = serde_json::json!({
+        "eventid": Value::Null,
+        "userid": session.userid(),
+        "platid": 2,
+        "v_type": v_type,
+        "wasm": 1,
+        "i": "",
+        "sid": sid,
+        "edt": edt,
+        "verifycode": verifycode,
+        "code": verifycode,
+        "pk": rsa_raw_encrypt_hex(pk_plain.as_bytes(), RSA_PUBLIC)?.to_uppercase(),
+        "params": encrypted.hex,
+    });
+
+    let spec = RequestSpec::post("/v4/verify_user_info")
+        .base(VERIFY_BASE)
+        .param("clientver", 11_510)
+        .body(body)
+        .timeout(std::time::Duration::from_secs(30));
+    api.call_side_effect(spec).await
+}
+
+/// 获取当前登录用户的基本信息与关系数据。
+pub async fn user_info(api: &Api) -> Result<Value> {
+    let session = api.session();
+    crate::spec::ensure_logged_in(&session)?;
+    let clienttime = now_millis();
+    let p = rsa_raw_encrypt_hex(
+        serde_json::json!({ "clienttime": clienttime, "token": session.token() })
+            .to_string()
+            .as_bytes(),
+        RSA_PUBLIC,
+    )?
+    .to_uppercase();
+
+    let body = serde_json::json!({
+        "p": p,
+        "appid": APPID,
+        "mid": session.device.mid,
+        "clientver": CLIENTVER,
+        "source": 0,
+        "clienttime": clienttime,
+        "uuid": "-",
+        "userid": session.userid(),
+        "key": sign_params_key(clienttime, APPID, CLIENTVER),
+    });
+
+    let spec = RequestSpec::post("/v1/get_my_userinfo")
+        .base(RELATION_BASE)
+        .body(body)
+        .param("plat", 1)
+        .header("Host", "relation.user.kugou.com");
+    api.call(spec, crate::cache::Freshness::NoStore).await
+}
+
+#[cfg(test)]
+mod tests {
+    #![allow(clippy::unwrap_used)]
+
+    use std::sync::Arc;
+
+    use super::*;
+    use crate::client::Api;
+    use crate::spec::Session;
+
+    /// 构造具备已注册设备身份但尚未登录的测试会话。
+    fn session() -> Session {
+        Session::new(crate::testing::device("DfidValue"))
+    }
+    use crate::transport::MockTransport;
+
+    #[test]
+    fn masks_mobile_like_the_client() {
+        assert_eq!(mask_mobile("13800138000"), "13*****0");
+        assert_eq!(mask_mobile("155"), "15*****");
+    }
+
+    #[test]
+    fn parses_login_with_json_secu_params() {
+        let temp_key = "abcdefghijklmnop";
+        let inner = serde_json::json!({"token": "TKN", "userid": 2043841403, "vip_token": "VT"});
+        let secu = lyra_proto::aes_encrypt_derived_with(&inner.to_string(), temp_key).unwrap();
+        let value = serde_json::json!({
+            "status": 1,
+            "data": {"secu_params": secu.hex, "userid": 2043841403, "vip_type": 0, "nickname": "lyra"}
+        });
+        let result = parse_login(&value, temp_key).unwrap();
+        assert_eq!(result.token, "TKN");
+        assert_eq!(result.userid, 2_043_841_403);
+        assert_eq!(result.vip_token, "VT");
+        assert_eq!(result.nickname, "lyra");
+    }
+
+    #[test]
+    fn parses_login_with_plain_string_secu_params() {
+        let temp_key = "abcdefghijklmnop";
+        let secu = lyra_proto::aes_encrypt_derived_with("PLAINTOKEN", temp_key).unwrap();
+        let value = serde_json::json!({
+            "status": 1,
+            "data": {"secu_params": secu.hex, "userid": 2043841403}
+        });
+        let result = parse_login(&value, temp_key).unwrap();
+        assert_eq!(result.token, "PLAINTOKEN");
+    }
+
+    #[test]
+    fn login_without_token_is_an_error() {
+        let value = serde_json::json!({"status": 1, "data": {"userid": 2043841403}});
+        assert!(parse_login(&value, "k").is_err());
+    }
+
+    #[tokio::test]
+    async fn login_sends_the_lite_t1_t2_and_rsa_pk() {
+        let mock = Arc::new(MockTransport::new());
+        mock.on_json("/v7/login_by_verifycode", &serde_json::json!({"status": 1, "data": {}}));
+        let api = Api::new(mock.clone(), session(), 8);
+        // 验证必传参数已成功组装并发送。
+        let _ = login_cellphone(&api, "13800138000", "123456").await;
+        let request = mock.last_request().unwrap();
+        let body: Value = serde_json::from_slice(request.body.as_deref().unwrap()).unwrap();
+        assert_eq!(body["plat"], 1);
+        assert_eq!(body["mobile"], "13*****0");
+        assert_eq!(body["gitversion"], GITVERSION);
+        assert_eq!(body["dev"], "ABCDEFGHIJ");
+        assert_eq!(body["dfid"], "DfidValue");
+        // 校验 pk 为 256 位大写十六进制。
+        let pk = body["pk"].as_str().unwrap();
+        assert_eq!(pk.len(), 256);
+        assert!(pk.chars().all(|c| c.is_ascii_hexdigit() && !c.is_ascii_lowercase()));
+        // 校验 t1 与 t2 符合 AES 十六进制密文格式。
+        assert_eq!(body["t1"].as_str().unwrap().len(), 32);
+        assert!(body["t2"].as_str().unwrap().len() > 32);
+        assert!(body["params"].as_str().unwrap().len() > 32);
+        assert_eq!(request.get_header("User-Agent"), Some(UA_LOGIN));
+        assert_eq!(request.get_header("support-calm"), Some("1"));
+    }
+
+    #[tokio::test]
+    async fn send_mobile_code_uses_the_http_login_host() {
+        let mock = Arc::new(MockTransport::new());
+        mock.on_json("/v7/send_mobile_code", &serde_json::json!({"status": 1, "count": 8}));
+        let api = Api::new(mock.clone(), session(), 8);
+        send_mobile_code(&api, "13800138000").await.unwrap();
+        let request = mock.last_request().unwrap();
+        assert!(
+            request.url.starts_with("http://login.user.kugou.com/"),
+            "{}",
+            request.url
+        );
+        let body: Value = serde_json::from_slice(request.body.as_deref().unwrap()).unwrap();
+        assert_eq!(body["businessid"], 5);
+        assert_eq!(body["plat"], 3);
+    }
+}

@@ -1,0 +1,25 @@
+[package]
+name        = "lyra-audio"
+description = "酷狗概念版音频引擎：抓取 / 解码 / 输出三段分离"
+version.workspace      = true
+edition.workspace      = true
+rust-version.workspace = true
+license.workspace      = true
+
+[dependencies]
+symphonia        = { workspace = true }
+cpal             = { workspace = true }
+rubato           = { workspace = true }
+ringbuf          = { workspace = true }
+serde            = { workspace = true }
+thiserror        = { workspace = true }
+tracing          = { workspace = true }
+parking_lot      = { workspace = true }
+crossbeam-channel = { workspace = true }
+
+[dev-dependencies]
+hound    = { workspace = true }
+tempfile = { workspace = true }
+
+[lints]
+workspace = true

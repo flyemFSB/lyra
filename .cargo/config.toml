@@ -1,0 +1,4 @@
+[alias]
+xtask = "run --package xtask --"
+# 不加 --all-features：那会把 gpui-kit 的 tree-sitter-* 全打开，CI 时间会爆掉
+lint = "clippy --workspace --all-targets -- -D warnings"

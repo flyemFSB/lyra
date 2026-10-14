@@ -1,0 +1,170 @@
+//! 内存响应缓存：基于 TinyLFU 容量淘汰与分级 TTL 策略。
+
+use std::sync::Arc;
+use std::time::{Duration, Instant};
+
+use moka::sync::Cache;
+
+/// 缓存新鲜度策略。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Freshness {
+    /// 有副作用的写操作端点：不缓存并追加时间戳防重。
+    SideEffect,
+    /// 具有时效性的数据条目。
+    Ttl(Duration),
+    /// 不缓存，也不加扰动。
+    NoStore,
+}
+
+impl Freshness {
+    /// 推荐流：5 分钟。
+    pub const FLOW: Self = Self::Ttl(Duration::from_secs(300));
+    /// 歌单：30 秒。
+    pub const PLAYLIST: Self = Self::Ttl(Duration::from_secs(30));
+    /// 歌曲播放地址：60 秒（上游 URL 自带时效）。
+    pub const SONG_URL: Self = Self::Ttl(Duration::from_secs(60));
+    /// 图片：7 天。
+    pub const IMAGE: Self = Self::Ttl(Duration::from_hours(168));
+    /// 曲库 / 电台目录：10 分钟。
+    pub const CATALOG: Self = Self::Ttl(Duration::from_secs(600));
+    /// 会员与账号状态：30 秒。
+    pub const ACCOUNT: Self = Self::Ttl(Duration::from_secs(30));
+
+    /// 命中时该条目可存活多久；`None` 表示不缓存。
+    #[must_use]
+    pub const fn ttl(self) -> Option<Duration> {
+        match self {
+            Self::Ttl(d) => Some(d),
+            Self::SideEffect | Self::NoStore => None,
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+struct Entry {
+    expires_at: Instant,
+    body: Arc<Vec<u8>>,
+}
+
+/// L1 响应缓存。
+#[derive(Debug, Clone)]
+pub struct TtlCache {
+    inner: Cache<String, Arc<Entry>>,
+}
+
+impl TtlCache {
+    /// 以给定容量上限构造。
+    #[must_use]
+    pub fn new(max_capacity: u64) -> Self {
+        Self {
+            inner: Cache::builder().max_capacity(max_capacity).build(),
+        }
+    }
+
+    /// 读一条（已过期视为未命中）。
+    #[must_use]
+    pub fn get(&self, key: &str) -> Option<Arc<Vec<u8>>> {
+        let entry = self.inner.get(key)?;
+        if entry.expires_at <= Instant::now() {
+            self.inner.invalidate(key);
+            return None;
+        }
+        Some(entry.body.clone())
+    }
+
+    /// 写一条。
+    pub fn insert(&self, key: impl Into<String>, body: Arc<Vec<u8>>, ttl: Duration) {
+        self.inner.insert(
+            key.into(),
+            Arc::new(Entry {
+                expires_at: Instant::now() + ttl,
+                body,
+            }),
+        );
+    }
+
+    /// 失效全部含指定前缀的 key（歌单增删后清关联缓存）。
+    pub fn invalidate_prefix(&self, prefix: &str) {
+        let keys: Vec<String> = self
+            .inner
+            .iter()
+            .map(|(k, _)| k.to_string())
+            .filter(|k| k.starts_with(prefix))
+            .collect();
+        for key in keys {
+            self.inner.invalidate(&key);
+        }
+    }
+
+    /// 清空。
+    pub fn clear(&self) {
+        self.inner.invalidate_all();
+        self.inner.run_pending_tasks();
+    }
+
+    /// 当前条目数（触发一次维护以保证准确）。
+    pub fn len(&self) -> u64 {
+        self.inner.run_pending_tasks();
+        self.inner.entry_count()
+    }
+
+    /// 是否为空。
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #![allow(clippy::unwrap_used)]
+
+    use super::*;
+
+    fn body(text: &str) -> Arc<Vec<u8>> {
+        Arc::new(text.as_bytes().to_vec())
+    }
+
+    #[test]
+    fn round_trips_within_ttl() {
+        let cache = TtlCache::new(64);
+        cache.insert("a", body("1"), Duration::from_secs(60));
+        assert_eq!(cache.get("a").unwrap().as_slice(), b"1");
+        assert!(cache.get("missing").is_none());
+    }
+
+    #[test]
+    fn expired_entry_is_a_miss() {
+        let cache = TtlCache::new(64);
+        cache.insert("a", body("1"), Duration::ZERO);
+        assert!(cache.get("a").is_none());
+    }
+
+    #[test]
+    fn invalidate_prefix_only_touches_that_namespace() {
+        let cache = TtlCache::new(64);
+        cache.insert("playlist:1", body("1"), Duration::from_secs(60));
+        cache.insert("playlist:2", body("2"), Duration::from_secs(60));
+        cache.insert("flow:daily", body("3"), Duration::from_secs(60));
+        cache.invalidate_prefix("playlist:");
+        assert!(cache.get("playlist:1").is_none());
+        assert!(cache.get("playlist:2").is_none());
+        assert!(cache.get("flow:daily").is_some());
+    }
+
+    #[test]
+    fn freshness_ttl_table() {
+        assert_eq!(Freshness::SideEffect.ttl(), None);
+        assert_eq!(Freshness::NoStore.ttl(), None);
+        assert_eq!(Freshness::PLAYLIST.ttl(), Some(Duration::from_secs(30)));
+        assert_eq!(Freshness::SONG_URL.ttl(), Some(Duration::from_secs(60)));
+    }
+
+    #[test]
+    fn clear_empties_the_cache() {
+        let cache = TtlCache::new(64);
+        cache.insert("a", body("1"), Duration::from_secs(60));
+        assert_eq!(cache.len(), 1);
+        cache.clear();
+        assert!(cache.is_empty());
+    }
+}

@@ -1,0 +1,75 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  publish-windows:
+    runs-on: windows-latest
+    steps:
+      - name: 检出代码
+        uses: actions/checkout@v4
+
+      - name: 安装 Rust 工具链
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: 依赖缓存
+        uses: Swatinem/rust-cache@v2
+
+      - name: 解析版本号
+        id: get_version
+        shell: pwsh
+        run: |
+          if ($env:GITHUB_REF -match '^refs/tags/v(.+)$') {
+            $version = $Matches[1]
+          } else {
+            $version = (Select-String -Path Cargo.toml -Pattern '^version\s*=\s*"([^"]+)"').Matches[0].Groups[1].Value
+          }
+          Write-Host "发布版本号: $version"
+          "VERSION=$version" | Out-File -FilePath $env:GITHUB_ENV -Append
+
+      - name: 编译 Release 二进制
+        run: cargo build --release -p lyra
+
+      - name: 安装 Inno Setup
+        shell: pwsh
+        run: |
+          if (-not (Get-Command iscc -ErrorAction SilentlyContinue)) {
+            choco install innosetup --no-progress
+            $isccDir = "C:\Program Files (x86)\Inno Setup 6"
+            if (Test-Path $isccDir) {
+              $isccDir | Out-File -FilePath $env:GITHUB_PATH -Append
+            }
+          }
+
+      - name: 构建安装程序与绿色便携包
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path target/dist
+          $isccPath = (Get-Command iscc -ErrorAction SilentlyContinue).Source
+          if (-not $isccPath) {
+            $isccPath = "C:\Program Files (x86)\Inno Setup 6\ISCC.exe"
+          }
+          Write-Host "使用 ISCC: $isccPath"
+          & $isccPath /DAppVersion="$env:VERSION" /DSourceDir="..\target\release" /DOutputDir="..\target\dist" installer/lyra.iss
+
+          Compress-Archive -Path target/release/lyra.exe -DestinationPath "target/dist/Lyra-v$($env:VERSION)-windows-x64-portable.zip" -Force
+
+          Get-ChildItem -Path target/dist | ForEach-Object {
+            $hash = (Get-FileHash -Path $_.FullName -Algorithm SHA256).Hash.ToLower()
+            "$hash  $($_.Name)" | Out-File -FilePath target/dist/checksums.sha256 -Append -Encoding ascii
+          }
+
+      - name: 发布至 GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: target/dist/*
+          draft: false
+          prerelease: false
+          generate_release_notes: true

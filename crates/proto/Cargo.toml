@@ -1,0 +1,26 @@
+[package]
+name        = "lyra-proto"
+description = "酷狗概念版协议原语：签名 / 密码学 / 设备身份 / 行为指纹（纯函数，零 IO）"
+version.workspace      = true
+edition.workspace      = true
+rust-version.workspace = true
+license.workspace      = true
+
+[dependencies]
+md-5       = { workspace = true }
+sha1       = { workspace = true }
+sha2       = { workspace = true }
+aes        = { workspace = true }
+cbc        = { workspace = true }
+rsa        = { workspace = true }
+num-bigint = { workspace = true }
+base64     = { workspace = true }
+hex        = { workspace = true }
+flate2     = { workspace = true }
+rand       = { workspace = true }
+serde      = { workspace = true }
+serde_json = { workspace = true }
+thiserror  = { workspace = true }
+
+[lints]
+workspace = true

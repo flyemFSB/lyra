@@ -1,0 +1,18 @@
+[package]
+name        = "lyra-store"
+description = "酷狗概念版持久化层：设备身份 / 登录态 / 设置 / 元数据缓存 / 播放历史"
+version.workspace      = true
+edition.workspace      = true
+rust-version.workspace = true
+license.workspace      = true
+
+[dependencies]
+lyra-proto = { workspace = true }
+serde      = { workspace = true }
+serde_json = { workspace = true }
+redb       = { workspace = true }
+keyring    = { workspace = true }
+thiserror  = { workspace = true }
+
+[lints]
+workspace = true

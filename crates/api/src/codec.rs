@@ -1,0 +1,334 @@
+//! 上游响应宽容解码：统一字段类型归一化与有界键名检索。
+
+use std::collections::VecDeque;
+
+use serde_json::Value;
+
+use crate::error::{Error, Result};
+
+/// 有界搜索的最大深度，避免在异常响应上做无谓遍历。
+const MAX_DEPTH: u8 = 4;
+
+/// 宽容转 `i64`：数字、数字字符串都接受。
+#[must_use]
+pub fn as_i64(value: &Value) -> i64 {
+    match value {
+        Value::Number(n) => n.as_i64().or_else(|| n.as_f64().map(|f| f as i64)).unwrap_or(0),
+        Value::String(s) => s
+            .trim()
+            .parse::<i64>()
+            .or_else(|_| s.trim().parse::<f64>().map(|f| f as i64))
+            .unwrap_or(0),
+        Value::Bool(b) => i64::from(*b),
+        _ => 0,
+    }
+}
+
+/// 宽容转 `u64`。
+#[must_use]
+pub fn as_u64(value: &Value) -> u64 {
+    u64::try_from(as_i64(value)).unwrap_or(0)
+}
+
+/// 宽容转 `String`：数字会转成十进制串。
+#[must_use]
+pub fn as_str(value: &Value) -> String {
+    match value {
+        Value::String(s) => s.clone(),
+        Value::Number(n) => n.to_string(),
+        Value::Bool(b) => b.to_string(),
+        Value::Null => String::new(),
+        other => other.to_string(),
+    }
+}
+
+/// 宽容转 `bool`：`true` / `"true"` / `1` 都算真。
+#[must_use]
+pub fn as_bool(value: &Value) -> bool {
+    match value {
+        Value::Bool(b) => *b,
+        Value::Number(n) => n.as_i64().unwrap_or(0) != 0,
+        Value::String(s) => matches!(s.as_str(), "true" | "1" | "yes"),
+        _ => false,
+    }
+}
+
+/// 按候选键名取第一个存在的字段（大小写不敏感）。
+#[must_use]
+pub fn pick<'a>(value: &'a Value, keys: &[&str]) -> Option<&'a Value> {
+    let map = value.as_object()?;
+    for key in keys {
+        if let Some(found) = map.get(*key) {
+            return Some(found);
+        }
+    }
+    for (k, v) in map {
+        if keys.iter().any(|want| k.eq_ignore_ascii_case(want)) {
+            return Some(v);
+        }
+    }
+    None
+}
+
+/// 按候选键名取字符串。
+#[must_use]
+pub fn pick_str(value: &Value, keys: &[&str]) -> String {
+    pick(value, keys).map(as_str).unwrap_or_default()
+}
+
+/// 按候选键名取 `i64`。
+#[must_use]
+pub fn pick_i64(value: &Value, keys: &[&str]) -> i64 {
+    pick(value, keys).map(as_i64).unwrap_or_default()
+}
+
+/// 按候选键名取 `u64`。
+#[must_use]
+pub fn pick_u64(value: &Value, keys: &[&str]) -> u64 {
+    pick(value, keys).map(as_u64).unwrap_or_default()
+}
+
+/// 按候选**路径**取字段，例如 `&["trans_param", "union_cover"]`。
+#[must_use]
+pub fn pick_path<'a>(value: &'a Value, path: &[&str]) -> Option<&'a Value> {
+    let mut node = value;
+    for segment in path {
+        node = pick(node, &[*segment])?;
+    }
+    Some(node)
+}
+
+/// 按候选路径列表取第一个能取到的字符串。
+#[must_use]
+pub fn pick_str_paths(value: &Value, paths: &[&[&str]]) -> String {
+    paths
+        .iter()
+        .find_map(|path| pick_path(value, path))
+        .map(as_str)
+        .unwrap_or_default()
+}
+
+/// 按候选路径列表取第一个能取到的 `i64`。
+#[must_use]
+pub fn pick_i64_paths(value: &Value, paths: &[&[&str]]) -> i64 {
+    paths
+        .iter()
+        .find_map(|path| pick_path(value, path))
+        .map(as_i64)
+        .unwrap_or_default()
+}
+
+/// 按候选路径列表取第一个能取到的 `u64`。
+#[must_use]
+pub fn pick_u64_paths(value: &Value, paths: &[&[&str]]) -> u64 {
+    paths
+        .iter()
+        .find_map(|path| pick_path(value, path))
+        .map(as_u64)
+        .unwrap_or_default()
+}
+
+/// 广度优先枚举全部键值对，受 `MAX_DEPTH` 有界限制。
+fn walk(root: &Value) -> Vec<(&str, &Value)> {
+    let mut found = Vec::new();
+    let mut queue = VecDeque::from([(root, 0_u8)]);
+    while let Some((node, depth)) = queue.pop_front() {
+        if depth > MAX_DEPTH {
+            continue;
+        }
+        match node {
+            Value::Object(map) => {
+                for (key, child) in map {
+                    found.push((key.as_str(), child));
+                    queue.push_back((child, depth + 1));
+                }
+            }
+            Value::Array(items) => {
+                for child in items {
+                    queue.push_back((child, depth + 1));
+                }
+            }
+            _ => {}
+        }
+    }
+    found
+}
+
+fn matches(key: &str, keys: &[&str]) -> bool {
+    keys.iter().any(|want| key.eq_ignore_ascii_case(want))
+}
+
+/// 任意深度查找第一个键名命中的字段。
+#[must_use]
+pub fn find<'a>(root: &'a Value, keys: &[&str]) -> Option<&'a Value> {
+    walk(root)
+        .into_iter()
+        .find(|(key, _)| matches(key, keys))
+        .map(|(_, value)| value)
+}
+
+/// 任意深度查找第一个键名命中的字符串。
+#[must_use]
+pub fn find_str(root: &Value, keys: &[&str]) -> String {
+    find(root, keys).map(as_str).unwrap_or_default()
+}
+
+/// 任意深度查找第一个键名命中的 `i64`。
+#[must_use]
+pub fn find_i64(root: &Value, keys: &[&str]) -> i64 {
+    find(root, keys).map(as_i64).unwrap_or_default()
+}
+
+/// 任意深度查找第一个键名命中的 `u64`。
+#[must_use]
+pub fn find_u64(root: &Value, keys: &[&str]) -> u64 {
+    find(root, keys).map(as_u64).unwrap_or_default()
+}
+
+/// 任意深度查找第一个键名命中的数组。
+#[must_use]
+pub fn find_array<'a>(root: &'a Value, keys: &[&str]) -> Option<&'a Vec<Value>> {
+    walk(root).into_iter().find_map(|(key, value)| match value {
+        Value::Array(items) if matches(key, keys) => Some(items),
+        _ => None,
+    })
+}
+
+/// 同 find_array，但直接返回克隆结果，取不到时为空表。
+#[must_use]
+pub fn find_array_or_empty(root: &Value, keys: &[&str]) -> Vec<Value> {
+    find_array(root, keys).cloned().unwrap_or_default()
+}
+
+/// 取上游的错误描述文本。
+#[must_use]
+pub fn error_message(value: &Value) -> String {
+    let message = pick_str(
+        value,
+        &["msg", "error", "errmsg", "message", "error_msg", "errorMessage"],
+    );
+    if message.is_empty() { value.to_string() } else { message }
+}
+
+/// 判定上游响应是否业务失败（显式 status 为 0 或 error_code 非 0）。
+pub fn check_business(value: &Value) -> Result<()> {
+    let status_failed = pick(value, &["status"]).is_some_and(|status| as_i64(status) == 0);
+    let code_failed = pick(value, &["error_code"]).is_some_and(|code| as_i64(code) != 0);
+    if !status_failed && !code_failed {
+        return Ok(());
+    }
+    Err(Error::Upstream {
+        code: pick_i64(value, &["error_code"]),
+        message: error_message(value),
+    })
+}
+
+/// 「HTTP 状态 + JSON 体」的标准响应校验。
+pub fn check_response(status: u16, body: &[u8]) -> Result<Value> {
+    if !(200..300).contains(&status) {
+        return Err(Error::Http {
+            status,
+            body: truncate(&String::from_utf8_lossy(body), 512),
+        });
+    }
+    let value: Value = serde_json::from_slice(body).map_err(|e| {
+        Error::Decode(format!(
+            "invalid json body: {e}; head={}",
+            truncate(&String::from_utf8_lossy(body), 200)
+        ))
+    })?;
+    check_business(&value)?;
+    Ok(value)
+}
+
+fn truncate(text: &str, max: usize) -> String {
+    if text.chars().count() <= max {
+        return text.to_owned();
+    }
+    let head: String = text.chars().take(max).collect();
+    format!("{head}…")
+}
+
+#[cfg(test)]
+mod tests {
+    #![allow(clippy::unwrap_used, clippy::float_cmp)]
+
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn coerces_numbers_and_strings() {
+        assert_eq!(as_i64(&json!(12)), 12);
+        assert_eq!(as_i64(&json!("12")), 12);
+        assert_eq!(as_i64(&json!(12.9)), 12);
+        assert_eq!(as_u64(&json!("7")), 7);
+        assert_eq!(as_str(&json!(9)), "9");
+        assert!(as_bool(&json!("true")));
+        assert!(as_bool(&json!(1)));
+        assert!(!as_bool(&json!("false")));
+    }
+
+    #[test]
+    fn picks_by_candidate_keys_case_insensitively() {
+        let v = json!({"SongName": "x", "timelen": "3000"});
+        assert_eq!(pick_str(&v, &["songname"]), "x");
+        assert_eq!(pick_i64(&v, &["duration", "timelen"]), 3000);
+    }
+
+    #[test]
+    fn picks_by_path() {
+        let v = json!({"trans_param": {"union_cover": "http://c/1.jpg"}});
+        assert_eq!(pick_str_paths(&v, &[&["trans_param", "union_cover"]]), "http://c/1.jpg");
+        assert_eq!(
+            pick_str_paths(&v, &[&["img"], &["trans_param", "union_cover"]]),
+            "http://c/1.jpg"
+        );
+    }
+
+    #[test]
+    fn finds_arrays_at_any_depth_by_candidate_key() {
+        let v = json!({"data": {"song_list": [1, 2, 3]}});
+        assert_eq!(find_array(&v, &["song_list", "songs"]).unwrap().len(), 3);
+        let nested = json!({"data": {"info": {"songs": [{"hash": "a"}]}}});
+        assert_eq!(find_array(&nested, &["songs"]).unwrap().len(), 1);
+        assert!(find_array(&json!({"data": {}}), &["songs"]).is_none());
+    }
+
+    #[test]
+    fn honours_depth_limit() {
+        let deep = json!({"a": {"b": {"c": {"d": {"e": {"songs": [1]}}}}}});
+        assert!(find_array(&deep, &["songs"]).is_none());
+    }
+
+    #[test]
+    fn business_failure_on_zero_status() {
+        let err = check_business(&json!({"status": 0, "msg": "boom"})).unwrap_err();
+        assert!(matches!(err, Error::Upstream { code: 0, .. }));
+        assert!(check_business(&json!({"status": "0"})).is_err());
+    }
+
+    #[test]
+    fn missing_status_is_not_a_failure() {
+        // 歌词服务等接口缺省 status 时不应误判为业务失败。
+        assert!(check_business(&json!({"candidates": [{"id": 1, "accesskey": "k"}]})).is_ok());
+        assert!(check_business(&json!({"error_code": 0, "content": "x"})).is_ok());
+        assert!(check_business(&json!({"content": "x", "contenttype": 0})).is_ok());
+        assert!(check_business(&json!({})).is_ok());
+        // 显式 status=0 仍判定为失败。
+        assert!(check_business(&json!({"candidates": [], "status": 0})).is_err());
+    }
+
+    #[test]
+    fn business_failure_on_non_zero_error_code() {
+        let err = check_business(&json!({"status": 1, "error_code": 20028, "error": "验证"})).unwrap_err();
+        assert_eq!(err.code(), Some(crate::error::Code::NeedVerify));
+        assert!(check_business(&json!({"status": 1, "error_code": 0})).is_ok());
+        assert!(check_business(&json!({"status": 1})).is_ok());
+    }
+
+    #[test]
+    fn http_status_is_rejected() {
+        let err = check_response(502, b"nope").unwrap_err();
+        assert!(matches!(err, Error::Http { status: 502, .. }));
+    }
+}

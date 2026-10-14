@@ -1,0 +1,29 @@
+[package]
+name        = "lyra-app"
+description = "酷狗概念版用例与状态机；唯一配置运行时的库"
+version.workspace      = true
+edition.workspace      = true
+rust-version.workspace = true
+license.workspace      = true
+
+[features]
+default = []
+# 打开后编译 GPUI 侧代码（Entity / 传输实现）
+gui = []
+
+[dependencies]
+lyra-proto = { workspace = true }
+lyra-api   = { workspace = true, features = ["http"] }
+lyra-store = { workspace = true }
+lyra-audio = { workspace = true }
+serde_json   = { workspace = true }
+thiserror    = { workspace = true }
+tracing      = { workspace = true }
+tokio        = { version = "1", features = ["rt-multi-thread", "macros", "time"] }
+
+[dev-dependencies]
+tempfile = { workspace = true }
+lyra-store = { workspace = true }
+
+[lints]
+workspace = true

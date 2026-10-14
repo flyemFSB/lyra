@@ -1,0 +1,33 @@
+[package]
+name        = "lyra-api"
+description = "酷狗概念版传输抽象、端点与缓存（通过 trait Transport 反转依赖，不依赖 GPUI）"
+version.workspace      = true
+edition.workspace      = true
+rust-version.workspace = true
+license.workspace      = true
+
+[features]
+default = []
+# 用 reqwest 实现 Transport：供 CLI / xtask smoke 使用。
+# GUI 侧由 lyra-app 提供基于 GPUI HttpClient 的实现，不吃这个 feature。
+http = ["dep:reqwest"]
+
+[dependencies]
+lyra-proto = { workspace = true }
+serde      = { workspace = true }
+serde_json = { workspace = true }
+thiserror  = { workspace = true }
+async-trait = { workspace = true }
+moka        = { workspace = true }
+dashmap     = { workspace = true }
+parking_lot = { workspace = true }
+async-channel = "2"
+url         = { workspace = true }
+reqwest     = { workspace = true, optional = true }
+
+[dev-dependencies]
+tokio   = { version = "1", features = ["rt", "macros", "time"] }
+futures = { workspace = true }
+
+[lints]
+workspace = true

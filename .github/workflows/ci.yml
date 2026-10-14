@@ -1,0 +1,51 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+env:
+  CARGO_TERM_COLOR: always
+  RUSTFLAGS: -D warnings
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 工具链
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - uses: Swatinem/rust-cache@v2
+
+      # 保证 §4.3 的 MSRV 声明与实际工具链一致
+      - name: 校验 rust-version
+        shell: pwsh
+        run: |
+          $declared = (Select-String -Path Cargo.toml -Pattern '^rust-version\s*=\s*"([^"]+)"').Matches[0].Groups[1].Value
+          $actual = (rustc --version) -replace '^rustc ([0-9]+\.[0-9]+).*', '$1'
+          Write-Host "declared=$declared actual=$actual"
+          if ([version]$actual -lt [version]$declared) { throw "工具链低于声明的 MSRV $declared" }
+
+      - name: 格式
+        run: cargo fmt --all --check
+
+      # 不加 --all-features：会把 gpui-kit 的 tree-sitter-* 全打开
+      - name: Clippy
+        run: cargo clippy --workspace --all-targets -- -D warnings
+
+      - name: 测试（全部离线，不需要账号）
+        run: cargo test --workspace
+
+      # §3.2 的约定：只允许 rustls+ring，禁止 OpenSSL / native-tls
+      - name: 依赖审计
+        run: cargo run -p xtask -- audit
+
+      - name: 许可证与安全公告
+        run: |
+          cargo install cargo-deny --locked
+          cargo deny check

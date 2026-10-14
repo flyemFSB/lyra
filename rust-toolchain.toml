@@ -1,0 +1,5 @@
+# 本机默认工具链即 1.99.0（stable）。此处不写死版本号，避免 rustup 额外下载一份
+# 同版本工具链；CI 里通过 Cargo.toml 的 rust-version 与 `rustup show` 核对。
+[toolchain]
+channel    = "stable"
+components = ["rustfmt", "clippy", "rust-src"]

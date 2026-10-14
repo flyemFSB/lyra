@@ -1,0 +1,16 @@
+[package]
+name        = "xtask"
+description = "构建自动化：依赖审计与上游冒烟"
+version.workspace      = true
+edition.workspace      = true
+rust-version.workspace = true
+license.workspace      = true
+
+[dependencies]
+lyra-app = { workspace = true }
+anyhow   = { workspace = true }
+tokio    = { version = "1", features = ["rt-multi-thread", "macros"] }
+tracing-subscriber = { workspace = true }
+
+[lints]
+workspace = true
