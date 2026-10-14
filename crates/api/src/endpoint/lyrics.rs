@@ -20,11 +20,12 @@ pub struct LyricRef {
 
 /// 第一阶段：根据音频特征搜索歌词候选并提取首个匹配项。
 pub async fn search_lyric(api: &Api, hash: &str, duration_ms: u64, album_audio_id: &str) -> Result<LyricRef> {
-    // 歌词搜索使用独立参数配置并不附加全局签名。
+    // 歌词搜索使用独立参数集（不带全局默认参数），但**必须签名**：
+    // 参考实现里写的 `notSign: true` 是死参数（request.js 读的是 `notSignature`），
+    // 它实际一直带着 signature。实测不带 → 上游 200 + **空响应体**，解析直接失败。
     let spec = RequestSpec::get("/v1/search")
         .base(LYRICS_BASE)
         .clear_default_params()
-        .no_signature()
         .param("album_audio_id", album_audio_id)
         .param("appid", lyra_proto::consts::APPID)
         .param("clientver", lyra_proto::consts::CLIENTVER)
@@ -231,9 +232,17 @@ mod tests {
         assert_eq!(lines.len(), 1);
         assert_eq!(lines[0].text, "一群嗜血的蚂蚁");
 
-        // 校验歌词请求未携带全局签名。
+        // 校验歌词搜索带签名且使用独立参数集。
         let search_request = mock.requests().first().cloned().unwrap();
-        assert!(search_request.query.iter().all(|(k, _)| k != "signature"));
+        assert!(
+            search_request.query.iter().any(|(k, _)| k == "signature"),
+            "歌词搜索必须签名，否则上游回空响应体: {:?}",
+            search_request.query
+        );
         assert!(search_request.query.iter().any(|(k, _)| k == "appid"));
+        assert!(
+            !search_request.query.iter().any(|(k, _)| k == "mid"),
+            "歌词搜索用独立参数集，不带全局默认参数"
+        );
     }
 }

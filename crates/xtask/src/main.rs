@@ -139,6 +139,19 @@ fn audit() -> anyhow::Result<()> {
         report.schannel_is_only_a_cert_reader(),
         "native-tls 与 schannel 同时存在 —— TLS 握手可能已交给系统后端"
     );
+
+    // keyring 不带后端 feature 时会静默使用进程内 mock：token 写入“成功”但换进程就丢，
+    // 表现为每次启动都是未登录。这里钉死后端确实被启用。
+    let features = Command::new(env!("CARGO"))
+        .args(["tree", "-e", "features", "-i", "keyring", "--prefix", "none"])
+        .output()?;
+    let features = String::from_utf8_lossy(&features.stdout);
+    anyhow::ensure!(
+        features.contains("windows-native"),
+        "keyring 没有启用 windows-native 后端，凭据会落到进程内 mock（登录态不会持久化）。\n\
+         cargo tree -e features -i keyring 输出：\n{features}"
+    );
+
     println!("\n✅ 未发现被禁用的 C 实现依赖");
     Ok(())
 }

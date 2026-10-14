@@ -3,7 +3,7 @@
 use std::io::{ErrorKind as IoErrorKind, Read, Seek, SeekFrom};
 use std::sync::Mutex;
 
-use symphonia::core::audio::SampleBuffer;
+use symphonia::core::audio::{AudioBufferRef, SampleBuffer};
 use symphonia::core::codecs::{CODEC_TYPE_NULL, Decoder as SymphoniaDecoder, DecoderOptions};
 use symphonia::core::errors::Error as SymphoniaError;
 use symphonia::core::formats::{FormatOptions, FormatReader, SeekMode, SeekTo};
@@ -184,10 +184,10 @@ impl Decoder {
 
             match self.codec.decode(&packet) {
                 Ok(audio) => {
-                    let spec = *audio.spec();
-                    let mut buf = SampleBuffer::<f32>::new(audio.frames() as u64, spec);
-                    buf.copy_interleaved_ref(audio);
-                    return Ok(Some(buf.samples().to_vec()));
+                    if let Some(samples) = interleave(&audio) {
+                        return Ok(Some(samples));
+                    }
+                    // 0 帧的包没有音频，继续取下一包。
                 }
                 // 忽略单帧解码损坏，继续尝试解码下一包
                 Err(SymphoniaError::DecodeError(_)) => {}
@@ -218,6 +218,20 @@ impl Decoder {
         self.codec.reset();
         Ok(())
     }
+}
+
+/// 把解码缓冲拷成交织 `f32`。
+///
+/// 0 帧的包必须返回 `None`：Ogg Vorbis 的首个音频包就可能是 0 帧，而 symphonia 的
+/// `copy_interleaved_ref` 在「0 帧 + 多声道」时会拿空的 `SampleBuffer` 去索引第 1 个声道，
+/// 直接 `panic`（实测：点播 128k 的 `.ogg` 会立即打挂解码线程）。
+fn interleave(audio: &AudioBufferRef<'_>) -> Option<Vec<f32>> {
+    if audio.frames() == 0 {
+        return None;
+    }
+    let mut buf = SampleBuffer::<f32>::new(audio.frames() as u64, *audio.spec());
+    buf.copy_interleaved_ref(audio.clone());
+    Some(buf.samples().to_vec())
 }
 
 /// 一次性解码整条流，主要用于测试与短音频。
@@ -266,6 +280,19 @@ mod tests {
         }
         file.seek(SeekFrom::Start(0)).unwrap();
         Box::new(file)
+    }
+
+    #[test]
+    fn zero_frame_packets_are_skipped_instead_of_panicking() {
+        // Ogg Vorbis 的首个音频包可能就是 0 帧；symphonia 的 copy_interleaved_ref
+        // 会拿容量为 0 的 SampleBuffer 去索引第 1 个声道，直接 panic。
+        use std::borrow::Cow;
+        use symphonia::core::audio::{AudioBuffer, Channels, Signal, SignalSpec};
+
+        let spec = SignalSpec::new(44_100, Channels::FRONT_LEFT | Channels::FRONT_RIGHT);
+        let empty = AudioBuffer::<f32>::new(0, spec);
+        assert_eq!(empty.frames(), 0);
+        assert!(interleave(&AudioBufferRef::F32(Cow::Borrowed(&empty))).is_none());
     }
 
     #[test]

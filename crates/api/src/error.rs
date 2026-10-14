@@ -74,6 +74,12 @@ pub enum Error {
     /// 需要行为验证，但重试一次后仍然失败。
     #[error("upstream still requires verification after retry (ssa-code={0})")]
     NeedsVerify(String),
+    /// 上游返回成功状态，但客户端需要的字段缺失。
+    ///
+    /// 设备注册实测会返回 `{"status":1,"error_code":0,"data":[]}`：既非业务错误，也无法使用，
+    /// 需要调用方隔一小段时间重试一次。
+    #[error("empty data: {0}")]
+    EmptyData(String),
     /// 未登录但该端点需要登录态。
     #[error("login required")]
     NotLoggedIn,

@@ -168,8 +168,20 @@ impl Kugou {
         if mobile.trim().len() < 11 {
             return Err(Error::Invalid("手机号至少 11 位".to_owned()));
         }
+        // 上游对「无 dfid 的新设备」发码极易触发风控，因此先补齐设备指纹。
+        self.ensure_device_registered().await;
         let value = session::send_mobile_code(&self.api, mobile).await?;
         Ok(lyra_api::codec::find_u64(&value, &["count"]))
+    }
+
+    /// 无 dfid 时先注册设备；失败只告警，不阻断发码（缺 dfid 不是硬性前置）。
+    async fn ensure_device_registered(&self) {
+        if self.api.session().dfid() != "-" {
+            return;
+        }
+        if let Err(error) = self.register_device().await {
+            tracing::warn!(%error, "发码前设备注册失败，继续尝试发送");
+        }
     }
 
     /// 短信验证码登录并持久化凭据。
@@ -190,8 +202,10 @@ impl Kugou {
             vip_type: account.vip_type,
             vip_token: account.vip_token.clone(),
         }));
-        // 登录后注册设备获取设备指纹。
-        let _ = self.register_device().await;
+        // 登录后注册设备获取设备指纹；失败不阻断登录，但必须留下痕迹。
+        if let Err(error) = self.register_device().await {
+            tracing::warn!(%error, "登录后设备注册失败，dfid 缺失会影响取播放地址");
+        }
         Ok(account)
     }
 
@@ -203,15 +217,42 @@ impl Kugou {
     }
 
     /// 注册设备并持久化指纹信息。
+    ///
+    /// 上游对新身份偶发返回 `{"status":1,"data":[]}`（既非业务错误也不可用），实测约 1 秒后
+    /// 重试即可拿到 dfid，因此这里做有限重试；dfid 缺失会让后续请求被风控拦，必须拿到。
     pub async fn register_device(&self) -> Result<String> {
-        let dfid = session::register_dev(&self.api, None).await?;
-        let mut device = self.api.session().device;
-        device.dfid.clone_from(&dfid);
-        self.store.set_device(&device)?;
-        let mut session = self.api.session();
-        session.device = device;
-        self.api.set_session(session);
-        Ok(dfid)
+        const ATTEMPTS: u32 = 3;
+        const RETRY_DELAY: std::time::Duration = std::time::Duration::from_millis(1_200);
+
+        let mut last_error = None;
+        for attempt in 1..=ATTEMPTS {
+            match session::register_dev(&self.api, None).await {
+                Ok(dfid) => {
+                    let mut device = self.api.session().device;
+                    device.dfid.clone_from(&dfid);
+                    self.store.set_device(&device)?;
+                    let mut session = self.api.session();
+                    session.device = device;
+                    self.api.set_session(session);
+                    return Ok(dfid);
+                }
+                // 只有「成功状态但数据为空」值得重试；其余错误立即上报，避免无谓等待。
+                Err(error) => {
+                    let retryable = matches!(error, lyra_api::Error::EmptyData(_));
+                    last_error = Some(error);
+                    if !retryable {
+                        break;
+                    }
+                }
+            }
+            if attempt < ATTEMPTS {
+                tokio::time::sleep(RETRY_DELAY).await;
+            }
+        }
+        Err(last_error.map_or_else(
+            || Error::Api("设备注册未返回 dfid".to_owned()),
+            |error| Error::Api(error.to_string()),
+        ))
     }
 
     /// 获取当前登录用户的详细资料。

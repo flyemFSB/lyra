@@ -768,12 +768,47 @@ GUI 实测可启动：窗口句柄非零、标题 `lyra · 酷狗概念版`、st
 | `client::ssa_header_alone_triggers_the_retry` | 只有 `ssa-code`（无 20028）也必须重试 |
 | `model::song_url_reads_the_string_array_form_used_by_tracker_v5` | 字符串数组 + 顶层元数据 + `timeLength` 秒换算 |
 
-## 仍未验证的
+## 第三轮修复（真实账号全链路实测）
 
-- 上游是否真有无 `status` 的响应 —— 已确认存在：`/tracker/v5/url` 的响应体只有 `status`，
-  错误体用 `errcode` 而非 `error_code`（见上表 #4）；歌词下载端点仍待真实账号复核。
+用真实账号（15558649901）把全部功能跑了一遍，又抓出 7 个离线测试无法暴露的问题：
+
+| # | 问题 | 真实上游证据 | 修法 |
+|---|---|---|---|
+| 1 | **登录态根本没落盘** | `keyring 3.x` 没有 default feature；不显式开 `windows-native` 时，它在 Windows 上**静默**用进程内 mock —— `set` 返回 Ok、换进程就丢。表现：`login` 成功、新进程 `whoami` 显示「登录：否」，`playlists` 报「需要先登录」，`cmdkey /list` 里没有 `lyra.kugou` 条目 | 工作区依赖加 `features = ["windows-native"]`；`xtask audit` 增加「keyring 必须启用 windows-native」断言 |
+| 2 | 发码端点用的是**旧协议** | 旧 `/v7/send_mobile_code` 明文 `{businessid,mobile,plat:3}` 实测稳定回 `20006`；现行是 **`/v8/send_mobile_code`**：完整号码 AES 进 `params`、`pk` 用 RSA 无填充包裹临时密钥、`plat` 是**字符串** `"1"`、带毫秒 `clienttime_ms` | 重写 `send_mobile_code`（与登录同构的密码学） |
+| 3 | 登录/发码/验证类端点被加了**缓存扰动参数** | `Freshness::SideEffect` 会追加未签名的 `_lyra_t`，登录服务直接判签名失败。实测同一请求：去掉 `_lyra_t` → `{"status":1,"data":{"count":7}}`（短信真的发出） | 新增 `Api::call_auth`（`NoStore`、无扰动），发码/登录/人机验证改用它；cloudlist 那种内容端点保留扰动 |
+| 4 | 每日 VIP 领取同样被扰动坑（`20006 err signature`） | 修复后改为返回业务码（本账号今天已领过，回 `297002` 幂等成功） | `claim_daily_vip` 改用 `call_auth` |
+| 5 | 歌词第一步**漏签名** | `/v1/search` 不带 `signature` 时上游回 **200 + 空响应体**（UI 里就是 `invalid json body: EOF`）；带签名则返回 candidates。参考实现写的 `notSign: true` 是**死参数**（request.js 读的是 `notSignature`） | 去掉 `.no_signature()`；补「必须签名」回归测试 |
+| 6 | 电台频道**永远 0 首** | 响应是 `{"data":[{"fmid":…,"songs":[…]}]}`，而候选键里包含 `data` → BFS 先命中顶层 `data` 数组，每首歌都解析失败 | `fm_songs` 只取内层 `songs`/`song_list`；测试桩改成真实形态 |
+| 7 | **点播即挂解码线程** | `thread 'lyra-audio' panicked at symphonia-core/src/audio.rs:856: range start index 1 out of range for slice of length 0`。Ogg Vorbis 的首个音频包可能 0 帧，而 `copy_interleaved_ref` 会拿容量为 0 的 `SampleBuffer` 索引第 1 个声道 | 抽出 `interleave()`：0 帧直接跳过；补回归测试 |
+
+另：`register_dev` 实测会以 `200 + status=1 + data:[]` 拒绝新身份（约 1 秒后重试即可拿到 dfid），
+新增 `Error::EmptyData` + 应用层有限重试（1.2s×3），登录后注册失败也不再被静默丢弃（改为 `warn!`）。
+
+### 账号侧实测结果（15558649901）
+
+- 登录成功（`userid=2043841403`）；**新进程仍是登录态**（凭据在 Windows 凭据管理器：`2043841403.lyra.kugou`）
+- `playlists` 4 个（默认收藏 0 / 我喜欢 251 / Jay 102 / 哈基米 241）
+- `tracks` 正常分页（100/页 + 游标），时长字段有值（`225000ms` 等）
+- `rights` 音质矩阵正常（128 可获取、320/flac 需 concept、viper_* 需 suvip）
+- `url` 拿得到签名直链，`download` 落盘 2.7MB、文件头 `OggS` ✓
+- GUI：歌单/电台/歌词/设置四个页面全部正常；歌词能拿到真实逐行歌词并高亮当前行
+- `claim` 今日已领（`297002`）→ 到账效果需次日再验
+- 播放条不显示（见「仍未验证的」第一条）
+
+- **播放条（PlayerBar）在窗口里不绘制** —— 已定位到具体现象但**尚未修复**，证据如下：
+  - `AppShell::render` 的根 `v_flex` 里，播放条位于**尾部**时拿不到高度：同一份代码把播放条改成**第一个子项**，
+    它 78px 完整渲染（封面 / 未在播放 / ⏮▶⏭ / 进度与时间全部正常，已抓图确认）；放回尾部就是 0 高、完全不绘制。
+  - 已排除的原因（均实测无效果）：`h()` 值（78/96/130/200 全不可见，400 可见）、`flex_none()`、`flex_shrink_0()`、
+    `flex_basis` + `flex_grow(0)/flex_shrink(0)`、`overflow_hidden()`、`absolute()+bottom_0()`、
+    根元素改用 `viewport_size()` 写死尺寸、`flex_col_reverse()`、去掉子项的百分比高度。
+  - 工作假设：内容行的 `min-height: auto`（内容自动最小高度）吃掉整窗高度，尾部子项只能被压成 0；
+    但为什么 `min_h(px(0.0))` / 显式高度都压不住它，需要看 taffy 在 gpui-pre 这一版的实现。
+  - 影响：进度条 / 音量 / 上一首 / 下一首 / 播放暂停在当前构建里点不到（音频本身能播，只是没有控件）。
+  - 验证手法（可复用）：`PrintWindow(hwnd, hdc, 2)` 抓窗口 + `PostMessage(WM_LBUTTONDOWN/UP)` 无侵入点击；
+    注意 `PrintWindow` 抓的是整窗（含标题栏），客户区偏移用 `ClientToScreen(0,0) - GetWindowRect` 算。
+- 需要登录账号的功能中，**歌单增删**、**会员历史**仍未在真实账号上跑过（其余已跑完，见上）。
 - audio 的尾音/seek 修复需要**有声卡实机**听自然结尾才能确认听感。
-- 需要登录账号的功能（歌单增删、VIP 领取、歌词两步链路、云歌单双加密通道）仍只有离线桩覆盖。
 
 ### 验证命令
 

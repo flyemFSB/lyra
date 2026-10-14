@@ -4,7 +4,7 @@
 
 use std::sync::Arc;
 
-use lyra_api::transport::MockTransport;
+use lyra_api::transport::{MockTransport, Response};
 use lyra_app::Kugou;
 
 /// 构造测试登录响应桩。
@@ -165,6 +165,21 @@ async fn upstream_business_error_surfaces_instead_of_panicking() {
     app.login("13800138000", "123456").await.unwrap();
     let error = app.playlists().await.unwrap_err();
     assert!(format!("{error}").contains("上游炸了"), "{error}");
+}
+
+#[tokio::test(start_paused = true)]
+async fn device_registration_retries_while_upstream_returns_empty_data() {
+    let mock = Arc::new(MockTransport::new());
+    // 上游对新身份的实测行为：HTTP 200 + `{"status":1,"error_code":0,"data":[]}`
+    // （明文返回，非加密），既不是业务错误也拿不到 dfid。
+    mock.on(
+        "/risk/v2/r_register_dev",
+        Response::new(200, br#"{"status":1,"error_code":0,"data":[]}"#.to_vec()),
+    );
+    let (app, _dir) = app(mock.clone());
+    let error = app.register_device().await.unwrap_err();
+    assert_eq!(mock.count(), 3, "空表应答应重试到上限");
+    assert!(format!("{error}").contains("未返回 dfid"), "{error}");
 }
 
 #[tokio::test]

@@ -386,7 +386,8 @@ pub async fn claim_daily_vip(api: &Api) -> Result<VipClaim> {
         .param("kugouid", session.userid())
         .param("ad_type", 1);
 
-    match api.call(spec, Freshness::SideEffect).await {
+    // 领取是账号侧写操作：不能带毫秒扰动，上游对多出的未签名参数直接回 `20006 err signature`。
+    match api.call_auth(spec).await {
         Ok(value) => Ok(VipClaim {
             already_claimed: false,
             recharge_hours: codec::pick_u64_paths(&value, &[&["data", "recharge_hours"][..], &["recharge_hours"][..]]),
@@ -609,6 +610,12 @@ mod tests {
         assert_eq!(
             request.query.iter().find(|(k, _)| k == "kugouid").unwrap().1,
             "2043841403"
+        );
+        // 账号侧写操作不能带毫秒扰动：上游会回 20006 err signature。
+        assert!(
+            !request.query.iter().any(|(k, _)| k == "_lyra_t"),
+            "{:?}",
+            request.query
         );
     }
 

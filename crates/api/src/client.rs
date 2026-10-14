@@ -104,9 +104,12 @@ impl Api {
         }
     }
 
-    /// 写操作调用，跳过 L1 缓存。
-    pub async fn call_side_effect(&self, spec: RequestSpec) -> Result<Value> {
-        self.call(spec, Freshness::SideEffect).await
+    /// 鉴权类端点调用（登录 / 发码 / 人机验证）：不缓存，且**不追加毫秒扰动**。
+    ///
+    /// 与 `Freshness::SideEffect` 的区别：登录服务会因「多出来的未签名 query 参数」直接判失败
+    /// 而 cloudlist 那类内容端点反而靠毫秒扰动绕开上游 2 分钟的响应缓存。
+    pub async fn call_auth(&self, spec: RequestSpec) -> Result<Value> {
+        self.call(spec, Freshness::NoStore).await
     }
 
     /// 生成行为指纹 `(edt, sid)`。

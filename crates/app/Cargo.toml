@@ -24,6 +24,8 @@ tokio        = { version = "1", features = ["rt-multi-thread", "macros", "time"]
 [dev-dependencies]
 tempfile = { workspace = true }
 lyra-store = { workspace = true }
+# test-util 提供 start_paused，让重试延迟在测试里瞬时完成
+tokio = { version = "1", features = ["test-util"] }
 
 [lints]
 workspace = true

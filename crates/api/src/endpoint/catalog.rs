@@ -96,7 +96,9 @@ pub async fn fm_songs(api: &Api, fmid: &str, fmtype: u32, offset: i64, size: u32
         .header("x-router", FM_ROUTER)
         .header("Content-Type", "application/json");
     let value = api.call(spec, Freshness::CATALOG).await?;
-    Ok(codec::find_array(&value, &["songs", "song_list", "data", "list"])
+    // 响应是 `{"data":[{"fmid":…,"songs":[…]}]}`：**不能**把顶层 `data` 当候选键，
+    // 它本身就是个数组且在 BFS 里先被命中，于是每首歌都解析失败 → 永远 0 首。
+    Ok(codec::find_array(&value, &["songs", "song_list"])
         .map(|items| Song::list_from(items))
         .unwrap_or_default())
 }
@@ -157,13 +159,17 @@ mod tests {
     #[tokio::test]
     async fn songs_builds_the_fm_data_array() {
         let mock = Arc::new(MockTransport::new());
+        // 上游真实形态：`data` 是数组，歌曲在它的元素的 `songs` 里。
         mock.on_json(
             "/v1/app_song_list_offset",
-            &serde_json::json!({"status": 1, "data": {"songs": [{"name": "A", "hash": "AA"}]}}),
+            &serde_json::json!({"status": 1, "data": [
+                {"fmid": 1048, "fmtype": 2, "offset": 20, "size": 20, "songs": [{"name": "A", "hash": "AA"}]}
+            ]}),
         );
         let api = api(mock.clone());
         let songs = fm_songs(&api, "100,200", 2, 20, 20).await.unwrap();
-        assert_eq!(songs.len(), 1);
+        assert_eq!(songs.len(), 1, "必须取到内层 songs，而不是顶层 data");
+        assert_eq!(songs[0].hash, "aa");
         let body: serde_json::Value =
             serde_json::from_slice(mock.last_request().unwrap().body.as_deref().unwrap()).unwrap();
         assert_eq!(body["data"][0]["fmid"], "100");
@@ -178,7 +184,7 @@ mod tests {
         let mock = Arc::new(MockTransport::new());
         mock.on_json(
             "/v1/app_song_list_offset",
-            &serde_json::json!({"status": 1, "data": {"songs": []}}),
+            &serde_json::json!({"status": 1, "data": [{"fmid": 100, "songs": []}]}),
         );
         let api = api(mock.clone());
         fm_songs(&api, "100", 0, -5, 0).await.unwrap();

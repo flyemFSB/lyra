@@ -28,16 +28,28 @@ pub struct LoginResult {
 }
 
 /// 发送短信登录验证码。
+///
+/// 旧开源实现用 `POST /v7/send_mobile_code` 明文 `{businessid,mobile,plat:3}`，
+/// 上游现已对该形态直接回 `20006`；现行协议是 **`/v8/send_mobile_code`**：
+/// 完整号码 AES 进 `params`，外层 `mobile` 打码，`pk` 用 RSA 包裹本次的临时密钥，
+/// `plat` 是**字符串** `"1"`，并带毫秒 `clienttime_ms`。
 pub async fn send_mobile_code(api: &Api, mobile: &str) -> Result<Value> {
-    let spec = RequestSpec::post("/v7/send_mobile_code")
+    let date_time = now_millis();
+    let encrypted = aes_encrypt_derived(&serde_json::json!({ "mobile": mobile }).to_string())?;
+    // pk 与登录同构：RSA 无填充包裹 `{clienttime_ms,key}`，输出大写 hex。
+    let pk_plain = serde_json::json!({ "clienttime_ms": date_time, "key": encrypted.key }).to_string();
+    let spec = RequestSpec::post("/v8/send_mobile_code")
         .base(CAPTCHA_BASE)
         .body(serde_json::json!({
+            "plat": "1",
             "businessid": 5,
-            "mobile": mobile,
-            "plat": 3,
+            "clienttime_ms": date_time,
+            "pk": rsa_raw_encrypt_hex(pk_plain.as_bytes(), RSA_PUBLIC)?.to_uppercase(),
+            "mobile": mask_mobile(mobile),
+            "params": encrypted.hex,
         }))
         .timeout(std::time::Duration::from_secs(20));
-    api.call_side_effect(spec).await
+    api.call_auth(spec).await
 }
 
 /// 使用手机号与短信验证码执行登录。
@@ -88,7 +100,7 @@ pub async fn login_cellphone(api: &Api, mobile: &str, code: &str) -> Result<Logi
         .header("User-Agent", UA_LOGIN)
         .timeout(std::time::Duration::from_secs(30));
 
-    let value = api.call_side_effect(spec).await?;
+    let value = api.call_auth(spec).await?;
     parse_login(&value, &encrypted.key)
 }
 
@@ -227,7 +239,9 @@ pub async fn register_dev(api: &Api, extra: Option<Value>) -> Result<String> {
     codec::check_business(&value)?;
     let dfid = codec::pick_str_paths(&value, &[&["data", "dfid"], &["dfid"]]);
     if dfid.is_empty() {
-        return Err(Error::Decode("register_dev 未返回 dfid".to_owned()));
+        // 上游会以 200 + status=1 回 `data:[]`（约 1 秒后重试即可拿到 dfid），
+        // 带上响应体便于上层判断与排查。
+        return Err(Error::EmptyData(format!("register_dev 未返回 dfid: {text}")));
     }
     Ok(dfid)
 }
@@ -262,7 +276,7 @@ pub async fn verify_user_info(api: &Api, sid: &str, edt: &str, verifycode: &str,
         .param("clientver", 11_510)
         .body(body)
         .timeout(std::time::Duration::from_secs(30));
-    api.call_side_effect(spec).await
+    api.call_auth(spec).await
 }
 
 /// 获取当前登录用户的基本信息与关系数据。
@@ -335,6 +349,20 @@ mod tests {
             matches!(error, Error::Upstream { code: 20_006, .. }),
             "应当暴露上游错误码：{error:?}"
         );
+    }
+
+    #[tokio::test]
+    async fn register_dev_flags_empty_data_as_retryable() {
+        // 上游对新身份实测返回 200 + `{"status":1,"error_code":0,"data":[]}`：
+        // 既不是业务错误（status/error_code 都正常），也拿不到 dfid，必须让上层重试。
+        let mock = Arc::new(MockTransport::new());
+        mock.on(
+            "/risk/v2/r_register_dev",
+            crate::transport::Response::new(200, br#"{"status":1,"error_code":0,"data":[]}"#.to_vec()),
+        );
+        let api = Api::new(mock, session(), 64);
+        let error = register_dev(&api, None).await.unwrap_err();
+        assert!(matches!(error, Error::EmptyData(_)), "{error:?}");
     }
 
     #[tokio::test]
@@ -423,22 +451,40 @@ mod tests {
         assert!(body["params"].as_str().unwrap().len() > 32);
         assert_eq!(request.get_header("User-Agent"), Some(UA_LOGIN));
         assert_eq!(request.get_header("support-calm"), Some("1"));
+        // 登录服务不接受未签名参数：带上扰动 query 会被直接判失败（实测 20006）。
+        assert!(
+            !request.query.iter().any(|(k, _)| k == "_lyra_t"),
+            "{:?}",
+            request.query
+        );
     }
 
     #[tokio::test]
-    async fn send_mobile_code_uses_the_http_login_host() {
+    async fn send_mobile_code_uses_the_v8_crypto_shape() {
         let mock = Arc::new(MockTransport::new());
-        mock.on_json("/v7/send_mobile_code", &serde_json::json!({"status": 1, "count": 8}));
+        mock.on_json("/v8/send_mobile_code", &serde_json::json!({"status": 1, "count": 8}));
         let api = Api::new(mock.clone(), session(), 8);
         send_mobile_code(&api, "13800138000").await.unwrap();
         let request = mock.last_request().unwrap();
         assert!(
-            request.url.starts_with("http://login.user.kugou.com/"),
+            request.url.starts_with("http://login.user.kugou.com/v8/"),
             "{}",
             request.url
         );
         let body: Value = serde_json::from_slice(request.body.as_deref().unwrap()).unwrap();
         assert_eq!(body["businessid"], 5);
-        assert_eq!(body["plat"], 3);
+        assert_eq!(body["plat"], "1", "官方 v8 的 plat 是字符串");
+        assert!(
+            !request.query.iter().any(|(k, _)| k == "_lyra_t"),
+            "带扰动会被登录服务判失败（实测 20006）: {:?}",
+            request.query
+        );
+        assert!(body["clienttime_ms"].is_number());
+        assert!(body["pk"].as_str().unwrap().len() >= 128, "pk 应为 RSA 密文 hex");
+        assert_ne!(body["mobile"], "13800138000", "外层 mobile 必须打码");
+        // params 是本次临时密钥加密的完整号码，长度必须是 AES 块的整数倍。
+        let params = body["params"].as_str().unwrap();
+        assert!(!params.is_empty() && params.len().is_multiple_of(32), "{params}");
+        assert!(params.bytes().all(|b| b.is_ascii_hexdigit()), "{params}");
     }
 }

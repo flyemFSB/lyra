@@ -75,7 +75,9 @@ futures            = "0.3"
 async-trait        = "0.1"
 parking_lot        = "0.12"
 crossbeam-channel  = "0.5"
-keyring            = "3"
+# keyring 3.x 没有 default feature：不显式选后端时，Windows 上会**静默**回退到进程内 mock
+# （`set` 返回 Ok、换进程就取不到）—— 登录态看似写成功却从未落盘。xtask audit 会钉死这一项。
+keyring            = { version = "3", features = ["windows-native"] }
 url                = "2"
 reqwest            = { version = "0.12", default-features = false, features = ["rustls-tls-native-roots", "http2", "json", "charset"] }
 
