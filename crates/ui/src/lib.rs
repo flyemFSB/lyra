@@ -28,13 +28,10 @@ pub fn run() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         let events_tx = tx.clone();
         let events = Box::new(move |event: lyra_audio::Event| {
             let msg = match event {
-                lyra_audio::Event::Ended => Some(bridge::Msg::AudioEnded),
-                lyra_audio::Event::Failed { message } => Some(bridge::Msg::AudioFailed(message)),
-                _ => None,
+                lyra_audio::Event::Ended => bridge::Msg::AudioEnded,
+                lyra_audio::Event::Failed { message } => bridge::Msg::AudioFailed(message),
             };
-            if let Some(msg) = msg {
-                let _ = events_tx.send(msg);
-            }
+            let _ = events_tx.send(msg);
         });
         let _ = kugou.attach_audio(events)?;
         Ok::<_, lyra_app::Error>(Backend::new(kugou, handle.clone(), tx.clone()))

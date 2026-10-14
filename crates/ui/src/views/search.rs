@@ -26,6 +26,8 @@ pub(crate) struct SearchView {
     /// 是否已触发过搜索请求。
     searched: bool,
     error: Option<SharedString>,
+    /// 请求序号：只有最新一次搜索的响应才允许落地。
+    request_seq: u64,
     _subs: Vec<Subscription>,
 }
 
@@ -52,6 +54,7 @@ impl SearchView {
             loading: false,
             searched: false,
             error: None,
+            request_seq: 0,
             _subs: vec![sub],
         }
     }
@@ -64,15 +67,20 @@ impl SearchView {
         }
         self.loading = true;
         self.error = None;
+        self.request_seq += 1;
+        let seq = self.request_seq;
         cx.notify();
 
         let app = self.backend.app();
         self.backend
-            .spawn(async move { Msg::Search(app.search(&keyword, 1).await.map_err(|error| error.to_string())) });
+            .spawn(async move { Msg::Search(seq, app.search(&keyword, 1).await.map_err(|error| error.to_string())) });
     }
 
-    /// 响应处理歌曲搜索结果。
-    pub(crate) fn on_search(&mut self, result: Result<Vec<Song>, String>, cx: &mut Context<Self>) {
+    /// 响应处理歌曲搜索结果；过期响应直接丢弃，避免旧关键词的结果盖住新的。
+    pub(crate) fn on_search(&mut self, seq: u64, result: Result<Vec<Song>, String>, cx: &mut Context<Self>) {
+        if seq != self.request_seq {
+            return;
+        }
         self.loading = false;
         self.searched = true;
         match result {

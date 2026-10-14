@@ -3,7 +3,6 @@
 use gpui_kit::component::ActiveTheme as _;
 use gpui_kit::component::button::{Button, ButtonVariants};
 use gpui_kit::component::input::{Input, InputState};
-use gpui_kit::component::slider::{Slider, SliderEvent, SliderState, SliderValue};
 use gpui_kit::component::{Sizable as _, h_flex, v_flex};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
@@ -30,7 +29,6 @@ pub(crate) struct SettingsView {
     quality: String,
     cache_dir: Entity<InputState>,
     max_cache_bytes: u64,
-    volume_slider: Entity<SliderState>,
     vip: Option<VipStatus>,
     loaded: bool,
     /// 最近一次操作的提示反馈信息。
@@ -52,32 +50,20 @@ impl SettingsView {
         let max_cache_bytes = settings
             .as_ref()
             .map_or(DEFAULT_MAX_CACHE_BYTES, |value| value.max_cache_bytes);
-        let volume = settings.as_ref().map_or(0.8, |value| value.volume);
-
         let cache_dir = cx.new(|cx| {
             InputState::new(window, cx)
                 .placeholder("留空使用默认缓存目录")
                 .default_value(cache_dir_value)
         });
-        let volume_slider = cx.new(|_| SliderState::new().min(0.0).max(1.0).step(0.01).default_value(volume));
-        let volume_sub = cx.subscribe(&volume_slider, |this, _state, event: &SliderEvent, _cx| {
-            let (value, persist) = match event {
-                SliderEvent::Change(value) => (*value, false),
-                SliderEvent::Release(value) => (*value, true),
-            };
-            this.apply_volume(single(value), persist);
-        });
-
         Self {
             backend,
             quality,
             cache_dir,
             max_cache_bytes,
-            volume_slider,
             vip: None,
             loaded: false,
             last_action: None,
-            _subs: vec![volume_sub],
+            _subs: Vec::new(),
         }
     }
 
@@ -205,26 +191,6 @@ impl SettingsView {
         cx.notify();
     }
 
-    /// 调整音量并在释放滑块时保存配置。
-    fn apply_volume(&self, value: f32, persist: bool) {
-        let value = value.clamp(0.0, 1.0);
-        if let Some(engine) = self.backend.engine() {
-            engine.set_volume(value);
-        }
-        if persist {
-            let app = self.backend.app();
-            self.backend.spawn(async move {
-                match app.settings().and_then(|mut settings| {
-                    settings.volume = value;
-                    app.set_settings(&settings)
-                }) {
-                    Ok(()) => Msg::Noop,
-                    Err(error) => Msg::Toast(format!("保存音量失败: {error}")),
-                }
-            });
-        }
-    }
-
     /// 生成会员状态展示文案。
     fn vip_label(&self) -> &'static str {
         match &self.vip {
@@ -232,14 +198,6 @@ impl SettingsView {
             Some(_) => "未开通畅听 VIP",
             None => "会员状态获取中…",
         }
-    }
-}
-
-/// 提取单值滑块的浮点数值。
-fn single(value: SliderValue) -> f32 {
-    match value {
-        SliderValue::Single(single) => single,
-        SliderValue::Range(start, _) => start,
     }
 }
 
@@ -325,8 +283,6 @@ impl Render for SettingsView {
                     .on_click(cx.listener(|view, _event, _window, cx| view.save_cache_dir(cx))),
             );
 
-        let volume_row = div().w(px(240.0)).child(Slider::new(&self.volume_slider).w_full());
-
         let vip_row = h_flex()
             .gap(px(12.0))
             .child(div().text_sm().child(SharedString::from(self.vip_label())))
@@ -381,9 +337,12 @@ impl Render for SettingsView {
                     .min_h(px(0.0))
                     .overflow_y_scroll()
                     .child(Self::section("音质", quality_row.into_any_element(), cx))
-                    .child(Self::section("缓存目录", cache_row.into_any_element(), cx))
+                    .child(Self::section(
+                        "缓存目录（重启后生效）",
+                        cache_row.into_any_element(),
+                        cx,
+                    ))
                     .child(Self::section("缓存上限", preset_row.into_any_element(), cx))
-                    .child(Self::section("音量", volume_row.into_any_element(), cx))
                     .child(Self::section("会员", vip_row.into_any_element(), cx))
                     .child(Self::section("账号与缓存", account_row.into_any_element(), cx)),
             )

@@ -31,6 +31,8 @@ pub(crate) struct RadioView {
     catalog_error: Option<SharedString>,
     /// 频道歌曲加载错误信息。
     songs_error: Option<SharedString>,
+    /// 请求序号：只有最新一次选择频道的响应才允许落地。
+    request_seq: u64,
 }
 
 impl RadioView {
@@ -50,6 +52,7 @@ impl RadioView {
             loaded: false,
             catalog_error: None,
             songs_error: None,
+            request_seq: 0,
         }
     }
 
@@ -79,30 +82,33 @@ impl RadioView {
         cx.notify();
     }
 
-    /// 响应处理电台频道列表数据。
+    /// 响应处理电台频道列表数据（渠道目录区，错误必须落到 `catalog_error`）。
     pub(crate) fn on_stations(&mut self, result: Result<Vec<Station>, String>, cx: &mut Context<Self>) {
         self.loading_catalog = false;
         match result {
             Ok(stations) => {
                 self.stations = Arc::new(stations);
                 self.loaded = true;
-                self.songs_error = None;
+                self.catalog_error = None;
             }
-            Err(error) => self.songs_error = Some(error.into()),
+            Err(error) => self.catalog_error = Some(error.into()),
         }
         cx.notify();
     }
 
-    /// 响应处理频道歌曲列表数据。
-    pub(crate) fn on_songs(&mut self, result: Result<Vec<Song>, String>, cx: &mut Context<Self>) {
+    /// 响应处理频道歌曲列表数据（歌曲区，错误必须落到 `songs_error`）。
+    pub(crate) fn on_songs(&mut self, seq: u64, result: Result<Vec<Song>, String>, cx: &mut Context<Self>) {
+        if seq != self.request_seq {
+            return;
+        }
         self.loading_songs = false;
         match result {
             Ok(songs) => {
                 self.songs = Arc::new(songs);
                 self.sizes = row_sizes(self.songs.len());
-                self.catalog_error = None;
+                self.songs_error = None;
             }
-            Err(error) => self.catalog_error = Some(error.into()),
+            Err(error) => self.songs_error = Some(error.into()),
         }
         cx.notify();
     }
@@ -119,10 +125,15 @@ impl RadioView {
         self.loading_songs = true;
         self.songs = Arc::new(Vec::new());
         self.sizes = row_sizes(0);
+        self.request_seq += 1;
+        let seq = self.request_seq;
         cx.notify();
         let app = self.backend.app();
         self.backend.spawn(async move {
-            Msg::StationSongs(app.station_songs(&fmid, 0).await.map_err(|error| error.to_string()))
+            Msg::StationSongs(
+                seq,
+                app.station_songs(&fmid, 0).await.map_err(|error| error.to_string()),
+            )
         });
     }
 
@@ -154,6 +165,7 @@ impl RadioView {
         let key = classid.clone().unwrap_or_default();
         div()
             .id(ElementId::Name(SharedString::from(format!("class-{key}"))))
+            .role(Role::Button)
             .px_3()
             .py_1()
             .rounded(px(999.0))
@@ -196,6 +208,7 @@ impl RadioView {
             grid = grid.child(
                 div()
                     .id(("station", index))
+                    .role(Role::Button)
                     .w(px(150.0))
                     .p_3()
                     .rounded(px(8.0))

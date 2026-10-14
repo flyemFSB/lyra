@@ -61,7 +61,7 @@ impl LoginView {
             return;
         }
         let mobile = self.mobile.read(cx).value().to_string();
-        if mobile.trim().len() < 11 {
+        if !lyra_app::is_mobile(&mobile) {
             self.status = Some(SharedString::new_static("请输入 11 位手机号"));
             cx.notify();
             return;
@@ -78,6 +78,11 @@ impl LoginView {
     fn submit(&mut self, cx: &mut Context<Self>) {
         let mobile = self.mobile.read(cx).value().to_string();
         let code = self.code.read(cx).value().to_string();
+        if !lyra_app::is_mobile(&mobile) {
+            self.status = Some(SharedString::new_static("请输入 11 位手机号"));
+            cx.notify();
+            return;
+        }
         if code.trim().is_empty() {
             self.status = Some(SharedString::new_static("请输入验证码"));
             cx.notify();

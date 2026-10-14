@@ -27,8 +27,6 @@ pub(crate) struct PlayerModel {
     pub(crate) queue: Arc<Vec<Song>>,
     /// 当前播放曲目在队列中的下标。
     pub(crate) index: usize,
-    /// 状态提示或错误信息。
-    pub(crate) status: Option<SharedString>,
 }
 
 impl PlayerModel {
@@ -45,7 +43,6 @@ impl PlayerModel {
             has_engine,
             queue: Arc::new(Vec::new()),
             index: 0,
-            status: None,
         }
     }
 

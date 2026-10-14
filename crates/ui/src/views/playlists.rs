@@ -4,7 +4,8 @@ use std::rc::Rc;
 use std::sync::Arc;
 
 use gpui_kit::component::ActiveTheme as _;
-use gpui_kit::component::{h_flex, v_flex, v_virtual_list};
+use gpui_kit::component::button::Button;
+use gpui_kit::component::{Sizable as _, h_flex, v_flex, v_virtual_list};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use lyra_api::model::{Page, Playlist, Song};
@@ -28,6 +29,12 @@ pub(crate) struct PlaylistsView {
     error: Option<SharedString>,
     heading: SharedString,
     listid: Option<String>,
+    /// 请求序号：只有最新一次选择歌单的响应才允许落地。
+    request_seq: u64,
+    /// 下一页页码（为 None 表示已到达最后一页）。
+    next_page: Option<u32>,
+    /// 本次响应是「追加下一页」还是「替换整个列表」。
+    appending: bool,
 }
 
 impl PlaylistsView {
@@ -46,6 +53,9 @@ impl PlaylistsView {
             error: None,
             heading: SharedString::new_static("歌单"),
             listid: None,
+            request_seq: 0,
+            next_page: None,
+            appending: false,
         }
     }
 
@@ -97,25 +107,67 @@ impl PlaylistsView {
         self.loading_tracks = true;
         self.songs = Arc::new(Vec::new());
         self.sizes = row_sizes(0);
+        self.next_page = None;
+        self.appending = false;
+        self.request_seq += 1;
+        let seq = self.request_seq;
         cx.notify();
         let app = self.backend.app();
         let global_id = list.global_collection_id;
         self.backend
-            .spawn(async move { Msg::Tracks(app.tracks(&global_id, 1).await.map_err(|error| error.to_string())) });
+            .spawn(async move { Msg::Tracks(seq, app.tracks(&global_id, 1).await.map_err(|error| error.to_string())) });
     }
 
-    /// 响应处理歌曲分页列表数据。
-    pub(crate) fn on_tracks(&mut self, result: Result<Page<Song>, String>, cx: &mut Context<Self>) {
+    /// 响应处理歌曲分页列表数据（丢弃过期请求序号的异步应答）。
+    pub(crate) fn on_tracks(&mut self, seq: u64, result: Result<Page<Song>, String>, cx: &mut Context<Self>) {
+        if seq != self.request_seq {
+            return;
+        }
+        // 读取并复位追加标记，区分追加分页与重置列表。
+        let appending = std::mem::take(&mut self.appending);
         self.loading_tracks = false;
         match result {
             Ok(page) => {
-                self.songs = Arc::new(page.items);
+                self.next_page = page.cursor.as_deref().and_then(|cursor| cursor.parse().ok());
+                let mut songs = if appending { (*self.songs).clone() } else { Vec::new() };
+                songs.extend(page.items);
+                self.songs = Arc::new(songs);
                 self.sizes = row_sizes(self.songs.len());
                 self.error = None;
             }
-            Err(error) => self.error = Some(error.into()),
+            Err(error) => {
+                if appending {
+                    // 追加失败不该把已经加载出来的列表换成错误页。
+                    self.backend.send(Msg::Toast(format!("加载更多失败: {error}")));
+                } else {
+                    self.next_page = None;
+                    self.error = Some(error.into());
+                }
+            }
         }
         cx.notify();
+    }
+
+    /// 追加加载下一页歌曲。
+    fn load_more(&mut self, cx: &mut Context<Self>) {
+        let (Some(index), Some(page)) = (self.selected, self.next_page) else {
+            return;
+        };
+        let Some(list) = self.playlists.get(index) else {
+            return;
+        };
+        self.appending = true;
+        self.request_seq += 1;
+        let seq = self.request_seq;
+        cx.notify();
+        let app = self.backend.app();
+        let global_id = list.global_collection_id.clone();
+        self.backend.spawn(async move {
+            Msg::Tracks(
+                seq,
+                app.tracks(&global_id, page).await.map_err(|error| error.to_string()),
+            )
+        });
     }
 
     /// 增删歌曲后刷新当前选中的歌单。
@@ -160,6 +212,7 @@ impl PlaylistsView {
             column = column.child(
                 div()
                     .id(("playlist", index))
+                    .role(Role::Button)
                     .w_full()
                     .px_3()
                     .py_2()
@@ -194,6 +247,16 @@ impl PlaylistsView {
                     .text_color(theme.muted_foreground)
                     .child(SharedString::from(format!("{} 首", self.songs.len()))),
             );
+        let header = if self.next_page.is_some() {
+            header.child(div().flex_1()).child(
+                Button::new("load_more")
+                    .small()
+                    .label(if self.appending { "加载中…" } else { "加载更多" })
+                    .on_click(cx.listener(|view, _event, _window, cx| view.load_more(cx))),
+            )
+        } else {
+            header
+        };
 
         let body = if self.loading_tracks {
             notice("加载中…", cx)

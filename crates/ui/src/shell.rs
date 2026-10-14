@@ -147,12 +147,12 @@ impl AppShell {
                 }
             }
             Msg::Playlists(result) => playlists.update(cx, |view, cx| view.on_playlists(result, cx)),
-            Msg::Tracks(result) => playlists.update(cx, |view, cx| view.on_tracks(result, cx)),
+            Msg::Tracks(seq, result) => playlists.update(cx, |view, cx| view.on_tracks(seq, result, cx)),
             Msg::Daily(result) => daily.update(cx, |view, cx| view.on_daily(result, cx)),
-            Msg::Search(result) => search.update(cx, |view, cx| view.on_search(result, cx)),
+            Msg::Search(seq, result) => search.update(cx, |view, cx| view.on_search(seq, result, cx)),
             Msg::Stations(result) => radio.update(cx, |view, cx| view.on_stations(result, cx)),
             Msg::StationClasses(result) => radio.update(cx, |view, cx| view.on_classes(result, cx)),
-            Msg::StationSongs(result) => radio.update(cx, |view, cx| view.on_songs(result, cx)),
+            Msg::StationSongs(seq, result) => radio.update(cx, |view, cx| view.on_songs(seq, result, cx)),
             Msg::Lyrics(result) => lyrics.update(cx, |view, cx| view.set_lines(result, cx)),
             Msg::Vip(result) => settings.update(cx, |view, cx| view.on_vip(result, cx)),
             Msg::VipClaim(result) => settings.update(cx, |view, cx| view.on_claim(result, cx)),
@@ -165,12 +165,8 @@ impl AppShell {
                 Err(error) => self.set_toast(format!("移除失败: {error}"), cx),
             },
             Msg::AudioEnded => self.play_next(cx),
-            Msg::AudioFailed(message) => {
-                self.player.update(cx, |model, model_cx| {
-                    model.status = Some(message.into());
-                    model_cx.notify();
-                });
-            }
+            // 播放失败时弹出轻提示通知用户。
+            Msg::AudioFailed(message) => self.set_toast(format!("播放失败: {message}"), cx),
             Msg::Noop => {}
             Msg::Toast(text) => self.set_toast(text, cx),
             Msg::LoggedOut => self.on_logged_out(cx),
@@ -224,7 +220,7 @@ impl AppShell {
         self.backend.spawn(async move {
             match app.play(&song, &quality).await {
                 Ok(()) => Msg::Noop,
-                Err(error) => Msg::AudioFailed(format!("播放失败: {error}")),
+                Err(error) => Msg::AudioFailed(error.to_string()),
             }
         });
     }
@@ -330,6 +326,7 @@ impl AppShell {
             column = column.child(
                 div()
                     .id(("nav", index))
+                    .role(Role::Button)
                     .w_full()
                     .px_3()
                     .py_2()

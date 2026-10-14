@@ -33,6 +33,7 @@ pub(crate) fn track_row(
 
     let mut row = h_flex()
         .id(("track", index))
+        .role(Role::Button)
         .h(px(ROW_HEIGHT))
         .w_full()
         .px_3()
@@ -77,6 +78,8 @@ pub(crate) fn track_row(
                 .ghost()
                 .small()
                 .label("♥")
+                // 拦截鼠标事件避免冒泡触发整行播放，同时保留滚轮滚动。
+                .block_mouse_except_scroll()
                 .on_click(move |_event, _window, _cx| {
                     let app = like_backend.app();
                     let song = like_song.clone();
@@ -91,14 +94,19 @@ pub(crate) fn track_row(
 
     if let Some((listid, fileid)) = removable {
         let remove_backend = backend.clone();
-        row = row.child(Button::new(("remove", index)).ghost().small().label("移除").on_click(
-            move |_event, _window, _cx| {
-                remove_backend.send(Msg::RemoveTrack {
-                    listid: listid.to_string(),
-                    fileid,
-                });
-            },
-        ));
+        row = row.child(
+            Button::new(("remove", index))
+                .ghost()
+                .small()
+                .label("移除")
+                .block_mouse_except_scroll()
+                .on_click(move |_event, _window, _cx| {
+                    remove_backend.send(Msg::RemoveTrack {
+                        listid: listid.to_string(),
+                        fileid,
+                    });
+                }),
+        );
     }
 
     row.into_any_element()

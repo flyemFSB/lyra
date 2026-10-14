@@ -32,18 +32,18 @@ pub(crate) enum Msg {
     Login(Result<(), String>),
     /// 歌单列表。
     Playlists(Result<Vec<Playlist>, String>),
-    /// 某歌单的一页歌曲。
-    Tracks(Result<Page<Song>, String>),
+    /// 某歌单的一页歌曲（带上发起时的请求序号，用于丢弃过期响应）。
+    Tracks(u64, Result<Page<Song>, String>),
     /// 每日推荐。
     Daily(Result<Vec<Song>, String>),
-    /// 搜索结果。
-    Search(Result<Vec<Song>, String>),
+    /// 搜索结果（带上发起时的请求序号）。
+    Search(u64, Result<Vec<Song>, String>),
     /// 电台频道目录。
     Stations(Result<Vec<Station>, String>),
     /// 电台分类目录。
     StationClasses(Result<Vec<StationClass>, String>),
-    /// 某频道的歌。
-    StationSongs(Result<Vec<Song>, String>),
+    /// 某频道的歌（带上发起时的请求序号）。
+    StationSongs(u64, Result<Vec<Song>, String>),
     /// 当前曲目的歌词。
     Lyrics(Result<Vec<LyricLine>, String>),
     /// 会员状态。
