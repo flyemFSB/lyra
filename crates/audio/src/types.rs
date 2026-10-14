@@ -31,14 +31,8 @@ pub type FetchResult<T> = std::result::Result<T, FetchError>;
 
 /// 音频抓取器接口（支持边下边播的流式读取）。
 pub trait Fetcher: Send + Sync + 'static {
-    /// 打开一首曲目，返回可读可 seek 的字节流。
-    ///
-    /// # Errors
-    /// 抓取失败（网络、签名失效、缓存缺失等）时返回 [`FetchError`]，由 `lyra-api` 分类。
+    /// 打开曲目并返回支持读取与定位的字节流。
     fn open(&self, track: &TrackRef) -> FetchResult<Box<dyn ReadSeek + Send>>;
-
-    /// 预取提示，默认空实现。播放前端可在真正播放前调用以减少首帧延迟。
-    fn prefetch(&self, _track: &TrackRef) {}
 }
 
 /// 播放状态。
@@ -59,7 +53,7 @@ pub enum State {
 pub struct Snapshot {
     /// 当前状态。
     pub state: State,
-    /// 当前曲目；空闲时为 `None`。
+    /// 当前曲目信息（未播放过时为 `None`，播放结束保留最后曲目）。
     pub track: Option<TrackRef>,
     /// 播放进度（毫秒）。
     pub position_ms: u64,
@@ -69,20 +63,9 @@ pub struct Snapshot {
     pub volume: f32,
 }
 
-/// 引擎向 UI 推送的事件。
+/// 音频引擎向界面层推送的单次状态事件。
 #[derive(Debug, Clone)]
 pub enum Event {
-    /// 状态变化。
-    StateChanged(State),
-    /// 曲目变化；`None` 表示已停止。
-    TrackChanged(Option<TrackRef>),
-    /// 进度更新，由解码线程按固定节奏发出（约每 100–200 ms）。
-    Position {
-        /// 当前进度（毫秒）。
-        ms: u64,
-        /// 总时长（毫秒）。
-        duration_ms: u64,
-    },
     /// 当前曲目自然播放结束。
     Ended,
     /// 播放失败（打开、解码等）。

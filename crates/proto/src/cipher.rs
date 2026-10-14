@@ -11,7 +11,6 @@ use rsa::RsaPublicKey;
 use rsa::BigUint;
 use rsa::pkcs8::DecodePublicKey as _;
 use rsa::traits::PublicKeyParts as _;
-use sha1::Sha1;
 
 use crate::consts::{CHARSET_B62, CHARSET_UPPER, FP_IV, KRC_KEY};
 use crate::error::{Error, Result};
@@ -25,12 +24,6 @@ fn cerr<E: core::fmt::Display>(e: E) -> Error {
 #[must_use]
 pub fn md5_hex(data: &[u8]) -> String {
     hex::encode(Md5::digest(data))
-}
-
-/// 计算输入字节的 SHA-1 哈希（40 位小写十六进制字符串）。
-#[must_use]
-pub fn sha1_hex(data: &[u8]) -> String {
-    hex::encode(Sha1::digest(data))
 }
 
 /// 计算输入字节的 SHA-256 哈希（64 位小写十六进制字符串）。
@@ -93,19 +86,23 @@ fn cbc_decrypt(key: &[u8], iv: &[u8], data: &[u8]) -> Result<Vec<u8>> {
         n => return Err(Error::Crypto(format!("unsupported AES key length {n}"))),
     };
     buf.truncate(n);
-    Ok(unpad_pkcs7_tolerant(buf))
+    unpad_pkcs7(buf)
 }
 
-/// 容错移除 PKCS7 填充（仅按末尾字节数值截断，兼容非标填充）。
-fn unpad_pkcs7_tolerant(mut data: Vec<u8>) -> Vec<u8> {
-    let Some(&n) = data.last() else {
-        return data;
+/// 严格按 RFC 5652 校验并移除 PKCS7 填充。
+fn unpad_pkcs7(data: Vec<u8>) -> Result<Vec<u8>> {
+    let Some(&last) = data.last() else {
+        return Ok(data);
     };
-    let n = n as usize;
-    if (1..=16).contains(&n) && n <= data.len() {
-        data.truncate(data.len() - n);
+    let n = last as usize;
+    let padding_ok =
+        (1..=16).contains(&n) && n <= data.len() && data[data.len() - n..].iter().all(|byte| usize::from(*byte) == n);
+    if !padding_ok {
+        return Err(Error::Crypto(format!("invalid PKCS7 padding (last byte {n})")));
     }
-    data
+    let mut data = data;
+    data.truncate(data.len() - n);
+    Ok(data)
 }
 
 /// 生成指定长度随机字符串（向上取整索引以对齐 JS 参考实现）。
@@ -163,13 +160,7 @@ pub fn aes_encrypt_derived_with(plaintext: &str, temp_key: &str) -> Result<AesBo
 
 /// 指定临时密钥单向派生 AES 加密（仅返回密文字符串）。
 pub fn aes_encrypt_with_key_iv_derived(plaintext: &str, temp_key: &str) -> Result<String> {
-    let digest = md5_hex(temp_key.as_bytes());
-    let (key, iv) = (&digest[0..32], &digest[16..32]);
-    Ok(hex::encode(cbc_encrypt(
-        key.as_bytes(),
-        iv.as_bytes(),
-        plaintext.as_bytes(),
-    )?))
+    Ok(aes_encrypt_derived_with(plaintext, temp_key)?.hex)
 }
 
 /// `cryptoAesEncrypt(data, { key, iv })`：key/iv 显式给出，按 UTF-8 字节使用。
@@ -186,11 +177,6 @@ pub fn aes_decrypt_derived(data_hex: &str, temp_key: &str) -> Result<Vec<u8>> {
     let digest = md5_hex(temp_key.as_bytes());
     let key = &digest[0..32];
     let iv = &key[16..32];
-    cbc_decrypt(key.as_bytes(), iv.as_bytes(), &hex::decode(data_hex)?)
-}
-
-/// 显式密钥与 IV 的 AES 解密。
-pub fn aes_decrypt_with_key_iv(data_hex: &str, key: &str, iv: &str) -> Result<Vec<u8>> {
     cbc_decrypt(key.as_bytes(), iv.as_bytes(), &hex::decode(data_hex)?)
 }
 
@@ -290,6 +276,13 @@ pub fn rsa_oaep_sha256_base64(data: &[u8], pem: &str) -> Result<String> {
 
 /// 行为指纹 EDT 加密：AES-128-CBC 固定 IV（输出 Base64 字符串）。
 pub fn fingerprint_edt(plaintext: &str, key16: &str) -> Result<String> {
+    // 校验密钥为 16 字节，防止误用 AES-256 导致解密失败。
+    if key16.len() != 16 {
+        return Err(Error::Crypto(format!(
+            "fingerprint_edt 需要 16 字节密钥，收到 {} 字节",
+            key16.len()
+        )));
+    }
     Ok(base64_encode(&cbc_encrypt(
         key16.as_bytes(),
         FP_IV,
@@ -301,6 +294,10 @@ pub fn fingerprint_edt(plaintext: &str, key16: &str) -> Result<String> {
 
 /// KRC 歌词解密（跳过 4 字节头，循环异或解密并 zlib 解压为 UTF-8 文本）。
 pub fn krc_decode(data: &[u8]) -> Result<String> {
+    // 限制最大解压体积，防止解压炸弹导致内存耗尽。
+    const MAX_KRC_BYTES: u64 = 8 * 1024 * 1024;
+    use std::io::Read as _;
+
     if data.len() < 4 {
         return Err(Error::Crypto("krc payload shorter than 4 bytes".to_owned()));
     }
@@ -309,8 +306,13 @@ pub fn krc_decode(data: &[u8]) -> Result<String> {
         *byte ^= KRC_KEY[i % KRC_KEY.len()];
     }
     let mut out = Vec::new();
-    std::io::Read::read_to_end(&mut flate2::read::ZlibDecoder::new(&buf[..]), &mut out)
+    flate2::read::ZlibDecoder::new(&buf[..])
+        .take(MAX_KRC_BYTES)
+        .read_to_end(&mut out)
         .map_err(|e| Error::Inflate(e.to_string()))?;
+    if out.len() as u64 >= MAX_KRC_BYTES {
+        return Err(Error::Inflate(format!("krc 解压结果超过 {MAX_KRC_BYTES} 字节上限")));
+    }
     Ok(String::from_utf8_lossy(&out).into_owned())
 }
 
@@ -348,9 +350,10 @@ mod tests {
 
     #[test]
     fn aes_with_explicit_key_iv_round_trips() {
-        let ct =
-            aes_encrypt_with_key_iv("|1750000000000", "5e4ef500e9597fe004bd09a46d8add98", "04bd09a46d8add98").unwrap();
-        let pt = aes_decrypt_with_key_iv(&ct, "5e4ef500e9597fe004bd09a46d8add98", "04bd09a46d8add98").unwrap();
+        const KEY: &str = "5e4ef500e9597fe004bd09a46d8add98";
+        const IV: &str = "04bd09a46d8add98";
+        let ct = aes_encrypt_with_key_iv("|1750000000000", KEY, IV).unwrap();
+        let pt = cbc_decrypt(KEY.as_bytes(), IV.as_bytes(), &hex::decode(&ct).unwrap()).unwrap();
         assert_eq!(pt, b"|1750000000000");
     }
 
@@ -390,6 +393,39 @@ mod tests {
         let mut blob = vec![0x6b, 0x72, 0x63, 0x31];
         blob.extend_from_slice(&deflated);
         assert_eq!(krc_decode(&blob).unwrap(), plain);
+    }
+
+    #[test]
+    fn krc_decode_rejects_a_decompression_bomb() {
+        // 8 MiB 上限：一份精心构造的歌词不得把进程撑爆。
+        let mut deflated = Vec::new();
+        {
+            use std::io::Write as _;
+            let mut enc = flate2::write::ZlibEncoder::new(&mut deflated, flate2::Compression::fast());
+            enc.write_all(&vec![b'x'; 9 * 1024 * 1024]).unwrap();
+            enc.finish().unwrap();
+        }
+        let mut blob = vec![0x6b, 0x72, 0x63, 0x31];
+        blob.extend_from_slice(&deflated);
+        assert!(krc_decode(&blob).is_err());
+    }
+
+    #[test]
+    fn pkcs7_padding_must_be_well_formed() {
+        // 末字节说填充 5 字节，却只有最后一字节是 0x05 → 必须报错，而不是「截断后成功」。
+        assert!(unpad_pkcs7(b"0123456789abc\x05".to_vec()).is_err());
+        assert_eq!(unpad_pkcs7(b"abc\x05\x05\x05\x05\x05".to_vec()).unwrap(), b"abc");
+        // 非密文（16 字节对齐的 JSON）不得被当成解开的明文。
+        assert!(unpad_pkcs7(b"{\"status\":1}\x00\x00\x00".to_vec()).is_err());
+    }
+
+    #[test]
+    fn fingerprint_edt_requires_a_16_byte_key() {
+        assert!(fingerprint_edt("x", "0123456789abcdef").is_ok());
+        assert!(
+            fingerprint_edt("x", &"a".repeat(32)).is_err(),
+            "32 字节不得静默升级成 AES-256"
+        );
     }
 
     #[test]

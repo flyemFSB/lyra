@@ -77,9 +77,7 @@ impl MediaSource for SharedSource {
     }
 }
 
-/// 顺序解码器：每次 [`Decoder::next_chunk`] 返回一段交织 `f32`。
-///
-/// 解码线程持有它，配合 [`crate::Resampler`] 与环形缓冲形成流水线。
+/// 顺序音频解码器，将输入流逐包解出交织 f32 样本。
 pub struct Decoder {
     format: Box<dyn FormatReader>,
     codec: Box<dyn SymphoniaDecoder>,
@@ -89,19 +87,12 @@ pub struct Decoder {
 }
 
 impl Decoder {
-    /// 打开一个字节流并探测其容器 / 编解码。
-    ///
-    /// # Errors
-    /// 当容器无法识别、找不到可解码音轨、缺少采样率 / 声道信息或编解码器缺失时返回
-    /// [`Error::Decode`]。
+    /// 打开音频流并自动探测容器格式与编解码器。
     pub fn open(reader: Box<dyn ReadSeek + Send>) -> Result<Self, Error> {
         Self::open_with_hint(reader, None)
     }
 
-    /// 同 [`Decoder::open`]，但用扩展名给探测器一个提示（如 `flac` / `mp3`）。
-    ///
-    /// # Errors
-    /// 同 [`Decoder::open`]。
+    /// 打开音频流并根据指定文件扩展名提示辅助探测。
     pub fn open_with_hint(reader: Box<dyn ReadSeek + Send>, extension: Option<&str>) -> Result<Self, Error> {
         let source = SharedSource {
             inner: Mutex::new(reader),
@@ -160,10 +151,7 @@ impl Decoder {
         self.channels
     }
 
-    /// 解码下一段交织 PCM；到达流末尾返回 `Ok(None)`。
-    ///
-    /// # Errors
-    /// 遇到无法跳过的容器 / 解码错误时返回 [`Error::Decode`]。
+    /// 解码下一段交织 PCM 样本，到达流末尾返回 Ok(None)。
     pub fn next_chunk(&mut self) -> Result<Option<Vec<f32>>, Error> {
         loop {
             let packet = match self.format.next_packet() {
@@ -199,10 +187,7 @@ impl Decoder {
         }
     }
 
-    /// 定位到指定毫秒（精确 seek）。
-    ///
-    /// # Errors
-    /// 容器不支持 seek 或时间越界时返回 [`Error::Decode`]。
+    /// 定位到指定毫秒播放位置。
     #[allow(clippy::cast_precision_loss)]
     pub fn seek(&mut self, ms: u64) -> Result<(), Error> {
         let time = Time::from(ms as f64 / 1000.0);
@@ -220,11 +205,7 @@ impl Decoder {
     }
 }
 
-/// 把解码缓冲拷成交织 `f32`。
-///
-/// 0 帧的包必须返回 `None`：Ogg Vorbis 的首个音频包就可能是 0 帧，而 symphonia 的
-/// `copy_interleaved_ref` 在「0 帧 + 多声道」时会拿空的 `SampleBuffer` 去索引第 1 个声道，
-/// 直接 `panic`（实测：点播 128k 的 `.ogg` 会立即打挂解码线程）。
+/// 将解码音频缓冲转换为交织 f32 样本数组，0 帧包返回 None。
 fn interleave(audio: &AudioBufferRef<'_>) -> Option<Vec<f32>> {
     if audio.frames() == 0 {
         return None;
@@ -234,10 +215,7 @@ fn interleave(audio: &AudioBufferRef<'_>) -> Option<Vec<f32>> {
     Some(buf.samples().to_vec())
 }
 
-/// 一次性解码整条流，主要用于测试与短音频。
-///
-/// # Errors
-/// 同 [`Decoder::open`] 与 [`Decoder::next_chunk`]。
+/// 一次性解码整条音频流（适用于测试与短音频）。
 pub fn decode_all(reader: Box<dyn ReadSeek + Send>) -> Result<Decoded, Error> {
     let mut decoder = Decoder::open(reader)?;
     let sample_rate = decoder.sample_rate();
@@ -284,8 +262,7 @@ mod tests {
 
     #[test]
     fn zero_frame_packets_are_skipped_instead_of_panicking() {
-        // Ogg Vorbis 的首个音频包可能就是 0 帧；symphonia 的 copy_interleaved_ref
-        // 会拿容量为 0 的 SampleBuffer 去索引第 1 个声道，直接 panic。
+        // 跳过 0 帧音频包，防止底层库空缓冲切片引发恐慌。
         use std::borrow::Cow;
         use symphonia::core::audio::{AudioBuffer, Channels, Signal, SignalSpec};
 

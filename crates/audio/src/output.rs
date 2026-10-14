@@ -50,11 +50,7 @@ where
         .map_err(|e| Error::BuildStream(e.to_string()))
 }
 
-/// 依设备默认采样格式分派到具体样本类型，构建输出流。
-///
-/// # Errors
-/// 设备默认格式不在支持集合内时返回 [`Error::UnsupportedSampleFormat`]，构建失败时返回
-/// [`Error::BuildStream`]。
+/// 根据设备采样格式分派具体样本类型并构建输出流。
 pub(crate) fn build_stream(
     device: &cpal::Device,
     config: &StreamConfig,
@@ -82,10 +78,7 @@ pub(crate) fn build_stream(
     }
 }
 
-/// 启动已构建的输出流。
-///
-/// # Errors
-/// 输出流无法播放时返回 [`Error::PlayStream`]。
+/// 启动音频输出流。
 pub(crate) fn start(stream: &Stream) -> Result<(), Error> {
     stream.play().map_err(|e| Error::PlayStream(e.to_string()))
 }

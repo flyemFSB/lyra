@@ -96,8 +96,7 @@ pub async fn fm_songs(api: &Api, fmid: &str, fmtype: u32, offset: i64, size: u32
         .header("x-router", FM_ROUTER)
         .header("Content-Type", "application/json");
     let value = api.call(spec, Freshness::CATALOG).await?;
-    // 响应是 `{"data":[{"fmid":…,"songs":[…]}]}`：**不能**把顶层 `data` 当候选键，
-    // 它本身就是个数组且在 BFS 里先被命中，于是每首歌都解析失败 → 永远 0 首。
+    // 嵌套结构优先匹配 songs/song_list 字段提取歌曲数组。
     Ok(codec::find_array(&value, &["songs", "song_list"])
         .map(|items| Song::list_from(items))
         .unwrap_or_default())

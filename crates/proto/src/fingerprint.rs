@@ -114,6 +114,8 @@ fn or_zero(s: &str) -> &str {
 /// 行为事件串：`:` 分隔，每条字段用 `,` 分隔。
 #[must_use]
 pub fn edt_events(rng: &mut impl JsRng, sentinel: u32, start: (f64, f64), end: (f64, f64), points: i64) -> String {
+    // 采样点数至少为 1，避免轨迹出现 NaN 或异常预分配。
+    let points = points.max(1);
     let mut entries: Vec<String> = Vec::with_capacity(points as usize * 4 + 32);
     let mut ts: i64 = 0;
     let mut ei: i64 = 0;
@@ -170,6 +172,8 @@ pub fn edt_events(rng: &mut impl JsRng, sentinel: u32, start: (f64, f64), end: (
 /// 三阶贝塞尔轨迹 + 递减抖动（3px → 0.5px）。
 #[must_use]
 pub fn bezier_path(rng: &mut impl JsRng, sx: f64, sy: f64, ex: f64, ey: f64, n: i64) -> Vec<(f64, f64)> {
+    // 采样分段数至少为 1，避免除以零导致坐标出现 NaN。
+    let n = n.max(1);
     #[allow(clippy::cast_precision_loss)]
     let c1x = sx + (ex - sx) * 0.3 + ri(rng, -80, 80) as f64;
     #[allow(clippy::cast_precision_loss)]

@@ -9,7 +9,7 @@ pub const SRAPPID: u32 = 2919;
 /// 接口版本。
 pub const APIVER: u32 = 20;
 
-/// android 签名盐值；同时用作 cloudlist 的 appkey 与 signParamsKey 盐值。
+/// Android 签名盐值，兼作云歌单 appkey 与 signParamsKey 盐值。
 pub const SALT_MD5: &str = "LnT6xpN3khm36zse0QzvmgTZ3waWdRSA";
 /// `signKey` 盐值。
 pub const SALT_SIGNKEY: &str = "185672dd44712f60bb1736df5a377e82";

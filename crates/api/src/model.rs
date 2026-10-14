@@ -113,12 +113,6 @@ impl Song {
         }
         self.cover.replace("{size}", &size.to_string())
     }
-
-    /// 是否可播放（有 hash 即认为可尝试取地址）。
-    #[must_use]
-    pub fn is_playable(&self) -> bool {
-        !self.hash.is_empty()
-    }
 }
 
 /// 字符串非空回退辅助特征。
@@ -270,9 +264,7 @@ impl SongUrl {
     /// 解析上游播放地址对象，提取主地址与备选节点列表。
     #[must_use]
     pub fn from_value(value: &Value) -> Option<Self> {
-        // 上游有两种形态：
-        // ① 对象数组：每个节点自带 extname / filesize / timelength 等元数据；
-        // ② 纯字符串数组：概念版 `/tracker/v5/url` 返回的就是这种，元数据挂在响应顶层。
+        // 兼容对象数组与纯字符串数组两种上游播放地址返回结构。
         let mut urls: Vec<String> = Vec::new();
         let mut node_meta: Option<&Value> = None;
         for item in codec::find_array(value, &["url", "urls", "play_url"])
@@ -301,8 +293,7 @@ impl SongUrl {
         }
         let url = urls.first()?.clone();
         let (meta, duration_ms) = node_meta.map_or_else(
-            // 字符串数组形态没有节点元数据，退回响应顶层；
-            // 顶层的 `timeLength` 单位是**秒**，而节点里的 `timelength` 是毫秒。
+            // 无节点元数据时回退至顶层提取时长（秒转毫秒）。
             || {
                 (
                     value,
@@ -577,8 +568,7 @@ mod tests {
 
     #[test]
     fn song_url_reads_the_string_array_form_used_by_tracker_v5() {
-        // 概念版 `/tracker/v5/url` 的真实形态：`url` 与 `backupUrl` 都是字符串数组，
-        // 元数据在顶层，且 `timeLength` 的单位是**秒**，`backupUrl` 与 `url` 的尾节点重叠。
+        // 验证 tracker/v5 接口返回纯字符串数组形式的播放地址解析。
         let value = json!({
             "status": 1,
             "url": ["http://fs.youthandroid2.kugou.com/a.ogg", "http://fs.youthandroid.kugou.com/a.ogg"],

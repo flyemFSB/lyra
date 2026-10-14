@@ -50,12 +50,6 @@ impl Report {
     fn is_ok(&self) -> bool {
         self.banned.is_empty()
     }
-
-    /// 验证 Schannel 是否仅用于读取系统根证书。
-    fn schannel_is_only_a_cert_reader(&self) -> bool {
-        !self.system_bindings.iter().any(|name| name == "schannel")
-            || !self.banned.iter().any(|name| name == "native-tls")
-    }
 }
 
 /// 提取分类归并依赖包列表。
@@ -135,13 +129,7 @@ fn audit() -> anyhow::Result<()> {
         "依赖树里出现了被禁用的 C 实现：{:?}。请检查 TLS 后端是否被改成 native-tls / OpenSSL。",
         report.banned
     );
-    anyhow::ensure!(
-        report.schannel_is_only_a_cert_reader(),
-        "native-tls 与 schannel 同时存在 —— TLS 握手可能已交给系统后端"
-    );
-
-    // keyring 不带后端 feature 时会静默使用进程内 mock：token 写入“成功”但换进程就丢，
-    // 表现为每次启动都是未登录。这里钉死后端确实被启用。
+    // 确保 keyring 启用了 windows-native 后端以正常持久化登录凭据。
     let features = Command::new(env!("CARGO"))
         .args(["tree", "-e", "features", "-i", "keyring", "--prefix", "none"])
         .output()?;
@@ -157,8 +145,7 @@ fn audit() -> anyhow::Result<()> {
 }
 
 /// 上游接口存活状态探测。
-/// 打印数量型端点结果：空表记为告警 —— 上游在版本号或登录态不满足时会**静默返回空列表**，
-/// 与「结构变更导致解析为空」无法区分，不能报 ✅。
+/// 输出统计型端点探测结果，空列表记录为告警。
 fn report_count(warnings: &mut Vec<&'static str>, name: &'static str, count: usize) {
     if count == 0 {
         println!("  ⚠️ {name:<34} 0 条");
@@ -258,8 +245,11 @@ fn package() -> anyhow::Result<()> {
 
     println!("✅ Release 二进制构建完成: {}", exe_src.display());
 
+    // 提取统一的工作区版本号。
+    let version = env!("CARGO_PKG_VERSION");
+
     // 生成绿色免安装压缩包
-    let zip_dest = dist_dir.join("Lyra-v0.1.0-windows-x64-portable.zip");
+    let zip_dest = dist_dir.join(format!("Lyra-v{version}-windows-x64-portable.zip"));
     let tar_status = Command::new("tar")
         .args([
             "-a",
@@ -271,10 +261,11 @@ fn package() -> anyhow::Result<()> {
             "lyra.exe",
         ])
         .status();
-    if let Ok(status) = tar_status
-        && status.success()
-    {
-        println!("✅ 绿色便携包生成完成: {}", zip_dest.display());
+    match tar_status {
+        Ok(status) if status.success() => println!("✅ 绿色便携包生成完成: {}", zip_dest.display()),
+        // 捕获压缩归档异常退出状态。
+        Ok(status) => println!("⚠️  tar 退出码 {status}，便携包可能未生成: {}", zip_dest.display()),
+        Err(error) => println!("⚠️  无法执行 tar（{error}），已跳过便携包: {}", zip_dest.display()),
     }
 
     // 寻找 Inno Setup 编译器 ISCC.exe
@@ -299,14 +290,14 @@ fn package() -> anyhow::Result<()> {
         println!("🚀 找到 Inno Setup 编译器: {iscc}，开始打包安装程序...");
         let iscc_status = Command::new(&iscc)
             .args([
-                "/DAppVersion=0.1.0",
+                &format!("/DAppVersion={version}"),
                 r"/DSourceDir=..\target\release",
                 r"/DOutputDir=..\target\dist",
                 r"installer\lyra.iss",
             ])
             .status()?;
         anyhow::ensure!(iscc_status.success(), "ISCC 打包失败");
-        println!("✅ 安装包生成完成: target/dist/Lyra-v0.1.0-windows-x64-setup.exe");
+        println!("✅ 安装包生成完成: target/dist/Lyra-v{version}-windows-x64-setup.exe");
     } else {
         println!("⚠️  未在系统 PATH 或默认路径中检测到 Inno Setup (ISCC.exe)。");
         println!("   提示: 可通过 `winget install JRSoftware.InnoSetup` 安装后再次运行以生成安装包。");
@@ -343,13 +334,9 @@ mod tests {
 
     #[test]
     fn schannel_alone_is_accepted_because_it_only_reads_the_cert_store() {
-        let report = classify(&names(&["schannel", "rustls-native-certs", "ring"]));
-        assert!(report.is_ok());
-        assert!(report.schannel_is_only_a_cert_reader());
-        // 但和 native-tls 一起出现就说明 TLS 走了系统后端
-        let bad = classify(&names(&["schannel", "native-tls"]));
-        assert!(!bad.is_ok());
-        assert!(!bad.schannel_is_only_a_cert_reader());
+        // 验证允许 schannel 仅用于系统根证书枚举。
+        assert!(classify(&names(&["schannel", "rustls-native-certs", "ring"])).is_ok());
+        assert!(!classify(&names(&["schannel", "native-tls"])).is_ok());
     }
 
     #[test]

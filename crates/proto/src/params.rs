@@ -131,7 +131,7 @@ impl Params {
         self.entries.iter().map(|(k, v)| (k.as_str(), v))
     }
 
-    /// 按 "k=v" 格式整串排序后拼接（供 Android 与 Web 签名使用）。
+    /// 先拼 "k=v" 再整串排序后拼接（供 Web 签名使用）。
     #[must_use]
     pub fn sorted_kv(&self) -> String {
         let mut chunks: Vec<String> = self
@@ -147,6 +147,22 @@ impl Params {
         chunks.concat()
     }
 
+    /// 按键排序后拼接键值对字符串（供 Android 签名使用）。
+    #[must_use]
+    pub fn sorted_kv_by_key(&self) -> String {
+        let mut chunks: Vec<(&str, String)> = self
+            .entries
+            .iter()
+            .map(|(k, v)| {
+                let mut s = String::with_capacity(k.len() + 1 + 8);
+                let _ = write!(s, "{k}={}", v.render());
+                (k.as_str(), s)
+            })
+            .collect();
+        chunks.sort_by(|a, b| a.0.encode_utf16().cmp(b.0.encode_utf16()));
+        chunks.into_iter().map(|(_, chunk)| chunk).collect()
+    }
+
     /// 仅对参数值排序后拼接（供设备注册签名使用）。
     #[must_use]
     pub fn sorted_values(&self) -> String {
@@ -159,14 +175,6 @@ impl Params {
     #[must_use]
     pub fn to_pairs(&self) -> Vec<(String, String)> {
         self.entries.iter().map(|(k, v)| (k.clone(), v.render())).collect()
-    }
-}
-
-impl FromIterator<(String, Val)> for Params {
-    fn from_iter<T: IntoIterator<Item = (String, Val)>>(iter: T) -> Self {
-        Self {
-            entries: iter.into_iter().collect(),
-        }
     }
 }
 
@@ -211,6 +219,20 @@ mod tests {
         p.set("bb", "1").set("b", "2");
         // 字符串 "b=2" 排在 "bb=1" 之前（等号字符码 0x3D 小于字母 b 码值）
         assert_eq!(p.sorted_kv(), "b=2bb=1");
+    }
+
+    #[test]
+    fn android_sorts_keys_before_joining_while_web_does_not() {
+        let mut p = Params::new();
+        p.set("hash", "1").set("hash2", "2");
+        // 先拼后排（Web）："hash2=2" 的 '2'(0x32) 小于 '='(0x3D) → hash2 在前。
+        assert_eq!(p.sorted_kv(), "hash2=2hash=1");
+        // 先排后拼（Android）：按 key 排 → hash 在前。两种签名的顺序必须能区分开。
+        assert_eq!(p.sorted_kv_by_key(), "hash=1hash2=2");
+        // 无前缀关系时两者一致（这是绝大多数真实参数集的情况）。
+        let mut q = Params::new();
+        q.set("mid", "m").set("appid", "a").set("plat", "p");
+        assert_eq!(q.sorted_kv(), q.sorted_kv_by_key());
     }
 
     #[test]

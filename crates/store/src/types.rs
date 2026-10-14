@@ -12,9 +12,9 @@ const DEFAULT_MAX_CACHE_BYTES: u64 = 2 * 1024 * 1024 * 1024;
 /// 登录账号信息（包含用户 ID、昵称及内存中持有的会话令牌）。
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Account {
-    /// 用户 id，同时用作凭据管理器的 user name。
+    /// 用户 ID，同时作为凭据管理器的用户名。
     pub userid: i64,
-    /// 登录令牌；仅短暂存在于内存，落盘前会被清空。
+    /// 登录令牌（仅短暂驻留内存，落盘前清空）。
     pub token: String,
     /// 会员类型。
     pub vip_type: i64,
@@ -24,16 +24,16 @@ pub struct Account {
     pub nickname: String,
 }
 
-/// 用户设置。
+/// 用户配置项。
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Settings {
-    /// 音量（`0.0..=1.0`）。
+    /// 播放音量（0.0..=1.0）。
     pub volume: f32,
-    /// 音质标识（如 `flac`）。
+    /// 默认偏好音质（如 flac、320 等）。
     pub quality: String,
-    /// 缓存目录；`None` 表示使用默认目录。
+    /// 缓存目录（None 表示使用默认目录）。
     pub cache_dir: Option<String>,
-    /// 缓存上限（字节）。
+    /// 缓存容量上限（字节）。
     pub max_cache_bytes: u64,
 }
 
@@ -46,21 +46,4 @@ impl Default for Settings {
             max_cache_bytes: DEFAULT_MAX_CACHE_BYTES,
         }
     }
-}
-
-/// 一条播放历史。
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct HistoryEntry {
-    /// 歌曲 hash，也是去重键。
-    pub hash: String,
-    /// 歌名。
-    pub name: String,
-    /// 歌手。
-    pub singer: String,
-    /// 专辑 id。
-    pub album_id: String,
-    /// `album_audio_id`。
-    pub album_audio_id: String,
-    /// 播放时间（Unix 毫秒）。
-    pub played_at_ms: i64,
 }

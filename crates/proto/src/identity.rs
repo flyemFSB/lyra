@@ -6,21 +6,21 @@ use serde::{Deserialize, Serialize};
 use crate::cipher::{md5_hex, random_string};
 use crate::rng::{JsRng, OsRng};
 
-/// `calculateMid`：把 `md5(input)` 的 hex 当大整数转十进制字符串。
+/// 根据 GUID 的 MD5 十六进制值计算大整数十进制 MID 字符串。
 #[must_use]
 pub fn mid_from_guid(guid: &str) -> String {
     let digest = md5_hex(guid.as_bytes());
     BigUint::parse_bytes(digest.as_bytes(), 16).map_or_else(|| "0".to_owned(), |v| v.to_str_radix(10))
 }
 
-/// JS `getGuid()` 的单段：取 `(65536*(1+rand))|0` 的 hex 末 4 位。
+/// 生成 GUID 单段十六进制随机串。
 fn guid_segment(rng: &mut impl JsRng) -> String {
     #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
     let v = (65536.0 * (1.0 + rng.next_f64())) as i64;
     format!("{v:x}").chars().skip(1).collect()
 }
 
-/// JS `getGuid()`：`8-4-4-4-12` 形式的随机串（不强制 UUID v4 的版本位）。
+/// 生成 8-4-4-4-12 格式的随机 UUID 字符串。
 #[must_use]
 pub fn random_uuid(rng: &mut impl JsRng) -> String {
     format!(
@@ -36,7 +36,7 @@ pub fn random_uuid(rng: &mut impl JsRng) -> String {
     )
 }
 
-/// JS `generateWebGLHash()` 的 Node 分支：两个 32 位随机数拼成 uint64 的十进制串。
+/// 模拟生成 WebGL 指纹（64 位随机无符号整数字符串）。
 #[must_use]
 pub fn random_webgl(rng: &mut impl JsRng) -> String {
     #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
@@ -86,7 +86,7 @@ impl Device {
         }
     }
 
-    /// `dfid`（未注册时用 `-`）。
+    /// 获取 DFID，未注册时返回 -。
     #[must_use]
     pub fn dfid_or_dash(&self) -> &str {
         if self.dfid.is_empty() { "-" } else { &self.dfid }

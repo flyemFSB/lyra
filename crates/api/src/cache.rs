@@ -23,8 +23,6 @@ impl Freshness {
     pub const PLAYLIST: Self = Self::Ttl(Duration::from_secs(30));
     /// 歌曲播放地址：60 秒（上游 URL 自带时效）。
     pub const SONG_URL: Self = Self::Ttl(Duration::from_secs(60));
-    /// 图片：7 天。
-    pub const IMAGE: Self = Self::Ttl(Duration::from_hours(168));
     /// 曲库 / 电台目录：10 分钟。
     pub const CATALOG: Self = Self::Ttl(Duration::from_secs(600));
     /// 会员与账号状态：30 秒。
@@ -46,14 +44,14 @@ struct Entry {
     body: Arc<Vec<u8>>,
 }
 
-/// L1 响应缓存。
+/// 内存级响应缓存。
 #[derive(Debug, Clone)]
 pub struct TtlCache {
     inner: Cache<String, Arc<Entry>>,
 }
 
 impl TtlCache {
-    /// 以给定容量上限构造。
+    /// 构造指定容量上限的缓存实例。
     #[must_use]
     pub fn new(max_capacity: u64) -> Self {
         Self {
@@ -61,7 +59,7 @@ impl TtlCache {
         }
     }
 
-    /// 读一条（已过期视为未命中）。
+    /// 读取缓存数据，已过期则视为未命中并清理。
     #[must_use]
     pub fn get(&self, key: &str) -> Option<Arc<Vec<u8>>> {
         let entry = self.inner.get(key)?;
@@ -72,7 +70,7 @@ impl TtlCache {
         Some(entry.body.clone())
     }
 
-    /// 写一条。
+    /// 写入缓存条目并设置有效时长。
     pub fn insert(&self, key: impl Into<String>, body: Arc<Vec<u8>>, ttl: Duration) {
         self.inner.insert(
             key.into(),
@@ -83,7 +81,7 @@ impl TtlCache {
         );
     }
 
-    /// 失效全部含指定前缀的 key（歌单增删后清关联缓存）。
+    /// 失效所有包含指定前缀的缓存键。
     pub fn invalidate_prefix(&self, prefix: &str) {
         let keys: Vec<String> = self
             .inner
@@ -96,7 +94,7 @@ impl TtlCache {
         }
     }
 
-    /// 清空。
+    /// 清空全部缓存条目。
     pub fn clear(&self) {
         self.inner.invalidate_all();
         self.inner.run_pending_tasks();

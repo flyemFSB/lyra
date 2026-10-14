@@ -6,7 +6,7 @@ use std::sync::Arc;
 use lyra_api::endpoint::{audio, flow, library, lyrics, playlist, privilege, session};
 use lyra_api::model::{LyricLine, Page, Playlist, Song, SongRights, SongUrl, Station, StationClass, VipStatus};
 use lyra_api::transport::Transport;
-use lyra_api::{Api, Freshness, Session};
+use lyra_api::{Api, Session};
 use lyra_audio::{AudioConfig, Engine, Event, TrackRef};
 use lyra_store::{Account as StoreAccount, Settings, Store};
 
@@ -95,6 +95,9 @@ impl Kugou {
         let fetcher = Arc::new(BlobFetcher::new(self.blobs.clone(), runtime));
         match lyra_audio::spawn_with(fetcher, events, AudioConfig::default()) {
             Ok(engine) => {
+                // 同步设置中保存的音量至音频引擎。
+                let volume = self.settings().map_or(1.0, |settings| settings.volume);
+                engine.set_volume(volume.clamp(0.0, 1.0));
                 self.engine = Some(engine);
                 Ok(true)
             }
@@ -152,12 +155,14 @@ impl Kugou {
         Ok(self.store.settings()?)
     }
 
-    /// 保存用户配置并同步音量至音频引擎。
+    /// 保存用户配置并同步音量与缓存上限。
     pub fn set_settings(&self, settings: &Settings) -> Result<()> {
         self.store.set_settings(settings)?;
         if let Some(engine) = &self.engine {
             engine.set_volume(settings.volume.clamp(0.0, 1.0));
         }
+        // 缓存上限是运行时设置项：改完立刻生效并按 LRU 收敛，不必重启。
+        self.blobs.set_max_bytes(settings.max_cache_bytes);
         Ok(())
     }
 
@@ -165,8 +170,8 @@ impl Kugou {
 
     /// 发送短信验证码并返回剩余可用次数。
     pub async fn send_code(&self, mobile: &str) -> Result<u64> {
-        if mobile.trim().len() < 11 {
-            return Err(Error::Invalid("手机号至少 11 位".to_owned()));
+        if !is_mobile(mobile) {
+            return Err(Error::Invalid("请输入 11 位手机号".to_owned()));
         }
         // 上游对「无 dfid 的新设备」发码极易触发风控，因此先补齐设备指纹。
         self.ensure_device_registered().await;
@@ -186,6 +191,9 @@ impl Kugou {
 
     /// 短信验证码登录并持久化凭据。
     pub async fn login(&self, mobile: &str, code: &str) -> Result<StoreAccount> {
+        if !is_mobile(mobile) {
+            return Err(Error::Invalid("请输入 11 位手机号".to_owned()));
+        }
         let result = session::login_cellphone(&self.api, mobile, code).await?;
         let account = StoreAccount {
             userid: result.userid,
@@ -216,10 +224,7 @@ impl Kugou {
         Ok(())
     }
 
-    /// 注册设备并持久化指纹信息。
-    ///
-    /// 上游对新身份偶发返回 `{"status":1,"data":[]}`（既非业务错误也不可用），实测约 1 秒后
-    /// 重试即可拿到 dfid，因此这里做有限重试；dfid 缺失会让后续请求被风控拦，必须拿到。
+    /// 注册设备并持久化指纹信息，对空数据响应执行有限重试。
     pub async fn register_device(&self) -> Result<String> {
         const ATTEMPTS: u32 = 3;
         const RETRY_DELAY: std::time::Duration = std::time::Duration::from_millis(1_200);
@@ -404,6 +409,13 @@ impl Kugou {
     }
 }
 
+/// 校验手机号格式是否为 11 位数字字符。
+#[must_use]
+pub fn is_mobile(mobile: &str) -> bool {
+    let mobile = mobile.trim();
+    mobile.chars().count() == 11 && mobile.chars().all(|character| character.is_ascii_digit())
+}
+
 /// 匹配最符合用户偏好且可播放的音质。
 fn pick_quality(rights: &SongRights, requested: &str) -> Result<String> {
     let preferred = if requested.is_empty() { "flac" } else { requested };
@@ -435,16 +447,21 @@ async fn catalog_songs(api: &Api, fmid: &str, offset: i64) -> Result<Vec<Song>> 
     Ok(lyra_api::endpoint::catalog::fm_songs(api, fmid, 2, offset, 20).await?)
 }
 
-/// 评估接口路径对应的数据保鲜策略。
-#[must_use]
-pub fn freshness_of(path: &str) -> Freshness {
-    if path.contains("get_all_list") || path.contains("get_other_list_file") {
-        Freshness::PLAYLIST
-    } else if path.contains("/url") {
-        Freshness::SONG_URL
-    } else if path.contains("fm") {
-        Freshness::CATALOG
-    } else {
-        Freshness::NoStore
+#[cfg(test)]
+mod tests {
+    #![allow(clippy::unwrap_used)]
+
+    use super::*;
+
+    #[test]
+    fn mobile_must_be_11_ascii_digits() {
+        assert!(is_mobile("13800138000"));
+        assert!(is_mobile(" 13800138000 "), "两侧空白应被容忍");
+        // 排除包含汉字等非数字字符的情况。
+        assert!(!is_mobile("一二三四五六七八九十一"));
+        assert!(!is_mobile("1380013800"), "10 位不合法");
+        assert!(!is_mobile("138001380000"), "12 位不合法");
+        assert!(!is_mobile("1380013800a"));
+        assert!(!is_mobile(""));
     }
 }

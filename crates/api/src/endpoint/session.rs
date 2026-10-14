@@ -10,7 +10,7 @@ use crate::client::Api;
 use crate::codec;
 use crate::error::{Error, Result};
 use crate::spec::RequestSpec;
-use crate::spec::{CAPTCHA_BASE, LOGIN_GATEWAY, RELATION_BASE, USER_SERVICE, VERIFY_BASE, now_millis};
+use crate::spec::{CAPTCHA_BASE, LOGIN_GATEWAY, USER_SERVICE, VERIFY_BASE, now_millis};
 
 /// 登录结果。
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -27,12 +27,7 @@ pub struct LoginResult {
     pub nickname: String,
 }
 
-/// 发送短信登录验证码。
-///
-/// 旧开源实现用 `POST /v7/send_mobile_code` 明文 `{businessid,mobile,plat:3}`，
-/// 上游现已对该形态直接回 `20006`；现行协议是 **`/v8/send_mobile_code`**：
-/// 完整号码 AES 进 `params`，外层 `mobile` 打码，`pk` 用 RSA 包裹本次的临时密钥，
-/// `plat` 是**字符串** `"1"`，并带毫秒 `clienttime_ms`。
+/// 发送短信登录验证码（基于 v8 协议加密号码与密钥）。
 pub async fn send_mobile_code(api: &Api, mobile: &str) -> Result<Value> {
     let date_time = now_millis();
     let encrypted = aes_encrypt_derived(&serde_json::json!({ "mobile": mobile }).to_string())?;
@@ -181,8 +176,7 @@ pub async fn register_dev(api: &Api, extra: Option<Value>) -> Result<String> {
         "manufacturer": "Xiaomi",
         "uuid": session.device.guid,
     });
-    // 默认关闭各硬件传感器上报。
-    // 参考实现（module/register_dev.js）无条件上报这 9 组字段，缺失会被上游判为参数不合法。
+    // 补齐上游必填的 9 组传感器默认字段。
     if let Some(map) = device_map.as_object_mut() {
         for sensor in [
             "accelerometer",
@@ -214,8 +208,7 @@ pub async fn register_dev(api: &Api, extra: Option<Value>) -> Result<String> {
     .to_string();
     let p = lyra_proto::rsa_pkcs1_encrypt_hex(portrait.as_bytes(), RSA_PUBLIC)?;
 
-    // 请求体是 Base64 密文而非 JSON，必须与参数一起参与签名：
-    // 参考实现把 `data`（即本密文）拼进 signatureAndroidParams，漏掉它上游直接返回 20006。
+    // Base64 密文请求体必须与请求参数一同参与签名计算。
     let spec = RequestSpec::post("/risk/v2/r_register_dev")
         .base(USER_SERVICE)
         .param("part", 1)
@@ -239,8 +232,7 @@ pub async fn register_dev(api: &Api, extra: Option<Value>) -> Result<String> {
     codec::check_business(&value)?;
     let dfid = codec::pick_str_paths(&value, &[&["data", "dfid"], &["dfid"]]);
     if dfid.is_empty() {
-        // 上游会以 200 + status=1 回 `data:[]`（约 1 秒后重试即可拿到 dfid），
-        // 带上响应体便于上层判断与排查。
+        // 上游偶发返回空数组，需返回可重试的空数据错误。
         return Err(Error::EmptyData(format!("register_dev 未返回 dfid: {text}")));
     }
     Ok(dfid)
@@ -279,39 +271,6 @@ pub async fn verify_user_info(api: &Api, sid: &str, edt: &str, verifycode: &str,
     api.call_auth(spec).await
 }
 
-/// 获取当前登录用户的基本信息与关系数据。
-pub async fn user_info(api: &Api) -> Result<Value> {
-    let session = api.session();
-    crate::spec::ensure_logged_in(&session)?;
-    let clienttime = now_millis();
-    let p = rsa_raw_encrypt_hex(
-        serde_json::json!({ "clienttime": clienttime, "token": session.token() })
-            .to_string()
-            .as_bytes(),
-        RSA_PUBLIC,
-    )?
-    .to_uppercase();
-
-    let body = serde_json::json!({
-        "p": p,
-        "appid": APPID,
-        "mid": session.device.mid,
-        "clientver": CLIENTVER,
-        "source": 0,
-        "clienttime": clienttime,
-        "uuid": "-",
-        "userid": session.userid(),
-        "key": sign_params_key(clienttime, APPID, CLIENTVER),
-    });
-
-    let spec = RequestSpec::post("/v1/get_my_userinfo")
-        .base(RELATION_BASE)
-        .body(body)
-        .param("plat", 1)
-        .header("Host", "relation.user.kugou.com");
-    api.call(spec, crate::cache::Freshness::NoStore).await
-}
-
 #[cfg(test)]
 mod tests {
     #![allow(clippy::unwrap_used)]
@@ -336,8 +295,7 @@ mod tests {
 
     #[tokio::test]
     async fn register_dev_reports_the_upstream_error_instead_of_a_crypto_error() {
-        // 上游参数不合法时回的是**明文** JSON；旧实现直接拿去 AES 解密，
-        // 只抛出「Unpad Error」，把真实的 20006 吃掉。
+        // 验证上游参数非法返回明文 JSON 时正常透传业务错误码。
         let mock = Arc::new(MockTransport::new());
         mock.on(
             "/risk/v2/r_register_dev",
@@ -353,8 +311,7 @@ mod tests {
 
     #[tokio::test]
     async fn register_dev_flags_empty_data_as_retryable() {
-        // 上游对新身份实测返回 200 + `{"status":1,"error_code":0,"data":[]}`：
-        // 既不是业务错误（status/error_code 都正常），也拿不到 dfid，必须让上层重试。
+        // 验证空数据应答被标记为可重试错误。
         let mock = Arc::new(MockTransport::new());
         mock.on(
             "/risk/v2/r_register_dev",
@@ -367,8 +324,7 @@ mod tests {
 
     #[tokio::test]
     async fn register_dev_signs_the_base64_body() {
-        // 体的 Base64 密文必须参与签名（参考实现把 data 拼进 signatureAndroidParams），
-        // 漏掉它上游一律返回 20006，dfid 永远拿不到。
+        // 验证请求体 Base64 密文正确参与安卓签名。
         let mock = Arc::new(MockTransport::new());
         mock.on(
             "/risk/v2/r_register_dev",

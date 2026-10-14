@@ -13,18 +13,18 @@ fn md5_concat(parts: &[&[u8]]) -> String {
     hex::encode(h.finalize())
 }
 
-/// Android 端请求签名：md5(SALT_MD5 + sorted_kv + body + SALT_MD5)。
+/// Android 端请求签名：md5(SALT_MD5 + 按键排序的键值对 + 请求体 + SALT_MD5)。
 #[must_use]
 pub fn signature_android(params: &Params, body: &str) -> String {
     md5_concat(&[
         SALT_MD5.as_bytes(),
-        params.sorted_kv().as_bytes(),
+        params.sorted_kv_by_key().as_bytes(),
         body.as_bytes(),
         SALT_MD5.as_bytes(),
     ])
 }
 
-/// Web 端请求签名：md5(SALT_WEB + sorted_kv + body + SALT_WEB)。
+/// Web 端请求签名：md5(SALT_WEB + 排序键值对 + 请求体 + SALT_WEB)。
 #[must_use]
 pub fn signature_web(params: &Params, body: &str) -> String {
     md5_concat(&[

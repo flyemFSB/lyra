@@ -12,7 +12,7 @@ pub(crate) struct Shared {
     position_ms: AtomicU64,
     duration_ms: AtomicU64,
     volume: AtomicU32,
-    /// 缓冲刷新标记（seek 定位时置位，由输出回调处理并复位）。
+    /// 缓冲刷新标记（定位时置位，由输出回调消费复位）。
     flush: AtomicBool,
     /// 当前播放曲目引用信息。
     track: Mutex<Option<TrackRef>>,
@@ -48,12 +48,12 @@ impl Shared {
         })
     }
 
-    /// 请求实时回调丢弃 ring 里残留的音频（seek 后调用）。
+    /// 请求输出回调丢弃环形缓冲区残留音频。
     pub(crate) fn request_flush(&self) {
         self.flush.store(true, Ordering::Release);
     }
 
-    /// 取走一次 flush 请求；返回 `true` 表示调用方应当清空 ring。
+    /// 获取并复位缓冲刷新标记，返回是否需要清空缓冲区。
     pub(crate) fn take_flush_request(&self) -> bool {
         self.flush.swap(false, Ordering::AcqRel)
     }
@@ -82,8 +82,8 @@ impl Shared {
         self.track.lock().clone()
     }
 
-    pub(crate) fn set_track(&self, track: Option<TrackRef>) {
-        *self.track.lock() = track;
+    pub(crate) fn set_track(&self, track: TrackRef) {
+        *self.track.lock() = Some(track);
     }
 
     pub(crate) fn position_ms(&self) -> u64 {

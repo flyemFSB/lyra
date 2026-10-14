@@ -1,5 +1,5 @@
 #![forbid(unsafe_code)]
-//! 数据持久化层：基于 redb 管理设备、登录态、配置、缓存与历史，敏感令牌隔离存入密钥环。
+//! 数据持久化层：基于 redb 管理设备、登录态、配置与缓存，敏感令牌隔离存入密钥环。
 
 mod error;
 mod secrets;
@@ -7,22 +7,19 @@ mod types;
 
 pub use error::{Error, Result};
 pub use secrets::{KeyringSecrets, MemorySecrets, Secrets};
-pub use types::{Account, HistoryEntry, Settings};
+pub use types::{Account, Settings};
 
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use redb::{ReadableTable, TableDefinition};
+use redb::TableDefinition;
 use serde::de::DeserializeOwned;
 
 /// 单例键值表（设备、账户及配置信息）。
 const META: TableDefinition<&str, &[u8]> = TableDefinition::new("meta");
 /// 命名空间二级缓存表：(ns, key) -> (过期毫秒, 二进制数据)。
 const BLOBS: TableDefinition<(&str, &str), (u64, &[u8])> = TableDefinition::new("blobs");
-/// 播放历史表：hash -> HistoryEntry JSON 数据。
-const HISTORY: TableDefinition<&str, &[u8]> = TableDefinition::new("history");
-
 /// 临时文件去重自增序号。
 static TEMP_SEQ: AtomicU64 = AtomicU64::new(0);
 
@@ -43,18 +40,12 @@ impl Drop for TempFile {
     }
 }
 
-/// 打开（不存在则创建）位于 `path` 的存储，凭据走系统密钥环。
-///
-/// # Errors
-/// 文件不可用或不是合法 `redb` 库时返回 [`Error::Database`]。
+/// 打开位于指定路径的存储实例，凭据隔离存入系统密钥环。
 pub fn open(path: impl AsRef<Path>) -> Result<Store> {
     open_with_secrets(path, Box::new(KeyringSecrets))
 }
 
-/// 同 [`open`]，但允许注入凭据实现（测试 / 无头 CLI）。
-///
-/// # Errors
-/// 同 [`open`]。
+/// 打开指定路径的存储实例并注入自定义凭据实现。
 pub fn open_with_secrets(path: impl AsRef<Path>, secrets: Box<dyn Secrets>) -> Result<Store> {
     let db = redb::Database::create(path)?;
     Ok(Store {
@@ -64,18 +55,7 @@ pub fn open_with_secrets(path: impl AsRef<Path>, secrets: Box<dyn Secrets>) -> R
     })
 }
 
-/// 打开一个落在系统临时目录下的一次性存储，`Drop` 时删除文件。
-///
-/// # Errors
-/// 临时目录不可写时返回 [`Error::Io`]。
-pub fn open_temp() -> Result<Store> {
-    open_temp_with_secrets(Box::new(KeyringSecrets))
-}
-
-/// 同 [`open_temp`]，但允许注入凭据实现。
-///
-/// # Errors
-/// 同 [`open_temp`]。
+/// 在系统临时目录创建一次性存储实例，Drop 时自动删除。
 pub fn open_temp_with_secrets(secrets: Box<dyn Secrets>) -> Result<Store> {
     let path = unique_temp_path()?;
     match redb::Database::create(&path) {
@@ -92,26 +72,17 @@ pub fn open_temp_with_secrets(secrets: Box<dyn Secrets>) -> Result<Store> {
 }
 
 impl Store {
-    /// 读取设备身份；未注册时返回 `None`。
-    ///
-    /// # Errors
-    /// 数据库或 `JSON` 失败时返回错误。
+    /// 读取设备身份，未注册时返回 None。
     pub fn device(&self) -> Result<Option<lyra_proto::Device>> {
         decode(self.get_meta("device")?)
     }
 
-    /// 持久化设备身份（覆盖写入）。
-    ///
-    /// # Errors
-    /// 数据库或 `JSON` 失败时返回错误。
+    /// 覆盖写入设备身份。
     pub fn set_device(&self, device: &lyra_proto::Device) -> Result<()> {
         self.put_meta("device", &serde_json::to_vec(device)?)
     }
 
-    /// 读取登录态；token 与 vip_token 从系统凭据管理器回填。
-    ///
-    /// # Errors
-    /// 数据库、`JSON` 或凭据存储失败时返回错误。
+    /// 读取登录态，并从系统凭据管理器回填令牌。
     pub fn account(&self) -> Result<Option<Account>> {
         let Some(mut account) = decode::<Account>(self.get_meta("account")?)? else {
             return Ok(None);
@@ -126,10 +97,7 @@ impl Store {
         Ok(Some(account))
     }
 
-    /// 写入登录态；token 与 vip_token 只进凭据管理器，`redb` 中的副本永远不含它们。
-    ///
-    /// # Errors
-    /// 数据库、`JSON` 或凭据存储失败时返回错误。
+    /// 写入登录态，令牌安全隔离存入系统凭据管理器。
     pub fn set_account(&self, account: &Account) -> Result<()> {
         let user = account.userid.to_string();
         if account.token.is_empty() {
@@ -150,10 +118,7 @@ impl Store {
         self.put_meta("account", &serde_json::to_vec(&stored)?)
     }
 
-    /// 登出：删除凭据管理器中的两个凭据与 `redb` 中的登录态。
-    ///
-    /// # Errors
-    /// 数据库或凭据存储失败时返回错误。
+    /// 清除登录态及系统凭据管理器中的关联凭据。
     pub fn clear_account(&self) -> Result<()> {
         if let Some(account) = decode::<Account>(self.get_meta("account")?)? {
             self.secrets.delete(&account.userid.to_string())?;
@@ -162,26 +127,17 @@ impl Store {
         self.remove_meta("account")
     }
 
-    /// 读取设置；从未设置过时返回 [`Settings::default`]。
-    ///
-    /// # Errors
-    /// 数据库或 `JSON` 失败时返回错误。
+    /// 读取用户配置，未配置时返回默认值。
     pub fn settings(&self) -> Result<Settings> {
         Ok(decode::<Settings>(self.get_meta("settings")?)?.unwrap_or_default())
     }
 
-    /// 覆盖写入设置。
-    ///
-    /// # Errors
-    /// 数据库或 `JSON` 失败时返回错误。
+    /// 覆盖写入用户配置。
     pub fn set_settings(&self, s: &Settings) -> Result<()> {
         self.put_meta("settings", &serde_json::to_vec(s)?)
     }
 
-    /// 写入一个缓存块；`ttl` 为 `None` 或 `Some(Duration::ZERO)` 时立即过期。
-    ///
-    /// # Errors
-    /// 数据库失败时返回错误。
+    /// 写入指定命名空间的缓存块及过期时长。
     pub fn put_blob(&self, ns: &str, key: &str, bytes: &[u8], ttl: Option<Duration>) -> Result<()> {
         let expires = ttl.map_or(0, |ttl| now_ms().saturating_add(millis(ttl)));
         self.write(|txn| {
@@ -190,10 +146,7 @@ impl Store {
         })
     }
 
-    /// 读取一个缓存块；未知键或已过期都返回 `None`。
-    ///
-    /// # Errors
-    /// 数据库失败时返回错误。
+    /// 读取缓存块，未命中或已过期返回 None。
     pub fn get_blob(&self, ns: &str, key: &str) -> Result<Option<Vec<u8>>> {
         let txn = self.db.begin_read()?;
         let table = match txn.open_table(BLOBS) {
@@ -209,113 +162,6 @@ impl Store {
             return Ok(None);
         }
         Ok(Some(bytes.to_vec()))
-    }
-
-    /// 删除一个缓存块；不存在也算成功。
-    ///
-    /// # Errors
-    /// 数据库失败时返回错误。
-    pub fn remove_blob(&self, ns: &str, key: &str) -> Result<()> {
-        self.write(|txn| {
-            txn.open_table(BLOBS)?.remove((ns, key))?;
-            Ok(())
-        })
-    }
-
-    /// 清理所有已过期的缓存块，返回删除条数。
-    ///
-    /// # Errors
-    /// 数据库失败时返回错误。
-    pub fn drop_expired(&self) -> Result<usize> {
-        let now = now_ms();
-        self.write(|txn| {
-            let mut table = txn.open_table(BLOBS)?;
-            let mut stale: Vec<(String, String)> = Vec::new();
-            for row in table.iter()? {
-                let (k, v) = row?;
-                let (ns, key) = k.value();
-                let (expires, _) = v.value();
-                if is_expired(expires, now) {
-                    stale.push((ns.to_owned(), key.to_owned()));
-                }
-            }
-            let mut removed = 0;
-            for (ns, key) in stale {
-                if table.remove((ns.as_str(), key.as_str()))?.is_some() {
-                    removed += 1;
-                }
-            }
-            Ok(removed)
-        })
-    }
-
-    /// 清空一个命名空间，返回删除条数；其它命名空间不受影响。
-    ///
-    /// # Errors
-    /// 数据库失败时返回错误。
-    pub fn clear_ns(&self, ns: &str) -> Result<usize> {
-        self.write(|txn| {
-            let mut table = txn.open_table(BLOBS)?;
-            let mut keys: Vec<String> = Vec::new();
-            for row in table.iter()? {
-                let (k, _) = row?;
-                let (row_ns, key) = k.value();
-                if row_ns == ns {
-                    keys.push(key.to_owned());
-                }
-            }
-            let mut removed = 0;
-            for key in keys {
-                if table.remove((ns, key.as_str()))?.is_some() {
-                    removed += 1;
-                }
-            }
-            Ok(removed)
-        })
-    }
-
-    /// 追加一条播放历史；同一 `hash` 只保留最新一条（覆盖旧记录）。
-    ///
-    /// # Errors
-    /// 数据库或 `JSON` 失败时返回错误。
-    pub fn push_history(&self, entry: &HistoryEntry) -> Result<()> {
-        let bytes = serde_json::to_vec(entry)?;
-        self.write(|txn| {
-            txn.open_table(HISTORY)?.insert(entry.hash.as_str(), bytes.as_slice())?;
-            Ok(())
-        })
-    }
-
-    /// 读取最近 `limit` 条播放历史，最近优先。
-    ///
-    /// # Errors
-    /// 数据库或 `JSON` 失败时返回错误。
-    pub fn history(&self, limit: usize) -> Result<Vec<HistoryEntry>> {
-        let txn = self.db.begin_read()?;
-        let table = match txn.open_table(HISTORY) {
-            Ok(table) => table,
-            Err(redb::TableError::TableDoesNotExist(_)) => return Ok(Vec::new()),
-            Err(e) => return Err(e.into()),
-        };
-        let mut entries: Vec<HistoryEntry> = Vec::new();
-        for row in table.iter()? {
-            let (_, value) = row?;
-            entries.push(serde_json::from_slice(value.value())?);
-        }
-        entries.sort_by_key(|e| std::cmp::Reverse(e.played_at_ms));
-        entries.truncate(limit);
-        Ok(entries)
-    }
-
-    /// 清空全部播放历史。
-    ///
-    /// # Errors
-    /// 数据库失败时返回错误。
-    pub fn clear_history(&self) -> Result<()> {
-        self.write(|txn| {
-            txn.delete_table(HISTORY)?;
-            Ok(())
-        })
     }
 
     /// 统一写事务辅助方法（执行闭包并在成功后自动提交）。
@@ -514,7 +360,7 @@ mod tests {
     }
 
     #[test]
-    fn blob_cache_round_trip_ttl_and_namespaces() {
+    fn blob_cache_round_trip_and_ttl() {
         let store = temp_store();
 
         store.put_blob("meta", "a", b"hello", None).unwrap();
@@ -527,45 +373,6 @@ mod tests {
         // 零 TTL 视为立即过期。
         store.put_blob("meta", "ttl", b"x", Some(Duration::ZERO)).unwrap();
         assert!(store.get_blob("meta", "ttl").unwrap().is_none());
-        assert!(store.drop_expired().unwrap() >= 1);
-
-        // 命名空间隔离。
-        store.put_blob("n1", "k", b"1", None).unwrap();
-        store.put_blob("n2", "k", b"2", None).unwrap();
-        assert_eq!(store.clear_ns("n1").unwrap(), 1);
-        assert!(store.get_blob("n1", "k").unwrap().is_none());
-        assert_eq!(store.get_blob("n2", "k").unwrap().as_deref(), Some(b"2".as_slice()));
-    }
-
-    #[test]
-    fn history_dedup_order_and_clear() {
-        let store = temp_store();
-        let entry = |hash: &str, ms: i64| HistoryEntry {
-            hash: hash.to_owned(),
-            name: "n".to_owned(),
-            singer: "s".to_owned(),
-            album_id: "a".to_owned(),
-            album_audio_id: "b".to_owned(),
-            played_at_ms: ms,
-        };
-
-        store.push_history(&entry("h1", 100)).unwrap();
-        store.push_history(&entry("h2", 200)).unwrap();
-        store.push_history(&entry("h3", 300)).unwrap();
-        let hashes: Vec<String> = store.history(10).unwrap().into_iter().map(|e| e.hash).collect();
-        assert_eq!(hashes, ["h3", "h2", "h1"]);
-
-        // 同 hash 覆盖而非新增。
-        store.push_history(&entry("h2", 400)).unwrap();
-        let recent = store.history(10).unwrap();
-        assert_eq!(recent.len(), 3);
-        assert_eq!(recent[0].hash, "h2");
-        assert_eq!(recent[0].played_at_ms, 400);
-
-        assert_eq!(store.history(2).unwrap().len(), 2);
-
-        store.clear_history().unwrap();
-        assert!(store.history(10).unwrap().is_empty());
     }
 
     #[test]

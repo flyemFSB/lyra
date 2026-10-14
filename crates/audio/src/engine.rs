@@ -6,7 +6,6 @@ use std::time::{Duration, Instant};
 
 use cpal::traits::{DeviceTrait, HostTrait};
 use crossbeam_channel::{Receiver, RecvTimeoutError, Sender, unbounded};
-use parking_lot::Mutex;
 use ringbuf::traits::{Observer, Split};
 use ringbuf::{HeapProd, HeapRb};
 
@@ -33,10 +32,7 @@ impl Default for AudioConfig {
 /// UI → 解码线程的控制命令。
 enum Command {
     Play(TrackRef),
-    Pause,
-    Resume,
     Toggle,
-    Stop,
     Seek(u64),
     Shutdown,
 }
@@ -50,7 +46,7 @@ pub struct Engine {
 struct EngineInner {
     shared: Arc<Shared>,
     cmd_tx: Sender<Command>,
-    thread: Mutex<Option<JoinHandle<()>>>,
+    thread: Option<JoinHandle<()>>,
     /// 输出流必须存活；`Stream` 在 drop 时停止播放。
     _stream: cpal::Stream,
 }
@@ -58,8 +54,18 @@ struct EngineInner {
 impl Drop for EngineInner {
     fn drop(&mut self) {
         let _ = self.cmd_tx.send(Command::Shutdown);
-        if let Some(handle) = self.thread.lock().take() {
+        let Some(handle) = self.thread.take() else {
+            return;
+        };
+        // 最多等待解码线程 2 秒，避免因网络或解码阻塞导致退出挂起。
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while !handle.is_finished() && Instant::now() < deadline {
+            thread::sleep(Duration::from_millis(20));
+        }
+        if handle.is_finished() {
             let _ = handle.join();
+        } else {
+            tracing::warn!("解码线程退出超时，已放弃等待");
         }
     }
 }
@@ -70,24 +76,9 @@ impl Engine {
         self.send(Command::Play(track));
     }
 
-    /// 暂停当前播放。空闲时无效果。
-    pub fn pause(&self) {
-        self.send(Command::Pause);
-    }
-
-    /// 从暂停恢复播放。
-    pub fn resume(&self) {
-        self.send(Command::Resume);
-    }
-
     /// 播放 / 暂停切换。
     pub fn toggle(&self) {
         self.send(Command::Toggle);
-    }
-
-    /// 停止并清空当前曲目。
-    pub fn stop(&self) {
-        self.send(Command::Stop);
     }
 
     /// 定位到指定毫秒。无当前曲目时无效果。
@@ -118,22 +109,12 @@ impl Engine {
     }
 }
 
-/// 用默认 [`AudioConfig`] 启动引擎。
-///
-/// # Errors
-/// 见 [`spawn_with`]。
+/// 使用默认配置启动音频引擎。
 pub fn spawn(fetcher: Arc<dyn Fetcher>, events: Box<dyn Fn(Event) + Send + Sync>) -> Result<Engine, Error> {
     spawn_with(fetcher, events, AudioConfig::default())
 }
 
-/// 打开默认输出设备、构建环形缓冲与 cpal 输出流，并启动解码线程。
-///
-/// # Errors
-/// - 无默认输出设备 → [`Error::NoOutputDevice`]
-/// - 设备默认配置读取失败 → [`Error::OutputConfig`]
-/// - 采样格式不支持 / 输出流构建失败 → [`Error::UnsupportedSampleFormat`] / [`Error::BuildStream`]
-/// - 输出流无法播放 → [`Error::PlayStream`]
-/// - 解码线程启动失败 → [`Error::SpawnThread`]
+/// 打开默认输出设备、构建环形缓冲与音频输出流并启动解码线程。
 pub fn spawn_with(
     fetcher: Arc<dyn Fetcher>,
     events: Box<dyn Fn(Event) + Send + Sync>,
@@ -177,7 +158,7 @@ pub fn spawn_with(
         inner: Arc::new(EngineInner {
             shared,
             cmd_tx,
-            thread: Mutex::new(Some(thread)),
+            thread: Some(thread),
             _stream: stream,
         }),
     })
@@ -284,7 +265,6 @@ struct Player {
     state: State,
     session: Option<Session>,
     last_report: Instant,
-    last_position_ms: u64,
 }
 
 impl Player {
@@ -294,7 +274,6 @@ impl Player {
             state: State::Idle,
             session: None,
             last_report: Instant::now(),
-            last_position_ms: 0,
         }
     }
 
@@ -336,7 +315,7 @@ impl Player {
                     }
                     let dur = self.session.as_ref().map_or(0, |s| s.duration_ms);
                     self.session = None;
-                    self.push_position(dur, dur);
+                    self.ctx.shared.set_position(dur, dur);
                     self.emit(Event::Ended);
                     self.set_state(State::Idle);
                 }
@@ -355,22 +334,11 @@ impl Player {
     fn handle(&mut self, cmd: Command) -> bool {
         match cmd {
             Command::Play(track) => self.start(&track),
-            Command::Pause => {
-                if self.state == State::Playing {
-                    self.set_state(State::Paused);
-                }
-            }
-            Command::Resume => {
-                if self.state == State::Paused {
-                    self.set_state(State::Playing);
-                }
-            }
             Command::Toggle => match self.state {
                 State::Playing => self.set_state(State::Paused),
                 State::Paused => self.set_state(State::Playing),
                 _ => {}
             },
-            Command::Stop => self.stop(),
             Command::Seek(ms) => self.seek(ms),
             Command::Shutdown => return false,
         }
@@ -380,13 +348,14 @@ impl Player {
     fn start(&mut self, track: &TrackRef) {
         // 更新加载态与当前曲目信息
         self.set_state(State::Loading);
-        self.ctx.shared.set_track(Some(track.clone()));
-        self.emit(Event::TrackChanged(Some(track.clone())));
+        self.ctx.shared.set_track(track.clone());
 
         match Session::open(&self.ctx, track) {
             Ok(session) => {
                 self.session = Some(session);
-                self.push_position(0, track.duration_ms);
+                self.ctx.shared.set_position(0, track.duration_ms);
+                // 切歌时主动请求清空环形缓冲区，避免混入上一首的残留音频。
+                self.ctx.shared.request_flush();
                 self.set_state(State::Playing);
             }
             Err(e) => {
@@ -397,22 +366,13 @@ impl Player {
         }
     }
 
-    fn stop(&mut self) {
-        self.session = None;
-        self.ctx.shared.set_track(None);
-        self.push_position(0, 0);
-        self.emit(Event::TrackChanged(None));
-        self.set_state(State::Idle);
-    }
-
     fn seek(&mut self, ms: u64) {
         let dst_rate = self.ctx.sample_rate;
         let Some(session) = self.session.as_mut() else {
             return;
         };
         if let Err(error) = session.decoder.seek(ms) {
-            // 定位失败时上报失败事件通知
-            let message = format!("seek 失败: {error}");
+            let message = format!("定位失败: {error}");
             self.emit(Event::Failed { message });
             return;
         }
@@ -421,12 +381,12 @@ impl Player {
         }
         session.pending.clear();
         session.pending_off = 0;
-        session.pushed_frames = ms * u64::from(dst_rate) / 1000;
+        session.pushed_frames = ms.saturating_mul(u64::from(dst_rate)) / 1000;
         // 发送刷新信号清空环形缓冲中旧位置残留样本
         self.ctx.shared.request_flush();
         // 目标定位位置直接更新，避免受异步清空延迟影响
         let duration = session.duration_ms;
-        self.push_position(ms, duration);
+        self.ctx.shared.set_position(ms, duration);
     }
 
     /// 解码一段并推入 ring。ring 满时返回 [`Pump::Full`]，由外层短暂休眠后重试。
@@ -461,7 +421,6 @@ impl Player {
         }
         self.state = state;
         self.ctx.shared.set_state(state);
-        self.emit(Event::StateChanged(state));
     }
 
     /// 每约 150ms 上报一次进度；仅在存在当前曲目时进行。
@@ -475,19 +434,7 @@ impl Player {
         let position = session.position_ms(&self.ctx.prod);
         let duration = session.duration_ms;
         self.last_report = Instant::now();
-        if position == self.last_position_ms && self.state != State::Playing {
-            return;
-        }
-        self.push_position(position, duration);
-    }
-
-    fn push_position(&mut self, position: u64, duration: u64) {
-        self.last_position_ms = position;
         self.ctx.shared.set_position(position, duration);
-        self.emit(Event::Position {
-            ms: position,
-            duration_ms: duration,
-        });
     }
 }
 

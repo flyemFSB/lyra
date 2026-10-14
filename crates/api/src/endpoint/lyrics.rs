@@ -20,9 +20,7 @@ pub struct LyricRef {
 
 /// 第一阶段：根据音频特征搜索歌词候选并提取首个匹配项。
 pub async fn search_lyric(api: &Api, hash: &str, duration_ms: u64, album_audio_id: &str) -> Result<LyricRef> {
-    // 歌词搜索使用独立参数集（不带全局默认参数），但**必须签名**：
-    // 参考实现里写的 `notSign: true` 是死参数（request.js 读的是 `notSignature`），
-    // 它实际一直带着 signature。实测不带 → 上游 200 + **空响应体**，解析直接失败。
+    // 歌词搜索使用自定义参数集并计算防篡改签名。
     let spec = RequestSpec::get("/v1/search")
         .base(LYRICS_BASE)
         .clear_default_params()

@@ -64,7 +64,7 @@ impl<T> Default for SingleFlight<T> {
 }
 
 impl<T> SingleFlight<T> {
-    /// 空实现。
+    /// 创建单飞合并器实例。
     #[must_use]
     pub fn new() -> Self {
         Self {
@@ -81,9 +81,7 @@ impl<T> SingleFlight<T> {
 }
 
 impl<T: Clone + Send + Sync + 'static> SingleFlight<T> {
-    /// 执行 `work`，同 key 的并发调用共享同一次执行结果。
-    ///
-    /// `work` 只在成为 leader 时被调用。
+    /// 执行异步任务，并发同键请求共享 leader 执行结果。
     pub async fn run<F, Fut>(&self, key: impl Into<String>, work: F) -> Result<T>
     where
         F: FnOnce() -> Fut,

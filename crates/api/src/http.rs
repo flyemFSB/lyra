@@ -18,16 +18,22 @@ impl Default for ReqwestTransport {
 }
 
 impl ReqwestTransport {
-    /// 创建客户端实例并配置自适应连接池。
+    /// 创建配置了 HTTP/2 自适应窗口与读超时的客户端实例。
     #[must_use]
     pub fn new() -> Self {
         Self {
             client: reqwest::Client::builder()
                 // 启用 HTTP/2 自适应窗口提升吞吐。
                 .http2_adaptive_window(true)
+                .read_timeout(std::time::Duration::from_secs(30))
                 .build()
                 .unwrap_or_default(),
         }
+    }
+
+    /// 将网络错误转换为传输错误并剔除 URL，防止令牌等敏感信息泄露。
+    fn transport_error(error: reqwest::Error) -> Error {
+        Error::Transport(error.without_url().to_string())
     }
 
     fn request(&self, request: &Request) -> reqwest::RequestBuilder {
@@ -59,7 +65,7 @@ impl Transport for ReqwestTransport {
             .request(&request)
             .send()
             .await
-            .map_err(|error| Error::Transport(error.to_string()))?;
+            .map_err(ReqwestTransport::transport_error)?;
         let status = response.status().as_u16();
         let headers = response
             .headers()
@@ -69,7 +75,7 @@ impl Transport for ReqwestTransport {
         let body = response
             .bytes()
             .await
-            .map_err(|error| Error::Transport(error.to_string()))?
+            .map_err(ReqwestTransport::transport_error)?
             .to_vec();
         Ok(Response { status, headers, body })
     }
@@ -79,19 +85,18 @@ impl Transport for ReqwestTransport {
             .request(&request)
             .send()
             .await
-            .map_err(|error| Error::Transport(error.to_string()))?;
+            .map_err(ReqwestTransport::transport_error)?;
         if !response.status().is_success() {
             return Err(Error::Http {
                 status: response.status().as_u16(),
-                body: response.text().await.unwrap_or_default(),
+                // 截断错误响应文本，避免大型 HTML 页面污染错误文案。
+                body: crate::codec::truncate(&response.text().await.unwrap_or_default(), 512),
             });
         }
+        // 上报期望内容长度以校验下载完整性。
+        sink.expected_len(response.content_length());
         // 流式分块传输避免大文件占用额外内存。
-        while let Some(chunk) = response
-            .chunk()
-            .await
-            .map_err(|error| Error::Transport(error.to_string()))?
-        {
+        while let Some(chunk) = response.chunk().await.map_err(ReqwestTransport::transport_error)? {
             sink.chunk(&chunk);
         }
         Ok(())

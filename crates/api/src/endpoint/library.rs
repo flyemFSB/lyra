@@ -1,6 +1,6 @@
 //! 音乐库与用户信息端点，包含用户歌单、歌曲详情及账号资料。
 
-use lyra_proto::consts::{APPID, RSA_PUBLIC};
+use lyra_proto::consts::RSA_PUBLIC;
 use lyra_proto::rsa_raw_encrypt_hex;
 use serde_json::Value;
 
@@ -99,12 +99,6 @@ pub async fn user_detail(api: &Api) -> Result<Value> {
         .param("plat", 1)
         .header("x-router", "usercenter.kugou.com");
     api.call(spec, Freshness::ACCOUNT).await
-}
-
-/// 获取当前平台应用标识。
-#[must_use]
-pub const fn app_id() -> u32 {
-    APPID
 }
 
 #[cfg(test)]

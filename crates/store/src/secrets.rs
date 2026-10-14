@@ -10,22 +10,13 @@ const KEYRING_SERVICE: &str = "lyra.kugou";
 
 /// 键值式凭据存储：`user` 为键，`secret` 为值。
 pub trait Secrets: Send + Sync + 'static {
-    /// 写入（或覆盖）`user` 的凭据。
-    ///
-    /// # Errors
-    /// 底层凭据存储不可用时返回 [`Error::Secret`]。
+    /// 写入或覆盖指定用户的凭据。
     fn set(&self, user: &str, secret: &str) -> Result<()>;
 
-    /// 读取 `user` 的凭据；不存在时返回 `None`。
-    ///
-    /// # Errors
-    /// 底层凭据存储不可用时返回 [`Error::Secret`]。
+    /// 读取指定用户的凭据，不存在时返回 None。
     fn get(&self, user: &str) -> Result<Option<String>>;
 
-    /// 删除 `user` 的凭据；本就不存在时视为成功。
-    ///
-    /// # Errors
-    /// 底层凭据存储不可用时返回 [`Error::Secret`]。
+    /// 删除指定用户的凭据，条目不存在亦视为成功。
     fn delete(&self, user: &str) -> Result<()>;
 }
 

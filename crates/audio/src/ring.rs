@@ -3,9 +3,10 @@
 use cpal::{FromSample, Sample};
 use ringbuf::traits::{Consumer, Producer};
 
-/// 由目标时长（毫秒）计算环形缓冲区容量样本数。
+/// 根据采样率、声道数和目标毫秒时长计算环形缓冲区容量。
 pub(crate) fn ring_capacity(sample_rate: u32, channels: usize, ring_ms: u32) -> usize {
     let channels = channels.max(1);
+    let ring_ms = ring_ms.clamp(20, 5_000);
     let frames = u64::from(sample_rate) * u64::from(ring_ms) / 1000;
     let samples = frames * channels as u64;
     usize::try_from(samples).unwrap_or(usize::MAX).max(channels)
@@ -40,6 +41,11 @@ where
     popped
 }
 
+/// 按声道求均值下混为单声道，保留全声道能量。
+fn downmix_to_mono(frame: &[f32]) -> f32 {
+    frame.iter().sum::<f32>() / frame.len() as f32
+}
+
 /// 执行声道映射与转换（声道不足时补齐、多余时截断）。
 pub(crate) fn map_channels(input: &[f32], src: usize, dst: usize) -> Vec<f32> {
     if src == dst || src == 0 {
@@ -49,6 +55,10 @@ pub(crate) fn map_channels(input: &[f32], src: usize, dst: usize) -> Vec<f32> {
     let mut out = Vec::with_capacity(frames * dst);
     for frame in 0..frames {
         let base = frame * src;
+        if dst == 1 && src > 1 {
+            out.push(downmix_to_mono(&input[base..base + src]));
+            continue;
+        }
         for ch in 0..dst {
             out.push(input[base + ch % src]);
         }
@@ -93,13 +103,13 @@ mod tests {
     fn ring_reports_overflow_drop() {
         let rb = HeapRb::<f32>::new(3);
         let (mut prod, mut cons) = rb.split();
-        // 容量 3：第 4 个样本放不下，push_slice 只报告 3，剩下被调用方保留。
+        // 容量为 3 时超出样本被丢弃，仅写入前 3 个。
         let pushed = push_slice(&mut prod, &[1.0, 2.0, 3.0, 4.0]);
         assert_eq!(pushed, 3);
         let mut out = [0.0f32; 3];
         assert_eq!(fill_output(&mut cons, 1.0, &mut out), 3);
         assert_eq!(out, [1.0, 2.0, 3.0]);
-        // 缓冲已空，再取得到 0。
+        // 缓冲已空时返回 0 个有效样本。
         let mut empty = [0.0f32; 1];
         assert_eq!(fill_output(&mut cons, 1.0, &mut empty), 0);
         assert_eq!(empty, [0.0]);
@@ -125,7 +135,8 @@ mod tests {
     #[test]
     fn channel_mapping_mono_to_stereo_and_back() {
         assert_eq!(map_channels(&[1.0, 2.0], 1, 2), vec![1.0, 1.0, 2.0, 2.0]);
-        assert_eq!(map_channels(&[1.0, 2.0, 3.0, 4.0], 2, 1), vec![1.0, 3.0]);
+        // 立体声转单声道需均值混音，避免丢失右声道内容。
+        assert_eq!(map_channels(&[1.0, 2.0, 3.0, 4.0], 2, 1), vec![1.5, 3.5]);
         assert_eq!(map_channels(&[1.0, 2.0], 2, 2), vec![1.0, 2.0]);
     }
 }

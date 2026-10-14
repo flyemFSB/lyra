@@ -194,12 +194,6 @@ pub fn find_array<'a>(root: &'a Value, keys: &[&str]) -> Option<&'a Vec<Value>> 
     })
 }
 
-/// 同 find_array，但直接返回克隆结果，取不到时为空表。
-#[must_use]
-pub fn find_array_or_empty(root: &Value, keys: &[&str]) -> Vec<Value> {
-    find_array(root, keys).cloned().unwrap_or_default()
-}
-
 /// 取上游的错误描述文本。
 #[must_use]
 pub fn error_message(value: &Value) -> String {
@@ -210,10 +204,7 @@ pub fn error_message(value: &Value) -> String {
     if message.is_empty() { value.to_string() } else { message }
 }
 
-/// 会话密钥响应体解码：先按 AES-CBC 解密；解密失败说明上游返回的本来就是明文，直接按 UTF-8 使用。
-///
-/// 上游只在成功时加密，报错时返回明文 JSON，因此缺这条兼底会把
-/// `"Unpad Error"` 这类密码学错误暴露给用户，把真实的业务错误码吞掉。
+/// 解密会话密钥加密的响应体，解密失败时平滑降级为原始明文。
 #[must_use]
 pub fn decode_session_body(cipher: &[u8], secret: &str) -> String {
     lyra_proto::secret_decrypt_bytes(cipher, secret)
@@ -225,7 +216,7 @@ pub fn decode_session_body(cipher: &[u8], secret: &str) -> String {
         )
 }
 
-/// 判定上游响应是否业务失败（显式 status 为 0 或 error_code 非 0）。
+/// 检查上游响应业务状态，当 status 为 0 或 error_code 非 0 时返回错误。
 pub fn check_business(value: &Value) -> Result<()> {
     let status_failed = pick(value, &["status"]).is_some_and(|status| as_i64(status) == 0);
     let code_failed = pick(value, &["error_code"]).is_some_and(|code| as_i64(code) != 0);
@@ -238,7 +229,7 @@ pub fn check_business(value: &Value) -> Result<()> {
     })
 }
 
-/// 「HTTP 状态 + JSON 体」的标准响应校验。
+/// 校验 HTTP 状态码并解析校验上游 JSON 响应体。
 pub fn check_response(status: u16, body: &[u8]) -> Result<Value> {
     if !(200..300).contains(&status) {
         return Err(Error::Http {
@@ -256,7 +247,7 @@ pub fn check_response(status: u16, body: &[u8]) -> Result<Value> {
     Ok(value)
 }
 
-fn truncate(text: &str, max: usize) -> String {
+pub(crate) fn truncate(text: &str, max: usize) -> String {
     if text.chars().count() <= max {
         return text.to_owned();
     }

@@ -35,18 +35,6 @@ impl Code {
             other => Self::Other(other),
         }
     }
-
-    /// 该错误码是否应被视为成功（幂等）。
-    #[must_use]
-    pub const fn is_idempotent_success(self) -> bool {
-        matches!(self, Self::AlreadyClaimed)
-    }
-
-    /// 该错误码是否可以被安全忽略。
-    #[must_use]
-    pub const fn is_ignorable(self) -> bool {
-        matches!(self, Self::ListenReportFailed)
-    }
 }
 
 /// 传输与端点错误枚举。
@@ -74,10 +62,7 @@ pub enum Error {
     /// 需要行为验证，但重试一次后仍然失败。
     #[error("upstream still requires verification after retry (ssa-code={0})")]
     NeedsVerify(String),
-    /// 上游返回成功状态，但客户端需要的字段缺失。
-    ///
-    /// 设备注册实测会返回 `{"status":1,"error_code":0,"data":[]}`：既非业务错误，也无法使用，
-    /// 需要调用方隔一小段时间重试一次。
+    /// 上游状态成功但关键字段为空，通常需短时间后重试。
     #[error("empty data: {0}")]
     EmptyData(String),
     /// 未登录但该端点需要登录态。
@@ -86,9 +71,6 @@ pub enum Error {
     /// 响应体不是合法 JSON / 结构不符。
     #[error("decode failed: {0}")]
     Decode(String),
-    /// JSON 解析失败。
-    #[error("json: {0}")]
-    Json(String),
     /// 协议原语失败。
     #[error("protocol: {0}")]
     Protocol(String),
@@ -100,12 +82,6 @@ pub enum Error {
 impl From<std::io::Error> for Error {
     fn from(error: std::io::Error) -> Self {
         Self::Io(error.to_string())
-    }
-}
-
-impl From<serde_json::Error> for Error {
-    fn from(error: serde_json::Error) -> Self {
-        Self::Json(error.to_string())
     }
 }
 

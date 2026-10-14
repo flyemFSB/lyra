@@ -54,7 +54,7 @@ pub(crate) fn js_round(x: f64) -> i64 {
     (x + 0.5).floor() as i64
 }
 
-/// JS `Math.ceil`。
+/// 对齐 JS Math.ceil 向上取整。
 pub(crate) fn js_ceil(x: f64) -> f64 {
     x.ceil()
 }

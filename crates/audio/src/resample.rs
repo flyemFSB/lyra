@@ -26,10 +26,7 @@ pub struct Resampler {
 }
 
 impl Resampler {
-    /// 为给定输入 / 输出采样率与声道数创建重采样器。
-    ///
-    /// # Errors
-    /// 声道数为 0 或采样率为 0 时返回 [`Error::Resample`]。
+    /// 为给定输入/输出采样率与声道数创建重采样器。
     pub fn new(input_rate: u32, output_rate: u32, channels: usize) -> Result<Self, Error> {
         if channels == 0 {
             return Err(Error::Resample("声道数为 0".into()));
@@ -55,10 +52,7 @@ impl Resampler {
         })
     }
 
-    /// 推入一段交织输入，返回已能输出的交织样本（可能为空）。
-    ///
-    /// # Errors
-    /// rubato 处理失败时返回 [`Error::Resample`]。
+    /// 推入交织输入样本，返回重采样后的交织样本。
     pub fn process(&mut self, interleaved: &[f32]) -> Result<Vec<f32>, Error> {
         self.stage.extend_from_slice(interleaved);
 
@@ -88,17 +82,14 @@ impl Resampler {
         Ok(out)
     }
 
-    /// 重置内部状态，用于 seek 后清除历史。
+    /// 重置内部状态，用于定位后清空历史缓冲。
     pub fn reset(&mut self) {
         RubatoResampler::reset(&mut self.inner);
         self.stage.clear();
     }
 }
 
-/// 一次性把整段交织 PCM 从 `input_rate` 重采样到 `output_rate`。
-///
-/// # Errors
-/// 同 [`Resampler::new`] 与 [`Resampler::process`]。
+/// 一次性将交织 PCM 数据重采样到目标采样率。
 pub fn resample_all(samples: &[f32], channels: usize, input_rate: u32, output_rate: u32) -> Result<Vec<f32>, Error> {
     if input_rate == output_rate {
         return Ok(samples.to_vec());

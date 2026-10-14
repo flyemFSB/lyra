@@ -104,10 +104,7 @@ impl Api {
         }
     }
 
-    /// 鉴权类端点调用（登录 / 发码 / 人机验证）：不缓存，且**不追加毫秒扰动**。
-    ///
-    /// 与 `Freshness::SideEffect` 的区别：登录服务会因「多出来的未签名 query 参数」直接判失败
-    /// 而 cloudlist 那类内容端点反而靠毫秒扰动绕开上游 2 分钟的响应缓存。
+    /// 鉴权类端点调用，不缓存且不追加时间戳扰动参数。
     pub async fn call_auth(&self, spec: RequestSpec) -> Result<Value> {
         self.call(spec, Freshness::NoStore).await
     }
@@ -123,23 +120,6 @@ impl Api {
             ts_millis: now_millis(),
         })?;
         Ok((sim.edt, sim.sid))
-    }
-
-    /// 云歌单双加密通道调用，使用一次性 AES 会话密钥。
-    pub async fn cloud(&self, path: &str, body: &Value) -> Result<Value> {
-        let session = self.session().clone();
-        if !session.is_logged_in() {
-            return Err(Error::NotLoggedIn);
-        }
-        let (request, aes) = crate::cloud::build(&session, path, body)?;
-        let response = self.transport.execute(request).await?;
-        if !(200..300).contains(&response.status) {
-            return Err(Error::Http {
-                status: response.status,
-                body: response.text(),
-            });
-        }
-        crate::cloud::parse(&response.body, &aes)
     }
 
     async fn dispatch(&self, spec: &RequestSpec, session: &Session, freshness: Freshness) -> Result<Value> {
@@ -176,20 +156,16 @@ impl Api {
     }
 }
 
-/// 把 `ssa-code` 响应头升级为验证错误。
-///
-/// 参考实现（util/request.js:220）**只**以该响应头为准，业务体里的字段并不可靠：
-/// `/tracker/v5/url` 实际返回的是 `{"errcode":20028,"status":0,"error":"本次请求需要验证"}`，
-/// 既没有 `error_code` 键，也没有约定的 20028 数值，只看业务码会漏掉整条重试路径。
+/// 根据响应头 ssa-code 标记将上游错误转换为需要验证错误。
 fn attach_ssa(error: Error, ssa: Option<String>) -> Error {
     ssa.map_or(error, Error::NeedsVerify)
 }
 
-/// 该错误是否意味着「需要行为验证」。
+/// 判断错误是否需要触发行为验证。
 #[must_use]
 pub fn needs_verify(error: &Error) -> bool {
-    matches!(error, Error::NeedsVerify(_) | Error::Upstream { code: 20_028, .. })
-        || matches!(error.code(), Some(Code::NeedVerify))
+    // 匹配验证错误变体或对应业务错误码。
+    matches!(error, Error::NeedsVerify(_)) || error.code() == Some(Code::NeedVerify)
 }
 
 #[cfg(test)]
@@ -284,8 +260,7 @@ mod tests {
 
     #[tokio::test]
     async fn ssa_header_alone_triggers_the_retry() {
-        // 真实上游被风控时回的是 {"errcode":20028,"status":0,"error":"本次请求需要验证"}：
-        // 既没有 `error_code` 键、也没有约定的 20028 数值，只有 ssa-code 响应头可靠。
+        // 验证仅凭响应头中的 ssa-code 也能触发重试机制。
         let mock = Arc::new(MockTransport::new());
         mock.on_ssa(
             "/tracker/v5/url",
@@ -349,6 +324,29 @@ mod tests {
             tokio::time::sleep(self.delay).await;
             self.inner.execute(request).await
         }
+    }
+
+    #[tokio::test]
+    async fn concurrent_posts_with_different_bodies_are_not_coalesced() {
+        // 请求体不同的并发 POST 请求不能被合并。
+        let mock = Arc::new(MockTransport::new());
+        mock.on_json("/v4/delete_songs", &serde_json::json!({"status": 1}));
+        let slow = Arc::new(SlowTransport {
+            inner: mock.clone(),
+            delay: std::time::Duration::from_millis(20),
+        });
+        let api = Api::new(slow, session(), 64);
+        let spec = |fileid: i64| {
+            RequestSpec::post("/v4/delete_songs").body(serde_json::json!({"listid": "2", "data": [{"fileid": fileid}]}))
+        };
+        let (first, second) = futures::join!(
+            api.call(spec(11), Freshness::NoStore),
+            api.call(spec(22), Freshness::NoStore)
+        );
+        first.unwrap();
+        second.unwrap();
+        assert_eq!(mock.count(), 2, "删不同的歌必须是两次请求");
+        assert_eq!(api.coalesced(), 0, "不同请求体不能被合并");
     }
 
     #[tokio::test]

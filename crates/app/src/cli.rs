@@ -40,6 +40,10 @@ pub const fn help() -> &'static str {
   vip                       会员状态
   claim                     领取每日畅听 VIP
   help                      显示本帮助
+
+位于 hash 之后的参数全部按顺序对应，所以不需要专辑 id 时必须写空串：
+  lyra url <hash> \"\" 320        取 320k 播放地址（直接写 lyra url <hash> 320 会把 320 当成专辑 id）
+  lyra download <hash> \"\" out.flac   下载到 out.flac
 "
 }
 
@@ -248,7 +252,7 @@ fn song_stub(args: &[String]) -> Result<lyra_api::model::Song> {
     if hash.len() != 32 || !hash.bytes().all(|b| b.is_ascii_hexdigit()) {
         return Err(Error::Invalid(format!("hash 应为 32 位 hex，得到 {hash}")));
     }
-    // 专辑 id 在音质之前，两者都是可选数字：写成 `url <hash> 320` 会静默把 320 当成专辑 id。
+    // 专辑 ID 位在音质之前，两者均为可选参数。
     let album_id = args.get(1).cloned().unwrap_or_default();
     if !album_id.is_empty() && !album_id.bytes().all(|b| b.is_ascii_digit()) {
         return Err(Error::Invalid(format!(
@@ -287,12 +291,15 @@ fn clip(text: &str, width: usize) -> String {
     format!("{head}…")
 }
 
-/// 脱敏敏感令牌字符串。
+/// 脱敏敏感令牌字符串（保留前后各 3 个字符）。
 fn mask(token: &str) -> String {
-    if token.len() <= 6 {
-        return "*".repeat(token.len());
+    let count = token.chars().count();
+    if count <= 6 {
+        return "*".repeat(count);
     }
-    format!("{}…{}", &token[..3], &token[token.len() - 3..])
+    let head: String = token.chars().take(3).collect();
+    let tail: String = token.chars().skip(count - 3).collect();
+    format!("{head}…{tail}")
 }
 
 #[cfg(test)]

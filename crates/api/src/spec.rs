@@ -243,13 +243,6 @@ impl RequestSpec {
         self
     }
 
-    /// 换签名方式。
-    #[must_use]
-    pub fn sign_mode(mut self, mode: SignMode) -> Self {
-        self.sign = mode;
-        self
-    }
-
     /// 不签名。
     #[must_use]
     pub fn no_signature(mut self) -> Self {
@@ -339,8 +332,7 @@ impl RequestSpec {
             params.set("key", key);
         }
 
-        // 请求体既参与签名也参与发送：JSON 体取序列化结果，原始体直接使用。
-        // 设备注册端点的体是 Base64 密文，漏掉它会让上游直接判签名错误（20006）。
+        // 提取请求体字节并参与签名计算（支持 JSON 与原始字节体）。
         let body_bytes: Option<Vec<u8>> = match (&self.body, &self.raw_body) {
             (Some(value), _) => Some(value.to_string().into_bytes()),
             (None, Some(raw)) => Some(raw.clone()),
