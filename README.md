@@ -26,7 +26,7 @@ Lyra 是一款采用纯 Rust 技术栈实现的酷狗音乐**概念版（Lite）
 
 ## ✨ 核心特性
 
-- **字节级协议契约验证**：通过 18 项黄金测试向量（`vectors.rs`），确保签名算法、AES/RSA 加密、KRC 歌词解码及行为指纹与参考实现字节级一致。
+- **字节级协议契约验证**：通过 17 项黄金测试向量（`vectors.rs`），确保签名算法、AES/RSA 加密、KRC 歌词解码及行为指纹与参考实现字节级一致。
 - **纯 Rust 原生架构**：遵循极简依赖原则，网络传输基于 Rustls 与系统根证书，零 C/C++ 动态链接隐患。
 - **低延迟流式音频引擎**：采用抓取、解码、重采样与输出环形缓冲四层解耦设计，支持边下边播与无缝瞬时切歌。
 - **双层智能缓存体系**：
@@ -75,7 +75,7 @@ flowchart TD
 |---|---|---|:---:|
 | [`lyra-proto`](file:///d:/YZB/Kugou/crates/proto) | 协议原语：签名计算、AES/RSA 密码学、设备身份生成、仿真行为指纹 | `ring`, `aes`, `rsa`, `flate2` | 否 |
 | [`lyra-api`](file:///d:/YZB/Kugou/crates/api) | 接口传输抽象、端点请求编解码、TinyLFU 缓存与 Single-Flight 请求聚合 | `reqwest`, `moka`, `serde_json` | 否 |
-| [`lyra-store`](file:///d:/YZB/Kugou/crates/store) | 本地数据持久化（设备标识、配置、播放历史）与系统凭据管理 | `redb`, `windows` (CredEnumerate) | 否 |
+| [`lyra-store`](file:///d:/YZB/Kugou/crates/store) | 本地数据持久化（设备标识、配置、缓存）与系统凭据管理 | `redb`, `windows` (CredEnumerate) | 否 |
 | [`lyra-audio`](file:///d:/YZB/Kugou/crates/audio) | 音频流处理：Symphonia 解码、音频重采样、环形缓冲与非阻塞事件引擎 | `cpal`, `symphonia`, `rubato` | 否 |
 | [`lyra-app`](file:///d:/YZB/Kugou/crates/app) | 业务用例门面（`Kugou`）组装、Tokio 异步运行时管控与 CLI 命令入口 | `tokio`, `tracing` | 否 |
 | [`lyra-ui`](file:///d:/YZB/Kugou/crates/ui) | GPUI 现代化桌面交互视图（歌单、搜索、电台、歌词、播放条、设置） | `gpui-kit` | 是 |
@@ -159,7 +159,7 @@ cargo clippy --workspace --all-targets -- -D warnings
 ### 自动化构建任务
 
 ```powershell
-# 依赖树审计：验证不存在未允许的 C 依赖或非安全 TLS 后端
+# 依赖树审计：列出非 Rust 工件与系统绑定，并拦截被禁用的 C 实现 TLS 后端
 cargo xtask audit
 
 # 真实上游存活性冒烟测试（仅限开发/联调，不进入 CI 流程）
