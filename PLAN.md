@@ -721,10 +721,59 @@ GUI 实测可启动：窗口句柄非零、标题 `lyra · 酷狗概念版`、st
 | `fingerprint.rs` 注释「webgl 缺失会抛错」与参考相反，参考会回退 `generateWebGLHash()` | 参考实现 `generate_simulate.js` **只** `require('./util')` 的 `randomString`，第 304 行调用的 `generateWebGLHash` 根本不在作用域 → `ReferenceError`。有实测证据：跑向量脚本时正是被这个错误打断的。注释是对的 |
 | 两个「6 位会话串」生成器应统一 | 参考实现**真的有两套**：`request.js:299`（createCloudRequest）用 62 字符表**含大写**，`crypto.js:274`（playlistAesEncrypt）用 `randomString(6).toLowerCase()` 即仅 `[0-9a-z]`。两处都按各自参考实现写的，统一会**破坏字节级保真** |
 
+## 第二轮修复（联网调研 + 真实上游验收）
+
+第一轮审查全部基于离线桩，因此**漏掉了只在真实上游才暴露的问题**。本轮把参考实现
+（`MakcRe/KuGouMusicApi`）拉到本地逐行比对，并直接对着线上端点复现，找出并修掉了下面 5 个 bug。
+其中前两个是**播放链路单点故障**：新装客户端取不到播放地址，等于放不出声音。
+
+| # | 问题 | 真实上游证据 | 修法 |
+|---|---|---|---|
+| 1 | `register_dev` 的 **Base64 请求体没有参与签名** | 参考实现 `request.js:139` 把 `data` 拼进 `signatureAndroidParams`；实测漏掉它上游一律返回 `{"data":null,"status":0,"error_code":20006}`，补上则返回 `{"error_code":0,"status":1,"data":{"dfid":"…"}}` | `RequestSpec` 新增 `raw_body()`，与 JSON 体一样进入 `body_string` 与签名 |
+| 2 | `SongUrl::from_value` **只认「对象数组」形态** | `/tracker/v5/url` 实际返回 `url` 与 `backupUrl` 都是**字符串数组**，元数据（`extName`/`fileSize`/`timeLength`）在响应顶层 → 原实现 `position()` 恒返回 `None`，播放地址全部拿不到 | 同时接受字符串数组；`backupUrl` 去重（与 `url` 尾节点重叠）；顶层 `timeLength` 按**秒**换算 |
+| 3 | `register_dev` 解密响应**没有明文兜底** | 上游只在成功时加密，报错时回明文 JSON（长度也不对齐）→ 原实现直接抛 `Unpad Error`，把真实错误码吞掉 | 抽出 `codec::decode_session_body`，解密失败回退明文；`cloud::parse` 一并复用 |
+| 4 | 风控重试（`edt`/`sid`）**永远不会触发** | `/tracker/v5/url` 被风控时返回 `{"errcode":20028,"status":0,"error":"本次请求需要验证"}` —— 既无 `error_code` 键也无 20028 数值；参考实现 `request.js:220` **只看 `ssa-code` 响应头** | `attach_ssa` 改为「有 `ssa-code` 即升级为 `NeedsVerify`」，不再依赖业务码 |
+| 5 | `cargo fmt --check` 与公钥哈希断言在 Windows 上全红 | 仓库无 `.gitattributes`，`core.autocrlf=true` 是 Git for Windows 默认值 → 检出为 CRLF，`include_str!` 字节变了 | 新增 `.gitattributes`（`* text=auto eol=lf`），并把工作区重新归一化为 LF |
+
+### 顺带修掉的
+
+- `register_dev` 的 9 组传感器字段原本**只在调用方传 `extra` 时才插入**，而 `provision`/`smoke` 都传 `None` → 这段代码从未执行；参考实现无条件上报，已改为始终插入、`extra` 仅作覆盖。
+- `cli.rs` 的帮助文本与实现不符：`url`/`download` 缺 `专辑id` 参数位（`download <hash> <输出文件>` 必报「缺少输出文件路径」）。新增参数校验：`url <hash> 320` 会被误当专辑 id，现在直接报错而不是静默用默认音质。
+- `xtask smoke` 把「200 + 空列表」判为 ✅。上游在版本号/登录态不满足时会**静默返回空列表**（参考实现 `home_discover.js` 注释里明确写了约 20489 这个门槛），与结构变更无法区分，现单列为 ⚠️。
+- README 的测试徽章与 CLI 示例同步到实际行为。
+
+### 真实上游验收（`xtask smoke`，全新数据目录）
+
+```
+✅ /risk/v2/r_register_dev            dfid=1tTme319
+✅ /v1/class_fm_song                  14 条
+✅ /v1/rcmd_list                      44 条
+✅ /everyday_song_recommend           30 条
+✅ /v2/personal_recommend              5 条
+⚠️ /homediscoverrec/...                0 条   ← 匿名会话无个性化数据，非错误
+```
+
+`lyra url <hash>` 与 `lyra download <hash> 0 out.ogg` 在**同一台机器、未登录账号**下跑通：
+返回 1 个主地址 + 1 个备用节点，落盘 1 757 029 字节，文件头 `4F 67 67 53`（`OggS`）。
+这在修复前必然失败（先是「需要验证」，即便有 dfid 也因 #2 解析不到地址）。
+
+### 本轮新增的回归测试（+6 条）
+
+| 测试 | 守住的行为 |
+|---|---|
+| `spec::raw_body_enters_the_signature_and_the_request` | 原始体必须进签名与请求 |
+| `endpoint::session::register_dev_signs_the_base64_body` | 端点级复现同一个 bug |
+| `endpoint::session::register_dev_reports_the_upstream_error_instead_of_a_crypto_error` | 明文错误码不得被密码学错误顶掉 |
+| `codec::session_body_falls_back_to_plaintext` | 解密失败回退明文 |
+| `client::ssa_header_alone_triggers_the_retry` | 只有 `ssa-code`（无 20028）也必须重试 |
+| `model::song_url_reads_the_string_array_form_used_by_tracker_v5` | 字符串数组 + 顶层元数据 + `timeLength` 秒换算 |
+
 ## 仍未验证的
 
-- 上游是否真有无 `status` 的响应 —— 需要真实账号打一次歌词接口才能最终确认（旁证是参考实现对该端点不检查 `status`）。
+- 上游是否真有无 `status` 的响应 —— 已确认存在：`/tracker/v5/url` 的响应体只有 `status`，
+  错误体用 `errcode` 而非 `error_code`（见上表 #4）；歌词下载端点仍待真实账号复核。
 - audio 的尾音/seek 修复需要**有声卡实机**听自然结尾才能确认听感。
+- 需要登录账号的功能（歌单增删、VIP 领取、歌词两步链路、云歌单双加密通道）仍只有离线桩覆盖。
 
 ### 验证命令
 

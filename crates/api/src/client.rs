@@ -173,12 +173,13 @@ impl Api {
     }
 }
 
-/// 提取响应头中的验证码并附加到错误对象。
+/// 把 `ssa-code` 响应头升级为验证错误。
+///
+/// 参考实现（util/request.js:220）**只**以该响应头为准，业务体里的字段并不可靠：
+/// `/tracker/v5/url` 实际返回的是 `{"errcode":20028,"status":0,"error":"本次请求需要验证"}`，
+/// 既没有 `error_code` 键，也没有约定的 20028 数值，只看业务码会漏掉整条重试路径。
 fn attach_ssa(error: Error, ssa: Option<String>) -> Error {
-    match ssa {
-        Some(code) if needs_verify(&error) => Error::NeedsVerify(code),
-        _ => error,
-    }
+    ssa.map_or(error, Error::NeedsVerify)
 }
 
 /// 该错误是否意味着「需要行为验证」。
@@ -272,6 +273,29 @@ mod tests {
         assert_eq!(mock.count(), 2, "应当只重试一次");
         assert!(needs_verify(&error), "{error:?}");
         // 校验重试请求包含指纹参数。
+        let retry = mock.last_request().unwrap();
+        let names: Vec<&str> = retry.query.iter().map(|(k, _)| k.as_str()).collect();
+        assert!(names.contains(&"sid"), "{names:?}");
+        assert!(names.contains(&"edt"), "{names:?}");
+    }
+
+    #[tokio::test]
+    async fn ssa_header_alone_triggers_the_retry() {
+        // 真实上游被风控时回的是 {"errcode":20028,"status":0,"error":"本次请求需要验证"}：
+        // 既没有 `error_code` 键、也没有约定的 20028 数值，只有 ssa-code 响应头可靠。
+        let mock = Arc::new(MockTransport::new());
+        mock.on_ssa(
+            "/tracker/v5/url",
+            "gz_tx_event_deadbeef",
+            &serde_json::json!({"errcode": 20028, "status": 0, "error": "本次请求需要验证"}),
+        );
+        let api = Api::new(mock.clone(), session(), 64);
+        let error = api
+            .call(RequestSpec::get("/tracker/v5/url"), Freshness::NoStore)
+            .await
+            .unwrap_err();
+        assert_eq!(mock.count(), 2, "带 ssa-code 的失败应答必须重试一次");
+        assert!(needs_verify(&error), "{error:?}");
         let retry = mock.last_request().unwrap();
         let names: Vec<&str> = retry.query.iter().map(|(k, _)| k.as_str()).collect();
         assert!(names.contains(&"sid"), "{names:?}");

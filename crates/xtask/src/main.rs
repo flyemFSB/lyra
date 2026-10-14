@@ -144,6 +144,23 @@ fn audit() -> anyhow::Result<()> {
 }
 
 /// 上游接口存活状态探测。
+/// 打印数量型端点结果：空表记为告警 —— 上游在版本号或登录态不满足时会**静默返回空列表**，
+/// 与「结构变更导致解析为空」无法区分，不能报 ✅。
+fn report_count(warnings: &mut Vec<&'static str>, name: &'static str, count: usize) {
+    if count == 0 {
+        println!("  ⚠️ {name:<34} 0 条");
+        warnings.push(name);
+    } else {
+        println!("  ✅ {name:<34} {count} 条");
+    }
+}
+
+/// 打印失败的端点并登记到失败列表。
+fn report_error(failures: &mut Vec<&'static str>, name: &'static str, error: &impl std::fmt::Display) {
+    println!("  ❌ {name:<34} {error}");
+    failures.push(name);
+}
+
 fn smoke() -> anyhow::Result<()> {
     tracing_subscriber::fmt()
         .with_env_filter(
@@ -160,61 +177,49 @@ fn smoke() -> anyhow::Result<()> {
         let app = lyra_app::Kugou::open(&dir)?;
 
         let mut failures = Vec::new();
+        let mut warnings = Vec::new();
         println!("上游冒烟（数据目录 {}）\n", dir.display());
 
         match app.register_device().await {
             Ok(dfid) => println!(
-                "  ✅ /risk/v2/r_register_dev         dfid={}",
+                "  ✅ {:<34} dfid={}",
+                "/risk/v2/r_register_dev",
                 // 截取前八位字符打印指纹。
                 dfid.chars().take(8).collect::<String>()
             ),
-            Err(error) => {
-                println!("  ❌ /risk/v2/r_register_dev         {error}");
-                failures.push("register_dev");
-            }
+            Err(error) => report_error(&mut failures, "/risk/v2/r_register_dev", &error),
         }
-
         match app.station_classes().await {
-            Ok(items) => println!("  ✅ /v1/class_fm_song               {} 个分类", items.len()),
-            Err(error) => {
-                println!("  ❌ /v1/class_fm_song               {error}");
-                failures.push("class_fm_song");
-            }
+            Ok(items) => report_count(&mut warnings, "/v1/class_fm_song", items.len()),
+            Err(error) => report_error(&mut failures, "/v1/class_fm_song", &error),
         }
         match app.stations().await {
-            Ok(items) => println!("  ✅ /v1/rcmd_list                   {} 个电台", items.len()),
-            Err(error) => {
-                println!("  ❌ /v1/rcmd_list                   {error}");
-                failures.push("rcmd_list");
-            }
+            Ok(items) => report_count(&mut warnings, "/v1/rcmd_list", items.len()),
+            Err(error) => report_error(&mut failures, "/v1/rcmd_list", &error),
         }
         match app.daily().await {
-            Ok(items) => println!("  ✅ /everyday_song_recommend        {} 首", items.len()),
-            Err(error) => {
-                println!("  ❌ /everyday_song_recommend        {error}");
-                failures.push("everyday_song_recommend");
-            }
+            Ok(items) => report_count(&mut warnings, "/everyday_song_recommend", items.len()),
+            Err(error) => report_error(&mut failures, "/everyday_song_recommend", &error),
         }
         match app.personal_fm(None, "normal").await {
-            Ok(page) => println!(
-                "  ✅ /v2/personal_recommend          {} 首，游标 {:?}",
-                page.items.len(),
-                page.cursor
-            ),
-            Err(error) => {
-                println!("  ❌ /v2/personal_recommend          {error}");
-                failures.push("personal_recommend");
+            Ok(page) => {
+                report_count(&mut warnings, "/v2/personal_recommend", page.items.len());
+                println!("     游标 {:?}", page.cursor);
             }
+            Err(error) => report_error(&mut failures, "/v2/personal_recommend", &error),
         }
         match app.discover(4).await {
-            Ok(items) => println!("  ✅ /homediscoverrec/...             {} 首", items.len()),
-            Err(error) => {
-                println!("  ❌ /homediscoverrec/...             {error}");
-                failures.push("home_discover");
-            }
+            Ok(items) => report_count(&mut warnings, "/homediscoverrec/...", items.len()),
+            Err(error) => report_error(&mut failures, "/homediscoverrec/...", &error),
         }
 
         println!();
+        if !warnings.is_empty() {
+            println!(
+                "⚠️  {} 个端点返回空表（上游版本号 / 登录态不满足时会静默返回空列表）: {warnings:?}",
+                warnings.len()
+            );
+        }
         if failures.is_empty() {
             println!("全部端点存活");
             Ok::<(), anyhow::Error>(())

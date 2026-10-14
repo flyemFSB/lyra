@@ -9,7 +9,7 @@
   <img src="https://img.shields.io/badge/gui-GPUI-blue.svg" alt="GPUI" />
   <img src="https://img.shields.io/badge/platform-Windows-lightgrey.svg" alt="Platform Windows" />
   <img src="https://img.shields.io/badge/license-MIT%2FApache--2.0-green.svg" alt="License" />
-  <img src="https://img.shields.io/badge/tests-186%20passed-brightgreen.svg" alt="Tests" />
+  <img src="https://img.shields.io/badge/tests-197%20passed-brightgreen.svg" alt="Tests" />
 </p>
 
 ---
@@ -126,11 +126,11 @@ cargo run -p lyra -- tracks <global_collection_id>
 # 查询指定曲目的音质权益矩阵
 cargo run -p lyra -- rights <song_hash>
 
-# 获取播放直链
-cargo run -p lyra -- url <song_hash> flac
+# 获取播放直链（专辑 id 可省略，音质是第三个参数）
+cargo run -p lyra -- url <song_hash> [album_id] [quality]
 
 # 下载音频并校验文件头魔数（FLAC / OggS）
-cargo run -p lyra -- download <song_hash> test.flac
+cargo run -p lyra -- download <song_hash> [album_id] <output_file>
 ```
 
 ---
@@ -142,7 +142,7 @@ cargo run -p lyra -- download <song_hash> test.flac
 ### 运行全工作区离线测试
 
 ```powershell
-# 运行全部 186+ 个测试（完全离线，基于 Mock 桩与确定性伪随机源）
+# 运行全部 197 个测试（完全离线，基于 Mock 桩与确定性伪随机源）
 cargo test --workspace
 ```
 

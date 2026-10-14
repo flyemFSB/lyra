@@ -270,29 +270,55 @@ impl SongUrl {
     /// 解析上游播放地址对象，提取主地址与备选节点列表。
     #[must_use]
     pub fn from_value(value: &Value) -> Option<Self> {
-        let candidates = codec::find_array(value, &["url", "urls", "play_url"])
-            .cloned()
-            .unwrap_or_default();
-        // 选取首个有效地址并将后续节点收录为备选。
-        let chosen = candidates
-            .iter()
-            .position(|item| !codec::pick_str(item, &["url"]).is_empty())?;
-        let first = &candidates[chosen];
-        let url = codec::pick_str(first, &["url"]);
-        let backup_urls = candidates
-            .iter()
-            .skip(chosen + 1)
-            .map(|item| codec::pick_str(item, &["url"]))
-            .filter(|u| !u.is_empty())
-            .collect();
+        // 上游有两种形态：
+        // ① 对象数组：每个节点自带 extname / filesize / timelength 等元数据；
+        // ② 纯字符串数组：概念版 `/tracker/v5/url` 返回的就是这种，元数据挂在响应顶层。
+        let mut urls: Vec<String> = Vec::new();
+        let mut node_meta: Option<&Value> = None;
+        for item in codec::find_array(value, &["url", "urls", "play_url"])
+            .into_iter()
+            .flatten()
+            .chain(
+                codec::find_array(value, &["backupUrl", "backup_urls"])
+                    .into_iter()
+                    .flatten(),
+            )
+        {
+            let (url, meta) = match item {
+                Value::String(text) => (text.clone(), None),
+                other => (codec::pick_str(other, &["url"]), Some(other)),
+            };
+            if url.is_empty() {
+                continue;
+            }
+            // `backupUrl` 与 `url` 的尾节点重叠，只留一份。
+            if !urls.contains(&url) {
+                urls.push(url);
+            }
+            if node_meta.is_none() {
+                node_meta = meta;
+            }
+        }
+        let url = urls.first()?.clone();
+        let (meta, duration_ms) = node_meta.map_or_else(
+            // 字符串数组形态没有节点元数据，退回响应顶层；
+            // 顶层的 `timeLength` 单位是**秒**，而节点里的 `timelength` 是毫秒。
+            || {
+                (
+                    value,
+                    codec::pick_u64(value, &["timelength", "timelen"]).saturating_mul(1_000),
+                )
+            },
+            |meta| (meta, codec::pick_u64(meta, &["timelength", "timelen", "duration"])),
+        );
         Some(Self {
             url,
-            backup_urls,
-            ext: codec::pick_str(first, &["extname", "ext", "filetype"]).to_lowercase(),
-            quality: codec::pick_str(first, &["quality", "quality_name"]),
-            size: codec::pick_u64(first, &["filesize", "size"]),
-            duration_ms: codec::pick_u64(first, &["timelength", "timelen", "duration"]),
-            hash: codec::pick_str(first, &["hash"]).to_lowercase(),
+            backup_urls: urls.into_iter().skip(1).collect(),
+            ext: codec::pick_str(meta, &["extname", "ext", "filetype"]).to_lowercase(),
+            quality: codec::pick_str(meta, &["quality", "quality_name"]),
+            size: codec::pick_u64(meta, &["filesize", "size"]),
+            duration_ms,
+            hash: codec::pick_str(meta, &["hash"]).to_lowercase(),
         })
     }
 
@@ -547,6 +573,28 @@ mod tests {
         assert_eq!(url.size, 40_000_000);
         assert_eq!(url.hash, "ab");
         assert!(url.backup_urls.is_empty());
+    }
+
+    #[test]
+    fn song_url_reads_the_string_array_form_used_by_tracker_v5() {
+        // 概念版 `/tracker/v5/url` 的真实形态：`url` 与 `backupUrl` 都是字符串数组，
+        // 元数据在顶层，且 `timeLength` 的单位是**秒**，`backupUrl` 与 `url` 的尾节点重叠。
+        let value = json!({
+            "status": 1,
+            "url": ["http://fs.youthandroid2.kugou.com/a.ogg", "http://fs.youthandroid.kugou.com/a.ogg"],
+            "backupUrl": ["http://fs.youthandroid.kugou.com/a.ogg"],
+            "extName": "ogg",
+            "fileSize": 1_757_029,
+            "timeLength": 146,
+            "hash": "AB5791AA979A51AA86F6E7BAC7D088F6"
+        });
+        let url = SongUrl::from_value(&value).unwrap();
+        assert_eq!(url.url, "http://fs.youthandroid2.kugou.com/a.ogg");
+        assert_eq!(url.backup_urls, vec!["http://fs.youthandroid.kugou.com/a.ogg"]);
+        assert_eq!(url.ext, "ogg");
+        assert_eq!(url.size, 1_757_029);
+        assert_eq!(url.duration_ms, 146_000, "顶层 timeLength 是秒");
+        assert_eq!(url.hash, "ab5791aa979a51aa86f6e7bac7d088f6");
     }
 
     #[test]

@@ -30,8 +30,8 @@ pub const fn help() -> &'static str {
   playlists                 列出全部歌单
   tracks <global_id> [页号] 列出歌单歌曲（默认第 1 页）
   rights <hash> [专辑id]    打印音质权益矩阵
-  url <hash> [音质]         取播放地址
-  download <hash> <输出文件> 下载音频并校验文件头（M1 验收）
+  url <hash> [专辑id] [音质] 取播放地址
+  download <hash> [专辑id] <输出文件> 下载音频并校验文件头（M1 验收）
   daily                     每日推荐
   fm                        个人电台一页
   stations                  推荐电台频道
@@ -248,9 +248,16 @@ fn song_stub(args: &[String]) -> Result<lyra_api::model::Song> {
     if hash.len() != 32 || !hash.bytes().all(|b| b.is_ascii_hexdigit()) {
         return Err(Error::Invalid(format!("hash 应为 32 位 hex，得到 {hash}")));
     }
+    // 专辑 id 在音质之前，两者都是可选数字：写成 `url <hash> 320` 会静默把 320 当成专辑 id。
+    let album_id = args.get(1).cloned().unwrap_or_default();
+    if !album_id.is_empty() && !album_id.bytes().all(|b| b.is_ascii_digit()) {
+        return Err(Error::Invalid(format!(
+            "专辑 id 应为数字，得到 {album_id}（音质是下一个参数）"
+        )));
+    }
     Ok(lyra_api::model::Song {
         hash,
-        album_id: args.get(1).cloned().unwrap_or_default(),
+        album_id,
         ..lyra_api::model::Song::default()
     })
 }

@@ -139,6 +139,8 @@ pub struct RequestSpec {
     pub params: Params,
     /// 请求体（JSON）。
     pub body: Option<serde_json::Value>,
+    /// 原始请求体字节（非 JSON，例如设备注册的 Base64 密文）。与 `body` 一样参与签名。
+    pub raw_body: Option<Vec<u8>>,
     /// 模块声明的请求头。
     pub headers: Vec<(String, String)>,
     /// 只用模块声明的参数。
@@ -179,6 +181,7 @@ impl RequestSpec {
             path: path.into(),
             params: Params::new(),
             body: None,
+            raw_body: None,
             headers: Vec::new(),
             clear_default_params: false,
             clear_default_headers: false,
@@ -209,6 +212,13 @@ impl RequestSpec {
     #[must_use]
     pub fn body(mut self, body: serde_json::Value) -> Self {
         self.body = Some(body);
+        self
+    }
+
+    /// 设置原始请求体（不序列化，但和 JSON 体一样参与签名）。
+    #[must_use]
+    pub fn raw_body(mut self, body: impl Into<Vec<u8>>) -> Self {
+        self.raw_body = Some(body.into());
         self
     }
 
@@ -329,10 +339,16 @@ impl RequestSpec {
             params.set("key", key);
         }
 
-        let body_string = match &self.body {
-            Some(value) => value.to_string(),
-            None => String::new(),
+        // 请求体既参与签名也参与发送：JSON 体取序列化结果，原始体直接使用。
+        // 设备注册端点的体是 Base64 密文，漏掉它会让上游直接判签名错误（20006）。
+        let body_bytes: Option<Vec<u8>> = match (&self.body, &self.raw_body) {
+            (Some(value), _) => Some(value.to_string().into_bytes()),
+            (None, Some(raw)) => Some(raw.clone()),
+            (None, None) => None,
         };
+        let body_string = body_bytes
+            .as_ref()
+            .map_or_else(String::new, |bytes| String::from_utf8_lossy(bytes).into_owned());
 
         if !params.contains("signature") {
             let signature = match self.sign {
@@ -380,7 +396,7 @@ impl RequestSpec {
         let mut request = Request::new(self.method, combine_urls(&self.base_url, &self.path));
         request.query = query;
         request.headers = merge_headers(layers);
-        request.body = self.body.as_ref().map(|_| body_string.clone().into_bytes());
+        request.body = body_bytes;
         request.timeout = self.timeout;
         Ok(request)
     }
@@ -481,6 +497,36 @@ mod tests {
         assert_eq!(request.get_header("kg-rf"), Some("B9EDA08A64250DEFFBCADDEE00F8F25F"));
         assert_eq!(request.get_header("User-Agent"), Some(lyra_proto::consts::UA_DEFAULT));
         assert_eq!(request.get_header("dfid"), Some("DfidValue"));
+    }
+
+    #[test]
+    fn raw_body_enters_the_signature_and_the_request() {
+        // 设备注册的体是 Base64 密文（不是 JSON），漏出签名会让上游直接判签名错误 20006。
+        let raw = "QUJD";
+        let request = RequestSpec::post("/risk/v2/r_register_dev")
+            .param("part", 1)
+            .raw_body(raw.as_bytes().to_vec())
+            .build(&session())
+            .unwrap();
+        assert_eq!(request.body.as_deref(), Some(raw.as_bytes()));
+        let signature = request
+            .query
+            .iter()
+            .find(|(key, _)| key == "signature")
+            .map(|(_, value)| value.clone())
+            .unwrap();
+        // 用该请求自己的参数重算契约：salt + 排序后的 k=v + body + salt。
+        let params = |body: &str| {
+            let mut params = lyra_proto::Params::new();
+            for (key, value) in &request.query {
+                if key != "signature" {
+                    params.set(key.clone(), value.clone());
+                }
+            }
+            lyra_proto::signature_android(&params, body)
+        };
+        assert_eq!(signature, params(raw), "签名必须包含原始请求体");
+        assert_ne!(signature, params(""), "不含 body 的签名必须不同（否则本测试无效）");
     }
 
     #[test]

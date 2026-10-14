@@ -1,7 +1,7 @@
 //! 云歌单双加密通道：请求体 AES 加密，会话密钥 RSA 加密。
 
 use lyra_proto::consts::{APPID, CLIENTVER, RSA_PUBLIC, SALT_MD5};
-use lyra_proto::{md5_hex, random_aes_secret, rsa_pkcs1_encrypt_hex, secret_decrypt_bytes, secret_encrypt_bytes};
+use lyra_proto::{md5_hex, random_aes_secret, rsa_pkcs1_encrypt_hex, secret_encrypt_bytes};
 use serde_json::Value;
 
 use crate::codec;
@@ -55,11 +55,7 @@ pub fn build(session: &Session, path: &str, body: &Value) -> Result<(Request, St
 
 /// 解密并校验云歌单响应内容。
 pub fn parse(cipher: &[u8], aes: &str) -> Result<Value> {
-    let decrypted = secret_decrypt_bytes(cipher, aes).ok().filter(|bytes| !bytes.is_empty());
-    let text = match decrypted {
-        Some(bytes) => String::from_utf8_lossy(&bytes).into_owned(),
-        None => String::from_utf8_lossy(cipher).into_owned(),
-    };
+    let text = codec::decode_session_body(cipher, aes);
     let value: Value =
         serde_json::from_str(&text).map_err(|_| Error::Decode(format!("cloudlist 响应不是合法 JSON: {text}")))?;
     codec::check_business(&value)?;

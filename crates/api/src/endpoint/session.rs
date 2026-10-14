@@ -170,10 +170,8 @@ pub async fn register_dev(api: &Api, extra: Option<Value>) -> Result<String> {
         "uuid": session.device.guid,
     });
     // 默认关闭各硬件传感器上报。
-    if let (Some(map), Some(extra)) = (device_map.as_object_mut(), extra.as_ref().and_then(Value::as_object)) {
-        for (key, value) in extra {
-            map.insert(key.clone(), value.clone());
-        }
+    // 参考实现（module/register_dev.js）无条件上报这 9 组字段，缺失会被上游判为参数不合法。
+    if let Some(map) = device_map.as_object_mut() {
         for sensor in [
             "accelerometer",
             "gravity",
@@ -188,6 +186,11 @@ pub async fn register_dev(api: &Api, extra: Option<Value>) -> Result<String> {
             map.insert(sensor.to_owned(), Value::Bool(false));
             map.insert(format!("{sensor}Value"), Value::String(String::new()));
         }
+        if let Some(extra) = extra.as_ref().and_then(Value::as_object) {
+            for (key, value) in extra {
+                map.insert(key.clone(), value.clone());
+            }
+        }
     }
 
     let encrypted = lyra_proto::secret_encrypt(&device_map.to_string())?;
@@ -199,18 +202,17 @@ pub async fn register_dev(api: &Api, extra: Option<Value>) -> Result<String> {
     .to_string();
     let p = lyra_proto::rsa_pkcs1_encrypt_hex(portrait.as_bytes(), RSA_PUBLIC)?;
 
+    // 请求体是 Base64 密文而非 JSON，必须与参数一起参与签名：
+    // 参考实现把 `data`（即本密文）拼进 signatureAndroidParams，漏掉它上游直接返回 20006。
     let spec = RequestSpec::post("/risk/v2/r_register_dev")
         .base(USER_SERVICE)
         .param("part", 1)
         .param("platid", 1)
         .param("p", p)
+        .raw_body(encrypted.base64.clone().into_bytes())
         .header("x-router", "userservice.kugou.com")
         .timeout(std::time::Duration::from_secs(30));
     let request = spec.build(&session)?;
-
-    // 请求体采用 Base64 编码密文。
-    let mut request = request;
-    request.body = Some(encrypted.base64.clone().into_bytes());
     let response = api.transport().execute(request).await?;
     if !(200..300).contains(&response.status) {
         return Err(Error::Http {
@@ -218,9 +220,10 @@ pub async fn register_dev(api: &Api, extra: Option<Value>) -> Result<String> {
             body: response.text(),
         });
     }
-    let plain = lyra_proto::secret_decrypt_bytes(&response.body, &encrypted.key)?;
+    // 上游只在成功时加密，报错时返回明文 JSON。
+    let text = codec::decode_session_body(&response.body, &encrypted.key);
     let value: Value =
-        serde_json::from_slice(&plain).map_err(|e| Error::Decode(format!("register_dev 响应解密后不是 JSON: {e}")))?;
+        serde_json::from_str(&text).map_err(|_| Error::Decode(format!("register_dev 响应不是合法 JSON: {text}")))?;
     codec::check_business(&value)?;
     let dfid = codec::pick_str_paths(&value, &[&["data", "dfid"], &["dfid"]]);
     if dfid.is_empty() {
@@ -315,6 +318,51 @@ mod tests {
     fn masks_mobile_like_the_client() {
         assert_eq!(mask_mobile("13800138000"), "13*****0");
         assert_eq!(mask_mobile("155"), "15*****");
+    }
+
+    #[tokio::test]
+    async fn register_dev_reports_the_upstream_error_instead_of_a_crypto_error() {
+        // 上游参数不合法时回的是**明文** JSON；旧实现直接拿去 AES 解密，
+        // 只抛出「Unpad Error」，把真实的 20006 吃掉。
+        let mock = Arc::new(MockTransport::new());
+        mock.on(
+            "/risk/v2/r_register_dev",
+            crate::transport::Response::new(200, br#"{"data":null,"status":0,"error_code":20006}"#.to_vec()),
+        );
+        let api = Api::new(mock, session(), 64);
+        let error = register_dev(&api, None).await.unwrap_err();
+        assert!(
+            matches!(error, Error::Upstream { code: 20_006, .. }),
+            "应当暴露上游错误码：{error:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn register_dev_signs_the_base64_body() {
+        // 体的 Base64 密文必须参与签名（参考实现把 data 拼进 signatureAndroidParams），
+        // 漏掉它上游一律返回 20006，dfid 永远拿不到。
+        let mock = Arc::new(MockTransport::new());
+        mock.on(
+            "/risk/v2/r_register_dev",
+            crate::transport::Response::new(200, br#"{"data":null,"status":0,"error_code":20006}"#.to_vec()),
+        );
+        let api = Api::new(mock.clone(), session(), 64);
+        let _ = register_dev(&api, None).await;
+        let request = mock.last_request().unwrap();
+        let body = String::from_utf8(request.body.clone().unwrap()).unwrap();
+        let mut params = lyra_proto::Params::new();
+        for (key, value) in &request.query {
+            if key != "signature" {
+                params.set(key.clone(), value.clone());
+            }
+        }
+        let actual = request
+            .query
+            .iter()
+            .find(|(key, _)| key == "signature")
+            .map(|(_, value)| value.clone())
+            .unwrap();
+        assert_eq!(actual, lyra_proto::signature_android(&params, &body));
     }
 
     #[test]

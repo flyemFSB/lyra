@@ -210,6 +210,21 @@ pub fn error_message(value: &Value) -> String {
     if message.is_empty() { value.to_string() } else { message }
 }
 
+/// 会话密钥响应体解码：先按 AES-CBC 解密；解密失败说明上游返回的本来就是明文，直接按 UTF-8 使用。
+///
+/// 上游只在成功时加密，报错时返回明文 JSON，因此缺这条兼底会把
+/// `"Unpad Error"` 这类密码学错误暴露给用户，把真实的业务错误码吞掉。
+#[must_use]
+pub fn decode_session_body(cipher: &[u8], secret: &str) -> String {
+    lyra_proto::secret_decrypt_bytes(cipher, secret)
+        .ok()
+        .filter(|bytes| !bytes.is_empty())
+        .map_or_else(
+            || String::from_utf8_lossy(cipher).into_owned(),
+            |bytes| String::from_utf8_lossy(&bytes).into_owned(),
+        )
+}
+
 /// 判定上游响应是否业务失败（显式 status 为 0 或 error_code 非 0）。
 pub fn check_business(value: &Value) -> Result<()> {
     let status_failed = pick(value, &["status"]).is_some_and(|status| as_i64(status) == 0);
@@ -255,6 +270,18 @@ mod tests {
 
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn session_body_falls_back_to_plaintext() {
+        let secret = "abc123";
+        // 成功响应是加密的：正常解密。
+        let encrypted = lyra_proto::secret_encrypt_with(r#"{"status":1,"data":{"dfid":"X"}}"#, secret).unwrap();
+        let cipher = lyra_proto::base64_decode(&encrypted.base64).unwrap();
+        assert!(decode_session_body(&cipher, secret).contains("dfid"));
+        // 失败响应是明文 JSON（长度也不对齐），必须原样返回而不是报解密错误。
+        let plain = br#"{"data":null,"status":0,"error_code":20006}"#;
+        assert_eq!(decode_session_body(plain, secret), String::from_utf8_lossy(plain));
+    }
 
     #[test]
     fn coerces_numbers_and_strings() {

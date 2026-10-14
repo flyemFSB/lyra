@@ -1,0 +1,9 @@
+# 全部文本文件在索引与工作区统一为 LF。
+# Windows 上 `core.autocrlf=true` 是 Git 的默认值，会把检出的文本文件改写成 CRLF，
+# 于是 `cargo fmt --all --check`（rustfmt.toml 里 newline_style = "Unix"）全仓报错，
+# 且 `include_str!` 读到的 PEM 字节随之变化，撞坏 proto 的公钥哈希断言。
+* text=auto eol=lf
+
+# 这两个 PEM 的 SHA-256 被 crates/proto/tests/vectors.rs 逐字节固定断言，
+# 显式声明以免将来调整上面的默认规则时被误伤。
+crates/proto/keys/*.pem text eol=lf
