@@ -59,6 +59,24 @@ impl PlaylistsView {
         }
     }
 
+    /// 清空视图内容（登出/换账号时调用），并让在途响应失效。
+    pub(crate) fn reset(&mut self, cx: &mut Context<Self>) {
+        self.playlists = Arc::new(Vec::new());
+        self.selected = None;
+        self.songs = Arc::new(Vec::new());
+        self.sizes = row_sizes(0);
+        self.loading_playlists = false;
+        self.loading_tracks = false;
+        self.loaded = false;
+        self.error = None;
+        self.heading = SharedString::new_static("歌单");
+        self.listid = None;
+        self.next_page = None;
+        self.appending = false;
+        self.request_seq += 1;
+        cx.notify();
+    }
+
     /// 视图初次加载时触发歌单列表请求。
     pub(crate) fn ensure(&mut self, cx: &mut Context<Self>) {
         if !self.loaded && !self.loading_playlists {

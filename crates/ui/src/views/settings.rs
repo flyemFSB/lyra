@@ -20,8 +20,8 @@ const CACHE_PRESETS: &[(&str, u64)] = &[
     ("4 GiB", 4 << 30),
 ];
 
-/// 默认最大缓存字节数。
-const DEFAULT_MAX_CACHE_BYTES: u64 = 2 * 1024 * 1024 * 1024;
+/// 默认最大缓存字节数（取预设中的 2 GiB，避免与 `CACHE_PRESETS` 重复维护）。
+const DEFAULT_MAX_CACHE_BYTES: u64 = CACHE_PRESETS[2].1;
 
 /// 设置视图状态结构。
 pub(crate) struct SettingsView {
@@ -33,7 +33,6 @@ pub(crate) struct SettingsView {
     loaded: bool,
     /// 最近一次操作的提示反馈信息。
     last_action: Option<SharedString>,
-    _subs: Vec<Subscription>,
 }
 
 impl SettingsView {
@@ -63,7 +62,6 @@ impl SettingsView {
             vip: None,
             loaded: false,
             last_action: None,
-            _subs: Vec::new(),
         }
     }
 

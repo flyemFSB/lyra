@@ -38,6 +38,16 @@ impl DailyView {
         }
     }
 
+    /// 清空视图内容（登出/换账号时调用）。
+    pub(crate) fn reset(&mut self, cx: &mut Context<Self>) {
+        self.songs = Arc::new(Vec::new());
+        self.sizes = row_sizes(0);
+        self.loading = false;
+        self.loaded = false;
+        self.error = None;
+        cx.notify();
+    }
+
     /// 视图初次加载时触发推荐歌曲请求。
     pub(crate) fn ensure(&mut self, cx: &mut Context<Self>) {
         if !self.loaded && !self.loading {

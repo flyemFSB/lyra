@@ -796,15 +796,12 @@ GUI 实测可启动：窗口句柄非零、标题 `lyra · 酷狗概念版`、st
 - `claim` 今日已领（`297002`）→ 到账效果需次日再验
 - 播放条不显示（见「仍未验证的」第一条）
 
-- **播放条（PlayerBar）在窗口里不绘制** —— 已定位到具体现象但**尚未修复**，证据如下：
-  - `AppShell::render` 的根 `v_flex` 里，播放条位于**尾部**时拿不到高度：同一份代码把播放条改成**第一个子项**，
-    它 78px 完整渲染（封面 / 未在播放 / ⏮▶⏭ / 进度与时间全部正常，已抓图确认）；放回尾部就是 0 高、完全不绘制。
-  - 已排除的原因（均实测无效果）：`h()` 值（78/96/130/200 全不可见，400 可见）、`flex_none()`、`flex_shrink_0()`、
-    `flex_basis` + `flex_grow(0)/flex_shrink(0)`、`overflow_hidden()`、`absolute()+bottom_0()`、
-    根元素改用 `viewport_size()` 写死尺寸、`flex_col_reverse()`、去掉子项的百分比高度。
-  - 工作假设：内容行的 `min-height: auto`（内容自动最小高度）吃掉整窗高度，尾部子项只能被压成 0；
-    但为什么 `min_h(px(0.0))` / 显式高度都压不住它，需要看 taffy 在 gpui-pre 这一版的实现。
-  - 影响：进度条 / 音量 / 上一首 / 下一首 / 播放暂停在当前构建里点不到（音频本身能播，只是没有控件）。
+- **播放条（PlayerBar）已在列布局中可见**（第四轮）——`AppShell::render` 把播放条与提示条排在内容行**之前**，根仍是普通 `v_flex`。
+  可复现的实测结论（脚本见 `target/tmp/run-diag.ps1`）：gpui-pre 0.3.9 的列布局里，**排在 `flex_1` 项之后的固定高度子项一律被压成 0**
+  （空 `flex_1` 行同样如此），与 `min_h(px(0.0))`、`overflow_hidden()`、`flex_shrink_0()`/`flex_none()`、绝对长度 `flex_basis`、
+  `absolute()+bottom_0()` 都无关；唯一可用的组合是「固定项在前、`flex_1` 项在后」。`flex_col_reverse()` 能反转视觉顺序，
+  但同样受这条约束支配（固定项仍然只能出现在 `flex_1` 项的**上方**）。
+  - 代价：播放条画在窗口**顶部**而不是底部（先保证控件可点）；要挪回底部需上游修 taffy 适配层，或改用非 flex 的布局载体。
   - 验证手法（可复用）：`PrintWindow(hwnd, hdc, 2)` 抓窗口 + `PostMessage(WM_LBUTTONDOWN/UP)` 无侵入点击；
     注意 `PrintWindow` 抓的是整窗（含标题栏），客户区偏移用 `ClientToScreen(0,0) - GetWindowRect` 算。
 - 需要登录账号的功能中，**歌单增删**、**会员历史**仍未在真实账号上跑过（其余已跑完，见上）。

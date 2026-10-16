@@ -56,6 +56,23 @@ impl RadioView {
         }
     }
 
+    /// 清空视图内容（登出/换账号时调用），并让在途响应失效。
+    pub(crate) fn reset(&mut self, cx: &mut Context<Self>) {
+        self.classes = Vec::new();
+        self.stations = Arc::new(Vec::new());
+        self.songs = Arc::new(Vec::new());
+        self.sizes = row_sizes(0);
+        self.selected_class = None;
+        self.station_name = None;
+        self.loading_catalog = false;
+        self.loading_songs = false;
+        self.loaded = false;
+        self.catalog_error = None;
+        self.songs_error = None;
+        self.request_seq += 1;
+        cx.notify();
+    }
+
     /// 首次进入视图时触发分类与电台频道列表请求。
     pub(crate) fn ensure(&mut self, cx: &mut Context<Self>) {
         if self.loaded || self.loading_catalog {

@@ -57,6 +57,8 @@ pub(crate) struct AppShell {
     views: Option<Views>,
     toast: Option<SharedString>,
     toast_deadline: Option<Instant>,
+    /// 歌词请求序号：只有最新一次请求的响应才允许落地。
+    lyrics_seq: u64,
     _drain: Task<()>,
 }
 
@@ -85,6 +87,7 @@ impl AppShell {
             views: None,
             toast: None,
             toast_deadline: None,
+            lyrics_seq: 0,
             _drain: drain,
         }
     }
@@ -153,7 +156,12 @@ impl AppShell {
             Msg::Stations(result) => radio.update(cx, |view, cx| view.on_stations(result, cx)),
             Msg::StationClasses(result) => radio.update(cx, |view, cx| view.on_classes(result, cx)),
             Msg::StationSongs(seq, result) => radio.update(cx, |view, cx| view.on_songs(seq, result, cx)),
-            Msg::Lyrics(result) => lyrics.update(cx, |view, cx| view.set_lines(result, cx)),
+            Msg::Lyrics(seq, result) => {
+                // 快速切歌时丢弃旧请求的歌词，避免上一首覆盖当前曲目。
+                if seq == self.lyrics_seq {
+                    lyrics.update(cx, |view, cx| view.set_lines(result, cx));
+                }
+            }
             Msg::Vip(result) => settings.update(cx, |view, cx| view.on_vip(result, cx)),
             Msg::VipClaim(result) => settings.update(cx, |view, cx| view.on_claim(result, cx)),
             Msg::SettingsSaved(result) => settings.update(cx, |view, cx| view.on_saved(result, cx)),
@@ -253,9 +261,11 @@ impl AppShell {
         let Some(song) = self.player.read(cx).current_song().cloned() else {
             return;
         };
+        self.lyrics_seq += 1;
+        let seq = self.lyrics_seq;
         let app = self.backend.app();
         self.backend
-            .spawn(async move { Msg::Lyrics(app.lyrics(&song).await.map_err(|error| error.to_string())) });
+            .spawn(async move { Msg::Lyrics(seq, app.lyrics(&song).await.map_err(|error| error.to_string())) });
     }
 
     /// 从歌单中移除指定歌曲。
@@ -285,6 +295,14 @@ impl AppShell {
     fn on_logged_out(&mut self, cx: &mut Context<Self>) {
         self.logged_in = false;
         self.nav = Nav::Login;
+        // 清空上一账号的内容，避免换账号后仍显示旧歌单与旧 listid。
+        if let Some(views) = self.views.as_ref() {
+            views.playlists.update(cx, PlaylistsView::reset);
+            views.daily.update(cx, DailyView::reset);
+            views.radio.update(cx, RadioView::reset);
+            views.lyrics.update(cx, LyricsView::clear);
+            views.search.update(cx, SearchView::reset);
+        }
         self.set_toast("已登出".to_owned(), cx);
     }
 
@@ -296,14 +314,11 @@ impl AppShell {
     }
 
     /// 检查并清除已过期的轻提示。
-    fn expire_toast(&mut self, cx: &mut Context<Self>) -> bool {
+    fn expire_toast(&mut self, cx: &mut Context<Self>) {
         if self.toast_deadline.is_some_and(|deadline| Instant::now() >= deadline) {
             self.toast = None;
             self.toast_deadline = None;
             cx.notify();
-            true
-        } else {
-            false
         }
     }
 
@@ -398,10 +413,14 @@ impl Render for AppShell {
             Nav::Login => views.login.clone().into_any_element(),
         };
 
+        // gpui-pre 0.3.9 实测：列布局中排在 `flex_1` 项之后的固定高度子项会被压成 0 高，
+        // 所以播放条与提示条必须排在内容行**之前**（视觉上也随之位于顶部）。
         v_flex()
             .size_full()
             .bg(theme.background)
             .text_color(theme.foreground)
+            .child(views.player_bar.clone())
+            .children(self.toast_element(cx))
             .child(
                 div()
                     .flex()
@@ -412,8 +431,6 @@ impl Render for AppShell {
                     .child(div().w(px(1.0)).h_full().bg(theme.border))
                     .child(div().flex().flex_col().flex_1().min_w(px(0.0)).h_full().child(body)),
             )
-            .children(self.toast_element(cx))
-            .child(views.player_bar.clone())
             .into_any_element()
     }
 }

@@ -76,6 +76,9 @@ impl LoginView {
 
     /// 提交手机号与验证码执行登录。
     fn submit(&mut self, cx: &mut Context<Self>) {
+        if self.sending {
+            return;
+        }
         let mobile = self.mobile.read(cx).value().to_string();
         let code = self.code.read(cx).value().to_string();
         if !lyra_app::is_mobile(&mobile) {
@@ -88,6 +91,7 @@ impl LoginView {
             cx.notify();
             return;
         }
+        self.sending = true;
         self.status = Some(SharedString::new_static("登录中…"));
         cx.notify();
         let app = self.backend.app();
@@ -116,6 +120,7 @@ impl LoginView {
 
     /// 处理登录接口响应结果。
     pub(crate) fn on_login(&mut self, result: Result<(), String>, cx: &mut Context<Self>) {
+        self.sending = false;
         self.status = result
             .err()
             .map(|error| SharedString::from(format!("登录失败: {error}")));

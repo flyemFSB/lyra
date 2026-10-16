@@ -45,7 +45,7 @@ pub(crate) enum Msg {
     /// 某频道的歌（带上发起时的请求序号）。
     StationSongs(u64, Result<Vec<Song>, String>),
     /// 当前曲目的歌词。
-    Lyrics(Result<Vec<LyricLine>, String>),
+    Lyrics(u64, Result<Vec<LyricLine>, String>),
     /// 会员状态。
     Vip(Result<VipStatus, String>),
     /// 领取每日畅听 VIP 的结果。

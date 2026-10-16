@@ -59,6 +59,17 @@ impl SearchView {
         }
     }
 
+    /// 清空搜索结果（登出时调用），并让在途响应失效。
+    pub(crate) fn reset(&mut self, cx: &mut Context<Self>) {
+        self.songs = Arc::new(Vec::new());
+        self.sizes = row_sizes(0);
+        self.loading = false;
+        self.searched = false;
+        self.error = None;
+        self.request_seq += 1;
+        cx.notify();
+    }
+
     /// 提交当前搜索框中的关键字。
     pub(crate) fn submit(&mut self, cx: &mut Context<Self>) {
         let keyword = self.input.read(cx).value().to_string();

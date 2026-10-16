@@ -44,6 +44,17 @@ impl LyricsView {
         }
     }
 
+    /// 清空歌词内容（登出时调用）。
+    pub(crate) fn clear(&mut self, cx: &mut Context<Self>) {
+        self.lines = Arc::new(Vec::new());
+        self.texts = Arc::new(Vec::new());
+        self.title = SharedString::new_static("未在播放");
+        self.singer = SharedString::new_static("");
+        self.current_hash = None;
+        self.status = None;
+        cx.notify();
+    }
+
     /// 响应处理歌曲歌词数据。
     pub(crate) fn set_lines(&mut self, result: Result<Vec<LyricLine>, String>, cx: &mut Context<Self>) {
         match result {
