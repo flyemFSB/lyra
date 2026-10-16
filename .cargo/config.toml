@@ -1,4 +1,5 @@
 [alias]
 xtask = "run --package xtask --"
-# 不加 --all-features：那会把 gpui-kit 的 tree-sitter-* 全打开，CI 时间会爆掉
+# 不加 --all-features：那会同时打开 gpui-kit 的 tree-sitter-* 与 test-support，
+# 后者会让两套 GPUI 后端进入同一依赖图，cargo 直接解析失败（详见 PLAN「实施记录」）。
 lint = "clippy --workspace --all-targets -- -D warnings"

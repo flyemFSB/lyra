@@ -61,7 +61,7 @@ jobs:
 
           Compress-Archive -Path target/release/lyra.exe -DestinationPath "target/dist/Lyra-v$($env:VERSION)-windows-x64-portable.zip" -Force
 
-          Get-ChildItem -Path target/dist | ForEach-Object {
+          Get-ChildItem -Path target/dist -File | Where-Object { $_.Name -ne "checksums.sha256" } | ForEach-Object {
             $hash = (Get-FileHash -Path $_.FullName -Algorithm SHA256).Hash.ToLower()
             "$hash  $($_.Name)" | Out-File -FilePath target/dist/checksums.sha256 -Append -Encoding ascii
           }

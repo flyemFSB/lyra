@@ -54,6 +54,11 @@ pub async fn run(args: &[String]) -> Result<()> {
         return Ok(());
     };
     let rest = &args[1..];
+    // help 与未知命令不开数据库与钥匙串：存储不可用时也要看得到帮助。
+    if matches!(command, "help" | "--help" | "-h") {
+        println!("{}", help());
+        return Ok(());
+    }
     let app = Kugou::open(default_data_dir())?;
 
     match command {
@@ -97,7 +102,7 @@ pub async fn run(args: &[String]) -> Result<()> {
         }
         "tracks" => {
             let global_id = required(rest, 0, "global_collection_id")?;
-            let page = rest.get(1).and_then(|p| p.parse().ok()).unwrap_or(1);
+            let page = optional_number(rest, 1, "页码", 1_u32)?;
             let page_data = app.tracks(global_id, page).await?;
             for (index, song) in page_data.items.iter().enumerate() {
                 println!(
@@ -212,7 +217,7 @@ pub async fn run(args: &[String]) -> Result<()> {
         }
         "station" => {
             let fmid = required(rest, 0, "fmid")?;
-            let offset = rest.get(1).and_then(|v| v.parse().ok()).unwrap_or(-1);
+            let offset = optional_number(rest, 1, "offset", -1_i64)?;
             print_songs(&app.station_songs(fmid, offset).await?);
         }
         "vip" => {
@@ -263,6 +268,15 @@ fn song_stub(args: &[String]) -> Result<lyra_api::model::Song> {
         hash,
         album_id,
         ..lyra_api::model::Song::default()
+    })
+}
+
+/// 解析可选数字参数：缺省时用 `default`，给了就必须能解析，避免静默回落掩盖手误。
+fn optional_number<T: std::str::FromStr>(args: &[String], index: usize, name: &str, default: T) -> Result<T> {
+    args.get(index).map_or(Ok(default), |value| {
+        value
+            .parse::<T>()
+            .map_err(|_| Error::Invalid(format!("{name} 应为数字，得到 {value}")))
     })
 }
 

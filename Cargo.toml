@@ -28,14 +28,13 @@ lyra-audio = { path = "crates/audio" }
 lyra-app   = { path = "crates/app" }
 lyra-ui    = { path = "crates/ui" }
 
-# ---- UI：整组精确 pin，禁止单独 bump（方案风险 R3）----
+# ---- UI：版本由 gpui-kit 传递 pin ----
+# 不再在这里重复声明 gpui / gpui_platform / gpui_macros / reqwest_client：
+# 全仓只通过 `gpui-kit` 门面使用 GPUI（`use gpui_kit::*`），那四个条目没有任何 crate 依赖，
+# 只是悬空的旧声明（方案风险 R3 的「整组 pin」实际上由 gpui-kit 0.7.3 → gpui-pre =0.3.9 保证）。
 # 注意 gpui-kit 0.7.3 **没有** component/base 这两个 feature：
 # component 与 assets 就是它的 default，写 features = ["component","base"] 会解析失败。
 gpui-kit       = "0.7.3"
-gpui           = { package = "gpui-pre",          version = "=0.3.9" }
-gpui_platform  = { package = "gpui-pre-platform", version = "=0.3.9" }
-gpui_macros    = { package = "gpui-pre-macros",   version = "=0.3.9" }
-reqwest_client = { package = "gpui-pre-reqwest-client", version = "=0.3.9" }
 
 # 协议原语（全部 RustCrypto / 纯 Rust）
 md-5       = "0.10"
@@ -50,7 +49,8 @@ flate2     = "1"
 rand       = "0.8"
 
 # 音频
-symphonia = { version = "0.5", features = ["flac", "mp3", "vorbis", "ogg", "wav", "aac", "isomp4", "pcm"] }
+# 只解 FLAC / MP3 / OGG-Vorbis / WAV / AAC：关掉默认的 adpcm 与 mkv 后端
+symphonia = { version = "0.5", default-features = false, features = ["flac", "mp3", "vorbis", "ogg", "wav", "aac", "isomp4", "pcm"] }
 cpal      = "0.16"
 rubato    = "0.15"
 ringbuf   = "0.4"

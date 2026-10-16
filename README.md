@@ -8,8 +8,8 @@
   <img src="https://img.shields.io/badge/language-Rust_2024-orange.svg" alt="Rust 2024" />
   <img src="https://img.shields.io/badge/gui-GPUI-blue.svg" alt="GPUI" />
   <img src="https://img.shields.io/badge/platform-Windows-lightgrey.svg" alt="Platform Windows" />
-  <img src="https://img.shields.io/badge/license-MIT%2FApache--2.0-green.svg" alt="License" />
-  <img src="https://img.shields.io/badge/tests-197%20passed-brightgreen.svg" alt="Tests" />
+  <img src="https://img.shields.io/badge/license-MIT-green.svg" alt="License" />
+  <img src="https://img.shields.io/badge/tests-208%20passed-brightgreen.svg" alt="Tests" />
 </p>
 
 ---
@@ -73,14 +73,14 @@ flowchart TD
 
 | Crate | 核心职责 | 关键依赖 | 依赖 GPUI |
 |---|---|---|:---:|
-| [`lyra-proto`](file:///d:/YZB/Kugou/crates/proto) | 协议原语：签名计算、AES/RSA 密码学、设备身份生成、仿真行为指纹 | `ring`, `aes`, `rsa`, `flate2` | 否 |
-| [`lyra-api`](file:///d:/YZB/Kugou/crates/api) | 接口传输抽象、端点请求编解码、TinyLFU 缓存与 Single-Flight 请求聚合 | `reqwest`, `moka`, `serde_json` | 否 |
-| [`lyra-store`](file:///d:/YZB/Kugou/crates/store) | 本地数据持久化（设备标识、配置、缓存）与系统凭据管理 | `redb`, `windows` (CredEnumerate) | 否 |
-| [`lyra-audio`](file:///d:/YZB/Kugou/crates/audio) | 音频流处理：Symphonia 解码、音频重采样、环形缓冲与非阻塞事件引擎 | `cpal`, `symphonia`, `rubato` | 否 |
-| [`lyra-app`](file:///d:/YZB/Kugou/crates/app) | 业务用例门面（`Kugou`）组装、Tokio 异步运行时管控与 CLI 命令入口 | `tokio`, `tracing` | 否 |
-| [`lyra-ui`](file:///d:/YZB/Kugou/crates/ui) | GPUI 现代化桌面交互视图（歌单、搜索、电台、歌词、播放条、设置） | `gpui-kit` | 是 |
-| [`lyra`](file:///d:/YZB/Kugou/crates/desktop) | 桌面端可执行程序入口，支持无参数启动 GUI 或带参数运行 CLI | `lyra-app`, `lyra-ui` | 是 |
-| [`xtask`](file:///d:/YZB/Kugou/crates/xtask) | 开发与 CI 辅助任务：依赖树静态合规审计与真实上游端点连通性探测 | `anyhow`, `cargo_metadata` | 否 |
+| [`lyra-proto`](crates/proto) | 协议原语：签名计算、AES/RSA 密码学、设备身份生成、仿真行为指纹 | `ring`, `aes`, `rsa`, `flate2` | 否 |
+| [`lyra-api`](crates/api) | 接口传输抽象、端点请求编解码、TinyLFU 缓存与 Single-Flight 请求聚合 | `reqwest`, `moka`, `serde_json` | 否 |
+| [`lyra-store`](crates/store) | 本地数据持久化（设备标识、配置、缓存）与系统凭据管理 | `redb`, `windows` (CredEnumerate) | 否 |
+| [`lyra-audio`](crates/audio) | 音频流处理：Symphonia 解码、音频重采样、环形缓冲与非阻塞事件引擎 | `cpal`, `symphonia`, `rubato` | 否 |
+| [`lyra-app`](crates/app) | 业务用例门面（`Kugou`）组装、Tokio 异步运行时管控与 CLI 命令入口 | `tokio`, `tracing` | 否 |
+| [`lyra-ui`](crates/ui) | GPUI 现代化桌面交互视图（歌单、搜索、电台、歌词、播放条、设置） | `gpui-kit` | 是 |
+| [`lyra`](crates/desktop) | 桌面端可执行程序入口，支持无参数启动 GUI 或带参数运行 CLI | `lyra-app`, `lyra-ui` | 是 |
+| [`xtask`](crates/xtask) | 开发与 CI 辅助任务：依赖树静态合规审计与真实上游端点连通性探测 | `anyhow`, `cargo_metadata` | 否 |
 
 ---
 
@@ -89,7 +89,7 @@ flowchart TD
 ### 环境依赖
 
 - **操作系统**：Windows 10 / 11 (x86_64)
-- **Rust 工具链**：Rust 1.85+（Edition 2024）
+- **Rust 工具链**：Rust 1.99+（Edition 2024，见根 `Cargo.toml` 的 `rust-version`）
 - **C/C++ 编译环境**：MSVC 工具链（构建底层音频库所需）
 
 ### 构建与运行
@@ -142,7 +142,7 @@ cargo run -p lyra -- download <song_hash> [album_id] <output_file>
 ### 运行全工作区离线测试
 
 ```powershell
-# 运行全部 197 个测试（完全离线，基于 Mock 桩与确定性伪随机源）
+# 运行全部 208 个测试（完全离线，基于 Mock 桩与确定性伪随机源）
 cargo test --workspace
 ```
 
@@ -200,4 +200,4 @@ cargo run -p xtask -- package
 
 ## 📄 开源许可证
 
-本项目采用 [MIT 许可证](LICENSE) 或 [Apache-2.0 许可证](LICENSE-APACHE) 授权。
+本项目采用 MIT 许可证授权（根 `Cargo.toml` 的 `license = "MIT"`）。
