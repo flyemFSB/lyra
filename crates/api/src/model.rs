@@ -261,6 +261,13 @@ pub struct SongUrl {
 }
 
 impl SongUrl {
+    /// blob 缓存键：优先用上游给的音频 hash（内容寻址，不同音质/变体天然不同），
+    /// 上游没给时才回退到请求时的歌曲 hash。播放链路与 CLI 必须共用这一条规则。
+    #[must_use]
+    pub fn blob_key<'a>(&'a self, requested: &'a str) -> &'a str {
+        if self.hash.is_empty() { requested } else { &self.hash }
+    }
+
     /// 解析上游播放地址对象，提取主地址与备选节点列表。
     #[must_use]
     pub fn from_value(value: &Value) -> Option<Self> {
@@ -526,6 +533,21 @@ mod tests {
         assert_eq!(song.fileid, 777);
         assert_eq!(song.album_audio_id, "98765");
         assert_eq!(song.cover_at(240), "http://imge.kugou.com/stdmusic/240/x.jpg");
+    }
+
+    #[test]
+    fn blob_key_prefers_the_upstream_variant_hash() {
+        let mut url = SongUrl {
+            hash: "variant".to_owned(),
+            ..SongUrl::default()
+        };
+        assert_eq!(
+            url.blob_key("requested"),
+            "variant",
+            "有变体 hash 时必须用它做内容寻址键"
+        );
+        url.hash.clear();
+        assert_eq!(url.blob_key("requested"), "requested", "缺失时必须回退到请求 hash");
     }
 
     #[test]

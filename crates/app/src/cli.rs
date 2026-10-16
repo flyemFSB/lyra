@@ -165,7 +165,8 @@ pub async fn run(args: &[String]) -> Result<()> {
             let ext = url.ext_or_guess();
             let path = app
                 .blobs()
-                .ensure(&url.url, &item.hash, &ext)
+                // 与播放链路一致：缓存键用上游变体 hash，避免音质/容器变体互相命中。
+                .ensure(&url.url, url.blob_key(&item.hash), &ext)
                 .await
                 .map_err(|error| Error::Api(error.to_string()))?;
             // 读取音频文件头魔数校验容器格式。

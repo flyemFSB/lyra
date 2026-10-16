@@ -332,7 +332,12 @@ SID     = Base64( RSA-OAEP-SHA256(key, FP_RSA_PUBLIC) )
 
 轨迹必须用**三阶贝塞尔 + 递减抖动**（3px → 0.5px），`Δt` 取 8–50ms 随机，每 12 帧插一次滚动。**不可简化为直线** —— 这是能否稳定调通的单点。
 
-### 5.5 双加密通道（cloudlist，歌单增删走这条）
+### 5.5 双加密通道（cloudlist，仅限歌单**本体**增删等操作）
+
+> 第四轮对照参考实现（`MakcRe/KuGouMusicApi`）逐一核实后的范围修正：
+> 走双加密的是 `playlist_add` / `playlist_del`（建/删歌单本体）、`mv_collect(_del)`、`user_cloud_*`、`register_dev`；
+> **歌单内歌曲增删（`playlist_tracks_add` / `playlist_tracks_del`）不走双加密**，而是普通 `encryptType: 'android'` 签名 +
+> `x-router: cloudlist.service.kugou.com` 路由头 —— 与 `crates/api/src/endpoint/playlist.rs` 现有实现逐字一致。
 
 ```
 aes  = random(6 字符 [0-9a-zA-Z])
@@ -796,14 +801,15 @@ GUI 实测可启动：窗口句柄非零、标题 `lyra · 酷狗概念版`、st
 - `claim` 今日已领（`297002`）→ 到账效果需次日再验
 - 播放条不显示（见「仍未验证的」第一条）
 
-- **播放条（PlayerBar）已在列布局中可见**（第四轮）——`AppShell::render` 把播放条与提示条排在内容行**之前**，根仍是普通 `v_flex`。
-  可复现的实测结论（脚本见 `target/tmp/run-diag.ps1`）：gpui-pre 0.3.9 的列布局里，**排在 `flex_1` 项之后的固定高度子项一律被压成 0**
-  （空 `flex_1` 行同样如此），与 `min_h(px(0.0))`、`overflow_hidden()`、`flex_shrink_0()`/`flex_none()`、绝对长度 `flex_basis`、
-  `absolute()+bottom_0()` 都无关；唯一可用的组合是「固定项在前、`flex_1` 项在后」。`flex_col_reverse()` 能反转视觉顺序，
-  但同样受这条约束支配（固定项仍然只能出现在 `flex_1` 项的**上方**）。
-  - 代价：播放条画在窗口**顶部**而不是底部（先保证控件可点）；要挪回底部需上游修 taffy 适配层，或改用非 flex 的布局载体。
-  - 验证手法（可复用）：`PrintWindow(hwnd, hdc, 2)` 抓窗口 + `PostMessage(WM_LBUTTONDOWN/UP)` 无侵入点击；
-    注意 `PrintWindow` 抓的是整窗（含标题栏），客户区偏移用 `ClientToScreen(0,0) - GetWindowRect` 算。
+- **播放条（PlayerBar）不绘制的真正原因：gpui-pre 0.3.9 的 Windows 平台 DPI 错位**（第四轮已修）——
+  实测证据（`target/tmp/run-diag.ps1` + `PrintWindow` 抓图）：
+  - `h(px(100.0))` 的色带在 125% 缩放下占 **125 个物理像素**，即绘制按 `scale_factor` 放大；
+  - 但 `window.viewport_size()` 返回的高度（780）等于**物理**客户区高度，即布局画布也按物理像素算。
+  - 两者叠加后，布局画布右下角 `1/scale` 的区域永远落在窗口之外：放在底部的播放条布局在 702~780，
+    绘制后被推到 878~975 物理像素，而窗口只有 780 高 —— **它不是被 flex 压成 0，而是被画到了窗外**。
+    之前的「`flex_1` 之后的固定高度兄弟被压成 0」结论是误判（参考实现与 Zed 都用同一写法）。
+  - 修法：`AppShell::render` 把根元素尺寸改成 `viewport_size() / scale_factor()`，
+    布局画布与窗口精确对齐后，播放条回到窗口**底部**（已抓图确认），其余布局也不再被放大 25%（原状态右侧也有裁切）。
 - 需要登录账号的功能中，**歌单增删**、**会员历史**仍未在真实账号上跑过（其余已跑完，见上）。
 - audio 的尾音/seek 修复需要**有声卡实机**听自然结尾才能确认听感。
 

@@ -385,12 +385,13 @@ impl AppShell {
         let theme = cx.theme();
         self.toast.clone().map(|text| {
             div()
+                .flex_shrink_0()
                 .w_full()
-                .px_4()
-                .py_2()
                 .bg(theme.muted)
                 .text_color(theme.foreground)
                 .text_sm()
+                .px_4()
+                .py_2()
                 .child(text)
                 .into_any_element()
         })
@@ -398,7 +399,7 @@ impl AppShell {
 }
 
 impl Render for AppShell {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let Some(views) = self.views.as_ref() else {
             return notice("初始化中…", cx);
         };
@@ -413,14 +414,17 @@ impl Render for AppShell {
             Nav::Login => views.login.clone().into_any_element(),
         };
 
-        // gpui-pre 0.3.9 实测：列布局中排在 `flex_1` 项之后的固定高度子项会被压成 0 高，
-        // 所以播放条与提示条必须排在内容行**之前**（视觉上也随之位于顶部）。
+        // gpui-pre 0.3.9 的 Windows 平台把「布局画布」当成物理像素，而绘制仍按显示器缩放比放大，
+        // 于是画布右下角 1/scale 的区域永远落在窗口之外（播放条正是被这条规则吃掉的）。
+        // 应用侧把根元素按缩放比缩回去，布局画布就与窗口精确对齐。
+        let scale = window.scale_factor();
+        let viewport = window.viewport_size();
+
         v_flex()
-            .size_full()
+            .w(viewport.width / scale)
+            .h(viewport.height / scale)
             .bg(theme.background)
             .text_color(theme.foreground)
-            .child(views.player_bar.clone())
-            .children(self.toast_element(cx))
             .child(
                 div()
                     .flex()
@@ -431,6 +435,8 @@ impl Render for AppShell {
                     .child(div().w(px(1.0)).h_full().bg(theme.border))
                     .child(div().flex().flex_col().flex_1().min_w(px(0.0)).h_full().child(body)),
             )
+            .children(self.toast_element(cx))
+            .child(views.player_bar.clone())
             .into_any_element()
     }
 }

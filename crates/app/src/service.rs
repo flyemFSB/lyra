@@ -328,11 +328,8 @@ impl Kugou {
             .ok_or_else(|| Error::Audio("没有可用的音频输出设备".to_owned()))?;
         let url = self.song_url(song, quality).await?;
         engine.play(TrackRef {
-            hash: if url.hash.is_empty() {
-                song.hash.clone()
-            } else {
-                url.hash.clone()
-            },
+            // 缓存键用上游给的变体 hash（内容寻址），与 CLI 的 download 共用同一条规则。
+            hash: url.blob_key(&song.hash).to_owned(),
             url: url.url.clone(),
             duration_ms: if url.duration_ms == 0 {
                 song.duration_ms
