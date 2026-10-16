@@ -70,6 +70,11 @@ impl SettingsView {
         if self.loaded {
             return;
         }
+        // 未登录时上游会回 20010（参数缺失），没必要发这次请求，也不该把裸错误抛到界面上。
+        if !self.backend.app().is_logged_in() {
+            self.last_action = Some(SharedString::new_static("登录后可查看会员状态"));
+            return;
+        }
         self.loaded = true;
         let app = self.backend.app();
         self.backend
@@ -335,11 +340,7 @@ impl Render for SettingsView {
                     .min_h(px(0.0))
                     .overflow_y_scroll()
                     .child(Self::section("音质", quality_row.into_any_element(), cx))
-                    .child(Self::section(
-                        "缓存目录（重启后生效）",
-                        cache_row.into_any_element(),
-                        cx,
-                    ))
+                    .child(Self::section("缓存目录", cache_row.into_any_element(), cx))
                     .child(Self::section("缓存上限", preset_row.into_any_element(), cx))
                     .child(Self::section("会员", vip_row.into_any_element(), cx))
                     .child(Self::section("账号与缓存", account_row.into_any_element(), cx)),

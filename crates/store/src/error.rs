@@ -6,6 +6,9 @@ pub enum Error {
     /// 打开或初始化数据库文件失败。
     #[error("打开数据库失败: {0}")]
     Database(#[from] redb::DatabaseError),
+    /// 数据库已被另一个实例占用（GUI 与 CLI 共用同一数据目录）。
+    #[error("数据目录已被另一个 lyra 实例占用（GUI 正在运行？）：{0}")]
+    Busy(String),
     /// 开始读写事务失败（装箱以减少枚举内存占用）。
     #[error("事务失败: {0}")]
     Transaction(Box<redb::TransactionError>),

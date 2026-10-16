@@ -47,7 +47,13 @@ pub fn open(path: impl AsRef<Path>) -> Result<Store> {
 
 /// 打开指定路径的存储实例并注入自定义凭据实现。
 pub fn open_with_secrets(path: impl AsRef<Path>, secrets: Box<dyn Secrets>) -> Result<Store> {
-    let db = redb::Database::create(path)?;
+    let path = path.as_ref();
+    // redb 对数据库文件加独占锁：GUI 在跑时 CLI 必然拿不到锁，
+    // 这属于可解释的“被占用”，不该把英文的 redb 原文直接丢给用户。
+    let db = redb::Database::create(path).map_err(|error| match error {
+        redb::DatabaseError::DatabaseAlreadyOpen => Error::Busy(path.display().to_string()),
+        other => Error::Database(other),
+    })?;
     Ok(Store {
         db,
         secrets,
