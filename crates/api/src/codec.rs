@@ -201,7 +201,12 @@ pub fn error_message(value: &Value) -> String {
         value,
         &["msg", "error", "errmsg", "message", "error_msg", "errorMessage"],
     );
-    if message.is_empty() { value.to_string() } else { message }
+    // 兜底路径会把整份响应体塞进错误，必须同 http 层一样截断。
+    if message.is_empty() {
+        truncate(&value.to_string(), 200)
+    } else {
+        message
+    }
 }
 
 /// 解密会话密钥加密的响应体，解密失败时平滑降级为原始明文。

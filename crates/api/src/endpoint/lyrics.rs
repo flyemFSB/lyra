@@ -82,30 +82,43 @@ pub async fn lyric_for_song(api: &Api, song: &Song) -> Result<Vec<LyricLine>> {
 pub fn parse_lyrics(text: &str) -> Vec<LyricLine> {
     let mut lines = Vec::new();
     for raw in text.lines() {
-        let Some(rest) = raw.trim().strip_prefix('[') else {
-            continue;
-        };
-        let Some((head, body)) = rest.split_once(']') else {
-            continue;
-        };
-        // 跳过以字母开头的元数据头信息。
-        if head.chars().take(2).any(|c| c.is_ascii_alphabetic()) {
-            continue;
-        }
-        let time_ms = if let Some(start) = head.split(',').next() {
-            if head.contains(',') {
-                start.trim().parse::<u64>().unwrap_or(0)
+        let mut body = raw.trim();
+        let mut stamps: Vec<u64> = Vec::new();
+        // 一行可以挂多个时间标签（如重复副歌 `[00:12][01:30]`），每个标签都要生成一行。
+        while let Some(tail) = body.strip_prefix('[') {
+            let Some((head, after)) = tail.split_once(']') else {
+                break;
+            };
+            // 以字母开头的是元数据头（`[ti:]` / `[ar:]`），整行跳过。
+            if head.chars().take(2).any(|c| c.is_ascii_alphabetic()) {
+                stamps.clear();
+                break;
+            }
+            // KRC 头形如 `start,duration`，每行只有一个标签。
+            let is_krc = head.contains(',');
+            let time_ms = if is_krc {
+                head.split(',')
+                    .next()
+                    .map_or(0, |start| start.trim().parse::<u64>().unwrap_or(0))
             } else {
                 parse_lrc_time(head)
+            };
+            stamps.push(time_ms);
+            body = after;
+            if is_krc {
+                break;
             }
-        } else {
-            0
-        };
+        }
         let content = strip_krc_tags(body).trim().to_owned();
         if content.is_empty() {
             continue;
         }
-        lines.push(LyricLine { time_ms, text: content });
+        for time_ms in stamps {
+            lines.push(LyricLine {
+                time_ms,
+                text: content.clone(),
+            });
+        }
     }
     lines.sort_by_key(|line| line.time_ms);
     lines
@@ -164,6 +177,17 @@ mod tests {
         assert_eq!(lines[0].text, "本字幕由...");
         assert_eq!(lines[1].time_ms, 12_500);
         assert_eq!(lines[2].time_ms, 62_050);
+    }
+
+    #[test]
+    fn expands_repeated_timestamp_tags() {
+        let text = "[00:12.50][01:30.00]副歌\n[00:20.00]主歌";
+        let lines = parse_lyrics(text);
+        assert_eq!(lines.len(), 3, "同一行的两个时间标签应各出一行: {lines:?}");
+        assert_eq!(lines[0].time_ms, 12_500);
+        assert_eq!(lines[1].time_ms, 20_000);
+        assert_eq!(lines[2].time_ms, 90_000);
+        assert!(lines.iter().all(|line| line.text == "副歌" || line.text == "主歌"));
     }
 
     #[test]

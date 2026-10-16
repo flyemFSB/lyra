@@ -259,7 +259,11 @@ impl BlobCache {
     /// 正式文件路径：`{root}/{key前两位}/{key}.{ext}`。
     #[must_use]
     pub fn path_for(&self, key: &str, ext: &str) -> PathBuf {
-        let bucket = key.get(0..2).unwrap_or("00");
+        // 桶目录必须剔除 `.` / `..`：否则 `..x` 会拼成 `root/../..x`，写到缓存根之外。
+        let bucket = key
+            .get(0..2)
+            .filter(|bucket| *bucket != "." && *bucket != "..")
+            .unwrap_or("00");
         self.root.join(bucket).join(format!("{key}.{ext}"))
     }
 
@@ -333,7 +337,9 @@ impl BlobCache {
 
     /// 打开边下边播文件视图并返回下载任务（并发访问自动复用同一在途下载）。
     pub fn open_stream(&self, url: &str, key: &str, ext: &str) -> Result<(GrowingFile, Download)> {
-        if !Self::is_safe_path_component(key) || !Self::is_safe_path_component(ext) {
+        // key 参与桶目录拼接，前导点一并拒绝（`..x` 会被拼成 `root/../..x`）；
+        // ext 允许 `.flac` 这种带点写法，不共用这条约束。
+        if !Self::is_safe_path_component(key) || key.starts_with('.') || !Self::is_safe_path_component(ext) {
             return Err(Error::Io(format!(
                 "非法的缓存标识：key={key:?} ext={ext:?}（只允许字母数字与 . - _）"
             )));
@@ -825,6 +831,21 @@ mod tests {
         let error = cache.ensure("http://cdn/audio", "ffeeddcc", "flac").await.unwrap_err();
         assert!(error.to_string().contains("下载不完整"), "{error}");
         assert!(!cache.is_cached("ffeeddcc", "flac"), "半成品不得成为正式缓存");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[tokio::test]
+    async fn leading_dot_keys_cannot_escape_the_cache_root() {
+        let root = temp_root();
+        let cache = BlobCache::new(root.clone(), 1024, transport_with(vec![b'a'; 4]));
+        // `..x` / `.hidden` 这类键会通过字符白名单，但拼出来的桶目录是 `..` 或空，必须直接拒绝。
+        for key in ["..x", "...abc", ".", "..", ".hidden"] {
+            assert!(
+                cache.ensure("http://cdn/audio/x", key, "flac").await.is_err(),
+                "以点开头的缓存键必须被拒绝：{key}"
+            );
+        }
+        assert!(cache.ensure("http://cdn/audio/x", "aa112233", "flac").await.is_ok());
         let _ = std::fs::remove_dir_all(&root);
     }
 
