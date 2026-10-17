@@ -281,3 +281,140 @@ async fn play_mode_survives_a_restart() {
     .unwrap();
     assert_eq!(reopened.play_mode(), PlayMode::Shuffle);
 }
+
+// 模拟无版权歌曲与可选重传版响应
+fn no_copyright_stubs(mock: &MockTransport, with_replacement: bool) {
+    let mut data = vec![serde_json::json!({
+        "hash": "f78de2e4", "name": "阴天", "singername": "汪苏泷、莫文蔚",
+        "privilege": 5, "status": 0,
+        "_msg": "Deny: the current behavior of the audio is forbidden.",
+        "trans_param": {"cpy_grade": 75, "cpy_map": "2"},
+        "relate_goods": [{"level": 2, "quality": "128", "privilege": 5, "status": 0}]
+    })];
+    if with_replacement {
+        // 模拟同名 UGC 重传条目（免费且时长相近）
+        data.push(serde_json::json!({
+            "hash": "313c11d5", "name": "阴天", "singername": "汪苏泷、莫文蔚", "privilege": 0,
+            "relate_goods": [{"level": 2, "quality": "128", "privilege": 0, "status": 1,
+                                "info": {"extname": "mp3", "filesize": 3_000_000}}]
+        }));
+    }
+    mock.on_json(
+        "/v2/get_res_privilege/lite",
+        &serde_json::json!({"status": 1, "data": data}),
+    );
+    let lists = if with_replacement {
+        serde_json::json!([{
+            "FileHash": "313C11D5", "MixSongID": 974_503_310,
+            "SongName": "汪苏泷、莫文蔚《阴天 (2026明日世界巡回演唱会北京站)》",
+            "SingerName": "汪苏泷、莫文蔚", "Duration": 230_000, "Privilege": 0
+        }])
+    } else {
+        serde_json::json!([])
+    };
+    mock.on_json(
+        "/v2/search/song",
+        &serde_json::json!({"status": 1, "data": {"lists": lists}}),
+    );
+}
+
+fn denied_song() -> lyra_api::model::Song {
+    lyra_api::model::Song {
+        name: "阴天 (2026明日世界巡回演唱会北京站)".to_owned(),
+        singer: "汪苏泷、莫文蔚".to_owned(),
+        hash: "f78de2e4".to_owned(),
+        duration_ms: 225_000,
+        privilege: 5,
+        ..lyra_api::model::Song::default()
+    }
+}
+
+#[tokio::test]
+async fn no_copyright_track_is_swapped_for_a_playable_reupload() {
+    let mock = Arc::new(MockTransport::new());
+    no_copyright_stubs(&mock, true);
+    mock.on_json(
+        "/tracker/v5/url",
+        &serde_json::json!({"status": 1, "data": {"url": [
+            {"url": "http://fs.example/ap3116_qu128.ogg", "extname": "ogg", "hash": "313C11D5"}
+        ]}}),
+    );
+    let (app, _dir) = app(mock.clone());
+
+    let url = app.song_url(&denied_song(), "128").await.unwrap();
+    assert_eq!(url.ext, "ogg");
+
+    // 取址应使用换源后的新哈希
+    let tracker = mock
+        .requests()
+        .into_iter()
+        .find(|request| request.url.contains("/tracker/v5/url"))
+        .expect("应发出取址请求");
+    let hash = tracker
+        .query
+        .iter()
+        .find(|(key, _)| key == "hash")
+        .map(|(_, value)| value.clone());
+    assert_eq!(hash.as_deref(), Some("313c11d5"), "必须换源后再取址");
+}
+
+#[tokio::test]
+async fn no_copyright_without_a_replacement_is_reported_as_such() {
+    let mock = Arc::new(MockTransport::new());
+    no_copyright_stubs(&mock, false);
+    let (app, _dir) = app(mock.clone());
+
+    let error = app.song_url(&denied_song(), "128").await.unwrap_err();
+    assert!(matches!(error, lyra_app::Error::NoCopyright), "{error:?}");
+    assert_eq!(
+        format!("{error}"),
+        "这首歌在概念版没有版权（已下架）",
+        "错误文案要能看懂，不能再是「上游未返回播放地址」"
+    );
+    assert!(
+        !mock
+            .requests()
+            .iter()
+            .any(|request| request.url.contains("/tracker/v5/url")),
+        "既然上游说没版权，就不该再去取址（白白多一次必失败请求）"
+    );
+}
+
+#[tokio::test]
+async fn trial_only_tracks_expose_the_preview_clip_length() {
+    let mock = Arc::new(MockTransport::new());
+    mock.on_json(
+        "/v2/get_res_privilege/lite",
+        &serde_json::json!({"status": 1, "data": [{
+            "hash": "abc123", "name": "Renegades", "privilege": 10,
+            "relate_goods": [{"level": 2, "quality": "128", "privilege": 10, "status": 0,
+                               "info": {"extname": "mp3", "filesize": 3_000_000}}]
+        }]}),
+    );
+    mock.on_json(
+        "/tracker/v5/url",
+        &serde_json::json!({"status": 2, "fail_process": ["pkg", "buy"],
+            "hash_offset": {"start_ms": 0, "end_ms": 60000, "offset_hash": "OFFSET"}}),
+    );
+    mock.on_json(
+        "IsFreePart=1",
+        &serde_json::json!({"status": 1, "extName": "mp3",
+            "url": ["http://fs.example/p_0_960157/ap3116_qu128.mp3"],
+            "hash_offset": {"end_ms": 60000, "clip_hash": "CLIPHASH"}}),
+    );
+    let (app, _dir) = app(mock.clone());
+    let song = lyra_api::model::Song {
+        name: "Renegades".to_owned(),
+        hash: "abc123".to_owned(),
+        ..lyra_api::model::Song::default()
+    };
+
+    let url = app.song_url(&song, "").await.unwrap();
+    assert_eq!(url.preview_ms, 60_000, "只授权试听时要如实告知时长");
+    assert_eq!(url.duration_ms, 60_000, "进度条必须按片段时长走");
+    assert_eq!(
+        url.blob_key(&song.hash),
+        "cliphash_preview",
+        "试听片段不能污染完整曲缓存"
+    );
+}

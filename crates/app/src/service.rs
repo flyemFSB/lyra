@@ -1,9 +1,9 @@
-//! 用例门面：组装持久化、网络接口与音频引擎。
+//! 用例门面：组装持久化、网络接口与音频引擎
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use lyra_api::endpoint::{audio, flow, library, lyrics, playlist, privilege, session};
+use lyra_api::endpoint::{audio, flow, library, lyrics, playlist, privilege, search, session};
 use lyra_api::model::{LyricLine, Page, Playlist, Song, SongRights, SongUrl, Station, StationClass, VipStatus};
 use lyra_api::transport::Transport;
 use lyra_api::{Api, Session};
@@ -13,10 +13,23 @@ use lyra_store::{Account as StoreAccount, PlayMode, Settings, Store};
 use crate::error::{Error, Result};
 use crate::fetcher::BlobFetcher;
 
-/// 默认音质回落优先级（从高到低）。
+/// 默认音质回落优先级（从高到低）
 const QUALITY_FALLBACK: &[&str] = &["flac", "320", "128"];
 
-/// 酷狗核心业务用例门面。
+/// 换源时容许的时长偏差（毫秒，兼容转码或重传误差）
+const REPLACEMENT_DRIFT_MS: u64 = 8_000;
+
+/// 换源搜索候选上限
+const REPLACEMENT_CANDIDATES: u32 = 10;
+
+/// 单次播放请求结果
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct Playback {
+    /// 试听片段时长（毫秒，0 表示完整播放）
+    pub preview_ms: u64,
+}
+
+/// 酷狗核心业务门面
 #[derive(Clone)]
 pub struct Kugou {
     store: Arc<Store>,
@@ -269,49 +282,67 @@ impl Kugou {
         ))
     }
 
-    /// 获取当前登录用户的详细资料。
+    /// 获取当前登录用户的详细资料
     pub async fn user_detail(&self) -> Result<serde_json::Value> {
         Ok(library::user_detail(&self.api).await?)
     }
 
     // ---------------------------------------------------------- 曲库管理
 
-    /// 获取用户的全部歌单。
+    /// 获取用户的全部歌单
     pub async fn playlists(&self) -> Result<Vec<Playlist>> {
         Ok(library::playlists(&self.api).await?)
     }
 
-    /// 分页获取指定歌单内的歌曲列表。
+    /// 分页获取指定歌单内的歌曲列表
     pub async fn tracks(&self, global_collection_id: &str, page: u32) -> Result<Page<Song>> {
         Ok(library::playlist_tracks(&self.api, global_collection_id, page, 100).await?)
     }
 
-    /// 添加指定歌曲至“我喜欢”歌单。
+    /// 添加指定歌曲至“我喜欢”歌单
     pub async fn like(&self, song: &Song) -> Result<()> {
         Ok(playlist::add_songs(&self.api, Playlist::LIKED_LISTID, std::slice::from_ref(song)).await?)
     }
 
-    /// 从指定歌单中移除歌曲。
+    /// 从指定歌单中移除歌曲
     pub async fn remove(&self, listid: &str, fileids: &[i64]) -> Result<()> {
         Ok(playlist::delete_songs(&self.api, listid, fileids).await?)
     }
 
     // ---------------------------------------------------------- 音频播放
 
-    /// 查询歌曲的音质权益矩阵。
+    /// 查询歌曲的音质权益矩阵
     pub async fn rights(&self, song: &Song) -> Result<SongRights> {
         Ok(privilege::privilege_for_song(&self.api, song, None).await?)
     }
 
-    /// 获取歌曲播放直链。
+    /// 获取歌曲播放直链（无版权时自动尝试换源）
     pub async fn song_url(&self, song: &Song, quality: &str) -> Result<SongUrl> {
+        match self.resolve_url(song, quality).await {
+            Err(Error::NoCopyright) => match self.replacement_for(song).await {
+                Some(other) => {
+                    tracing::info!(from = %song.hash, to = %other.hash, "无版权歌曲已换源");
+                    self.resolve_url(&other, quality).await.map_err(|_| Error::NoCopyright)
+                }
+                None => Err(Error::NoCopyright),
+            },
+            other => other,
+        }
+    }
+
+    /// 解析单次播放直链（不执行换源）
+    async fn resolve_url(&self, song: &Song, quality: &str) -> Result<SongUrl> {
         let rights = self.rights(song).await?;
+        // 无版权音源直接交由上层换源处理
+        if rights.is_no_copyright() {
+            return Err(Error::NoCopyright);
+        }
         let chosen = pick_quality(&rights, quality)?;
         let entry = rights.quality(&chosen).ok_or_else(|| Error::NoPlayableQuality {
             requested: chosen.clone(),
             available: rights.free_qualities.clone(),
         })?;
-        // 若变体音质提供专属哈希则优先使用。
+        // 优先选用变体专属哈希
         let hash = if entry.hash.is_empty() {
             song.hash.clone()
         } else {
@@ -329,16 +360,32 @@ impl Kugou {
         .await?)
     }
 
-    /// 解析歌曲播放直链并投送至音频引擎播放。
-    pub async fn play(&self, song: &Song, quality: &str) -> Result<()> {
+    /// 查找匹配的可用替换音源（同名且时长相近，优先选取免费条目）
+    async fn replacement_for(&self, song: &Song) -> Option<Song> {
+        let keyword = if song.singer.is_empty() {
+            song.name.clone()
+        } else {
+            format!("{} {}", song.name, song.singer)
+        };
+        let hits = search::songs(&self.api, &keyword, 1, REPLACEMENT_CANDIDATES, None)
+            .await
+            .ok()?;
+        hits.into_iter()
+            .filter(|hit| is_replacement(song, hit))
+            // 优先选取免费条目，次选时长最接近项
+            .min_by_key(|hit| (hit.privilege != 0, hit.duration_ms.abs_diff(song.duration_ms)))
+    }
+
+    /// 解析播放直链并投送至音频引擎
+    pub async fn play(&self, song: &Song, quality: &str) -> Result<Playback> {
         let engine = self
             .engine
             .as_ref()
             .ok_or_else(|| Error::Audio("没有可用的音频输出设备".to_owned()))?;
         let url = self.song_url(song, quality).await?;
         engine.play(TrackRef {
-            // 缓存键用上游给的变体 hash（内容寻址），与 CLI 的 download 共用同一条规则。
-            hash: url.blob_key(&song.hash).to_owned(),
+            // 使用变体哈希作为缓存键（试听片段自带 _preview 后缀隔离缓存）
+            hash: url.blob_key(&song.hash),
             url: url.url.clone(),
             duration_ms: if url.duration_ms == 0 {
                 song.duration_ms
@@ -347,82 +394,129 @@ impl Kugou {
             },
             ext: url.ext_or_guess(),
         });
-        Ok(())
+        Ok(Playback {
+            preview_ms: url.preview_ms,
+        })
     }
 
-    /// 获取逐行滚动歌词。
+    /// 获取逐行滚动歌词
     pub async fn lyrics(&self, song: &Song) -> Result<Vec<LyricLine>> {
         Ok(lyrics::lyric_for_song(&self.api, song).await?)
     }
 
     // ---------------------------------------------------------- 推荐与电台
 
-    /// 获取每日推荐歌曲列表。
+    /// 获取每日推荐歌曲列表
     pub async fn daily(&self) -> Result<Vec<Song>> {
         Ok(flow::daily(&self.api, "android").await?.items)
     }
 
-    /// 分页获取个性化电台歌曲。
+    /// 分页获取个性化电台歌曲
     pub async fn personal_fm(&self, cursor: Option<&str>, mode: &str) -> Result<Page<Song>> {
         Ok(flow::personal_fm(&self.api, "play", mode, cursor, None).await?)
     }
 
-    /// 获取首页发现歌曲推荐。
+    /// 获取首页发现歌曲推荐
     pub async fn discover(&self, pagesize: u32) -> Result<Vec<Song>> {
         Ok(flow::home_discover(&self.api, pagesize, 0).await?.items)
     }
 
-    /// 搜索单曲列表。
+    /// 搜索单曲列表
     pub async fn search(&self, keyword: &str, page: u32) -> Result<Vec<Song>> {
         Ok(lyra_api::endpoint::search::songs(&self.api, keyword, page, 30, None).await?)
     }
 
-    /// 获取卡片专区歌曲推荐。
+    /// 获取卡片专区歌曲推荐
     pub async fn card(&self, card_id: u32) -> Result<Vec<Song>> {
         Ok(flow::card(&self.api, card_id, 30).await?.items)
     }
 
-    /// 获取推荐电台频道列表。
+    /// 获取推荐电台频道列表
     pub async fn stations(&self) -> Result<Vec<Station>> {
         catalog_stations(&self.api).await
     }
 
-    /// 获取电台分类列表。
+    /// 获取电台分类列表
     pub async fn station_classes(&self) -> Result<Vec<StationClass>> {
         catalog_classes(&self.api).await
     }
 
-    /// 获取指定电台频道的歌曲列表。
+    /// 获取指定电台频道的歌曲列表
     pub async fn station_songs(&self, fmid: &str, offset: i64) -> Result<Vec<Song>> {
         catalog_songs(&self.api, fmid, offset).await
     }
 
     // ---------------------------------------------------------- 会员权益
 
-    /// 查询当前账号的会员状态。
+    /// 查询当前账号的会员状态
     pub async fn vip(&self) -> Result<VipStatus> {
         Ok(privilege::vip_status(&self.api).await?)
     }
 
-    /// 领取每日概念版畅听 VIP 权益。
+    /// 领取每日概念版畅听 VIP
     pub async fn claim_daily_vip(&self) -> Result<privilege::VipClaim> {
         Ok(privilege::claim_daily_vip(&self.api).await?)
     }
 
-    /// 清空内存中已缓存的接口数据。
+    /// 清空内存中已缓存的 API 响应数据
     pub fn clear_cache(&self) {
         self.api.cache().clear();
     }
 }
 
-/// 校验手机号格式是否为 11 位数字字符。
+/// 校验是否为 11 位有效手机号
 #[must_use]
 pub fn is_mobile(mobile: &str) -> bool {
     let mobile = mobile.trim();
     mobile.chars().count() == 11 && mobile.chars().all(|character| character.is_ascii_digit())
 }
 
-/// 匹配最符合用户偏好且可播放的音质。
+/// 判定候选歌曲是否为可用替换源（标题一致且时长相近）
+fn is_replacement(original: &Song, candidate: &Song) -> bool {
+    if candidate.hash.is_empty() || candidate.hash.eq_ignore_ascii_case(&original.hash) {
+        return false;
+    }
+    let want = squash(&original.name);
+    let got = squash(&candidate.name);
+    // 避免单字等过短标题误匹配
+    if want.chars().count() < 2 || got.is_empty() {
+        return false;
+    }
+    let core_matches = core_title(&got) == core_title(&want);
+    if !(got.contains(&want) || want.contains(&got) || core_matches) {
+        return false;
+    }
+    // 存在有效时长时校验偏差，否则要求核心标题完全一致
+    match (original.duration_ms, candidate.duration_ms) {
+        (a, b) if a > 1_000 && b > 1_000 => a.abs_diff(b) <= REPLACEMENT_DRIFT_MS,
+        _ => core_matches,
+    }
+}
+
+/// 去除空白并转为小写
+fn squash(name: &str) -> String {
+    name.chars()
+        .filter(|ch| !ch.is_whitespace())
+        .flat_map(char::to_lowercase)
+        .collect()
+}
+
+/// 剔除括号说明与版本后缀并归一化
+fn core_title(name: &str) -> String {
+    let mut out = String::with_capacity(name.len());
+    let mut depth = 0_u32;
+    for ch in name.chars() {
+        match ch {
+            '(' | '（' | '《' | '[' | '【' => depth += 1,
+            ')' | '）' | '》' | ']' | '】' => depth = depth.saturating_sub(1),
+            _ if depth == 0 => out.push(ch),
+            _ => {}
+        }
+    }
+    squash(&out)
+}
+
+/// 匹配用户偏好且可用的最优音质
 fn pick_quality(rights: &SongRights, requested: &str) -> Result<String> {
     let preferred = if requested.is_empty() { "flac" } else { requested };
     if rights.quality(preferred).is_some_and(|q| q.obtainable) {
@@ -463,11 +557,68 @@ mod tests {
     fn mobile_must_be_11_ascii_digits() {
         assert!(is_mobile("13800138000"));
         assert!(is_mobile(" 13800138000 "), "两侧空白应被容忍");
-        // 排除包含汉字等非数字字符的情况。
+        // 包含汉字等非数字字符
         assert!(!is_mobile("一二三四五六七八九十一"));
         assert!(!is_mobile("1380013800"), "10 位不合法");
         assert!(!is_mobile("138001380000"), "12 位不合法");
         assert!(!is_mobile("1380013800a"));
         assert!(!is_mobile(""));
+    }
+
+    fn song(name: &str, singer: &str, hash: &str, duration_ms: u64, privilege: i64) -> Song {
+        Song {
+            name: name.to_owned(),
+            singer: singer.to_owned(),
+            hash: hash.to_owned(),
+            duration_ms,
+            privilege,
+            ..Song::default()
+        }
+    }
+
+    #[test]
+    fn replacement_accepts_a_reupload_of_the_same_recording() {
+        // 验证官方下架但 UGC 重传版可播的情形（允许 5 秒内偏差）
+        let original = song(
+            "阴天 (2026明日世界巡回演唱会北京站)",
+            "汪苏泷、莫文蔚",
+            "f78de2e4",
+            225_000,
+            5,
+        );
+        let reupload = song(
+            "汪苏泷、莫文蔚《阴天 (2026明日世界巡回演唱会北京站)》",
+            "汪苏泷、莫文蔚",
+            "313c11d5",
+            230_000,
+            0,
+        );
+        assert!(is_replacement(&original, &reupload));
+    }
+
+    #[test]
+    fn replacement_rejects_other_versions_other_songs_and_itself() {
+        let original = song("阴天 (2026巡演北京站)", "汪苏泷", "f78de", 225_000, 5);
+        // 时长偏差过大视为不同版本
+        assert!(!is_replacement(
+            &original,
+            &song("阴天 (Live)", "莫文蔚", "a", 247_000, 10)
+        ));
+        // 歌曲完全不匹配
+        assert!(!is_replacement(&original, &song("嘉宾", "皮大大", "b", 225_000, 0)));
+        // 原歌曲不作为替换目标
+        assert!(!is_replacement(&original, &song("阴天", "汪苏泷", "f78de", 225_000, 5)));
+        // 单字标题不参与换源
+        assert!(!is_replacement(
+            &song("雨", "x", "c", 0, 5),
+            &song("雨", "y", "d", 0, 0)
+        ));
+    }
+
+    #[test]
+    fn core_title_drops_version_suffixes() {
+        assert_eq!(core_title("阴天（Live）"), "阴天");
+        assert_eq!(core_title("汪苏泷、莫文蔚《阴天 (2026演唱会)》"), "汪苏泷、莫文蔚");
+        assert_eq!(squash("MiXeD  Case"), "mixedcase");
     }
 }

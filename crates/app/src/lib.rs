@@ -9,4 +9,4 @@ pub mod service;
 pub use error::{Error, Result};
 pub use fetcher::BlobFetcher;
 pub use lyra_store::PlayMode;
-pub use service::{Kugou, is_mobile};
+pub use service::{Kugou, Playback, is_mobile};

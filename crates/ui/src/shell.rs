@@ -279,11 +279,16 @@ impl AppShell {
         let quality = app
             .settings()
             .map_or_else(|_| "flac".to_owned(), |settings| settings.quality);
-        // 响应带上发起时的歌曲 hash：取址是异步的，判失败 / 该不该跳过前必须先确认它还是当前这首。
+        // 携带歌曲哈希以在异步回调中核对曲目一致性
         let hash = song.hash.clone();
         self.backend.spawn(async move {
             match app.play(&song, &quality).await {
-                Ok(()) => Msg::Noop,
+                // 上游仅授权试听片段
+                Ok(playback) if playback.preview_ms > 0 => Msg::Toast(format!(
+                    "仅试听 {} 秒（完整版需会员或购买）",
+                    playback.preview_ms / 1000
+                )),
+                Ok(_) => Msg::Noop,
                 Err(error) => Msg::AudioFailed {
                     hash,
                     message: error.to_string(),

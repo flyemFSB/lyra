@@ -154,6 +154,9 @@ pub async fn run(args: &[String]) -> Result<()> {
                 url.size
             );
             println!("备用节点: {}", url.backup_urls.len());
+            if url.preview_ms > 0 {
+                println!("⚠️ 仅试听 {} 秒（完整版需会员或购买）", url.preview_ms / 1000);
+            }
         }
         "download" => {
             let item = song_stub(rest)?;
@@ -163,13 +166,16 @@ pub async fn run(args: &[String]) -> Result<()> {
                 .ok_or_else(|| Error::Invalid("缺少输出文件路径".to_owned()))?;
             let url = app.song_url(&item, "").await?;
             let ext = url.ext_or_guess();
+            if url.preview_ms > 0 {
+                println!("⚠️ 仅能下载试听片段 {} 秒", url.preview_ms / 1000);
+            }
             let path = app
                 .blobs()
-                // 与播放链路一致：缓存键用上游变体 hash，避免音质/容器变体互相命中。
-                .ensure(&url.url, url.blob_key(&item.hash), &ext)
+                // 使用变体哈希隔离不同音质与试听缓存
+                .ensure(&url.url, &url.blob_key(&item.hash), &ext)
                 .await
                 .map_err(|error| Error::Api(error.to_string()))?;
-            // 读取音频文件头魔数校验容器格式。
+            // 读取音频文件头魔数校验容器格式
             let mut head = [0_u8; 4];
             let read = std::io::Read::read(&mut std::fs::File::open(&path)?, &mut head)?;
             let head = &head[..read];
