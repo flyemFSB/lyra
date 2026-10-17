@@ -1,4 +1,4 @@
-//! 酷狗概念版界面层：运行时装配与 GPUI 视图管理。
+//! 酷狗概念版界面层：运行时装配与 GPUI 视图管理
 #![forbid(unsafe_code)]
 #![allow(clippy::wildcard_imports)]
 
@@ -14,17 +14,17 @@ use gpui_kit::*;
 
 use crate::bridge::Backend;
 
-/// 启动图形界面并阻塞至窗口关闭。
+/// 启动图形界面并阻塞至窗口关闭
 pub fn run() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let runtime = tokio::runtime::Builder::new_multi_thread().enable_all().build()?;
     let handle = runtime.handle().clone();
     let data_dir = lyra_app::cli::default_data_dir();
     let (tx, rx) = mpsc::channel::<bridge::Msg>();
 
-    // 初始化应用服务并挂载音频引擎。
+    // 初始化应用服务并挂载音频引擎
     let backend = runtime.block_on(async {
         let mut kugou = lyra_app::Kugou::open(&data_dir)?;
-        // 监听音频引擎事件并转发至界面通道。
+        // 监听音频引擎事件并转发至 UI 消息通道
         let events_tx = tx.clone();
         let events = Box::new(move |event: lyra_audio::Event| {
             let msg = match event {
@@ -37,7 +37,7 @@ pub fn run() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         Ok::<_, lyra_app::Error>(Backend::new(kugou, handle.clone(), tx.clone()))
     })?;
 
-    // 标记窗口创建状态。
+    // 记录窗口创建状态
     let opened = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
     let opened_in_closure = opened.clone();
 
@@ -64,7 +64,7 @@ pub fn run() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     }
 }
 
-/// 配置主窗口尺寸与属性。
+/// 配置主窗口尺寸与属性
 fn window_options() -> WindowOptions {
     WindowOptions {
         window_bounds: Some(WindowBounds::Windowed(Bounds::new(
@@ -76,7 +76,7 @@ fn window_options() -> WindowOptions {
             title: Some("Lyra 音乐".into()),
             ..Default::default()
         }),
-        // 设置桌面环境应用标识。
+        // 桌面环境应用标识
         app_id: Some("lyra".to_owned()),
         ..Default::default()
     }

@@ -1,4 +1,4 @@
-//! 离线测试模拟传输实现，支持基于 URL 子串的应答匹配。
+//! 模拟测试传输层实现。
 
 use async_trait::async_trait;
 use parking_lot::Mutex;
@@ -6,15 +6,15 @@ use parking_lot::Mutex;
 use super::{ChunkSink, Request, Response, Transport};
 use crate::error::{Error, Result};
 
-/// 一条桩应答。
+/// 路由打桩规则
 #[derive(Debug, Clone)]
 struct Route {
-    /// URL 或路径包含该子串即命中。
+    /// 匹配子串（URL 或路径包含即命中）
     needle: String,
     response: Response,
 }
 
-/// 记录请求并按路径返回预置响应的传输实现。
+/// 内存 Mock 传输实现
 #[derive(Debug, Default)]
 pub struct MockTransport {
     routes: Mutex<Vec<Route>>,
@@ -22,13 +22,13 @@ pub struct MockTransport {
 }
 
 impl MockTransport {
-    /// 空实现。
+    /// 创建空 Mock 传输实例
     #[must_use]
     pub fn new() -> Self {
         Self::default()
     }
 
-    /// 注册一条桩应答：请求 URL 含 `needle` 即命中。
+    /// 注册桩应答规则
     pub fn on(&self, needle: impl Into<String>, response: Response) -> &Self {
         self.routes.lock().push(Route {
             needle: needle.into(),
@@ -37,31 +37,31 @@ impl MockTransport {
         self
     }
 
-    /// 注册一条 JSON 桩应答。
+    /// 注册 JSON 桩应答
     pub fn on_json(&self, needle: impl Into<String>, body: &serde_json::Value) -> &Self {
         self.on(needle, Response::json_body(body))
     }
 
-    /// 注册一条带 `ssa-code` 的失败应答（用于验证重试路径）。
+    /// 注册携带 ssa-code 验证头的桩应答
     pub fn on_ssa(&self, needle: impl Into<String>, ssa_code: &str, body: &serde_json::Value) -> &Self {
         let mut response = Response::json_body(body);
         response.headers.push(("ssa-code".to_owned(), ssa_code.to_owned()));
         self.on(needle, response)
     }
 
-    /// 已收到的全部请求。
+    /// 获取已捕获的全部请求列表
     #[must_use]
     pub fn requests(&self) -> Vec<Request> {
         self.seen.lock().clone()
     }
 
-    /// 最近一次请求。
+    /// 获取最近捕获的一次请求
     #[must_use]
     pub fn last_request(&self) -> Option<Request> {
         self.seen.lock().last().cloned()
     }
 
-    /// 已收到的请求数量。
+    /// 获取捕获的请求总数
     #[must_use]
     pub fn count(&self) -> usize {
         self.seen.lock().len()

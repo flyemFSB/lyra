@@ -1,4 +1,4 @@
-//! 单元测试辅助模块：构造测试用设备身份、会话与客户端实例。
+//! 测试辅助工具：提供模拟设备、会话与客户端构建。
 #![cfg(test)]
 
 use std::sync::Arc;
@@ -7,7 +7,7 @@ use crate::client::Api;
 use crate::spec::{Account, Session};
 use crate::transport::MockTransport;
 
-/// 构造测试用固定设备身份。
+/// 构造预设设备指纹
 pub(crate) fn device(dfid: &str) -> lyra_proto::Device {
     lyra_proto::Device {
         guid: "e8456cee7fd2348cfa239342b10a23bd".to_owned(),
@@ -19,7 +19,7 @@ pub(crate) fn device(dfid: &str) -> lyra_proto::Device {
     }
 }
 
-/// 已登录会话。
+/// 构造已登录会话
 pub(crate) fn session() -> Session {
     Session::new(device("DfidValue")).with_account(Account {
         userid: 2_043_841_403,
@@ -29,22 +29,22 @@ pub(crate) fn session() -> Session {
     })
 }
 
-/// 构造未登录匿名会话。
+/// 构造未登录会话
 pub(crate) fn anonymous() -> Session {
     Session::new(device("-"))
 }
 
-/// 已登录的 `Api`。
+/// 构造已登录 API 客户端
 pub(crate) fn api(mock: Arc<MockTransport>) -> Api {
     Api::new(mock, session(), 64)
 }
 
-/// 未登录的 `Api`。
+/// 构造未登录 API 客户端
 pub(crate) fn anonymous_api(mock: Arc<MockTransport>) -> Api {
     Api::new(mock, anonymous(), 64)
 }
 
-/// 构造指定设备标识的测试客户端。
+/// 构造指定 dfid 的 API 客户端
 pub(crate) fn api_with_dfid(mock: Arc<MockTransport>, dfid: &str) -> Api {
     Api::new(mock, Session::new(device(dfid)), 64)
 }

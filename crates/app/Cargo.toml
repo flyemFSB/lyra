@@ -8,7 +8,7 @@ license.workspace      = true
 
 [features]
 default = []
-# 打开后编译 GPUI 侧代码（Entity / 传输实现）
+# 启用 GPUI 界面支持
 gui = []
 
 [dependencies]
@@ -24,7 +24,7 @@ tokio        = { version = "1", features = ["rt-multi-thread", "macros", "time"]
 [dev-dependencies]
 tempfile = { workspace = true }
 lyra-store = { workspace = true }
-# test-util 提供 start_paused，让重试延迟在测试里瞬时完成
+# test-util 提供虚拟时钟，加速测试重试等待
 tokio = { version = "1", features = ["test-util"] }
 
 [lints]

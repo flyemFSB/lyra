@@ -1,4 +1,4 @@
-//! 电台与广播频道列表视图组件：拟态玻璃网格与实时调频体验。
+//! 电台分类、频道卡片与电台曲目列表视图。
 
 use std::rc::Rc;
 use std::sync::Arc;
@@ -20,7 +20,7 @@ use crate::theme::{
 use crate::views::player::PlayerModel;
 use crate::views::tracks::track_row;
 
-/// 电台视图状态结构。
+/// 电台视图
 pub(crate) struct RadioView {
     backend: Backend,
     shell: WeakEntity<AppShell>,
@@ -35,17 +35,17 @@ pub(crate) struct RadioView {
     loading_catalog: bool,
     loading_songs: bool,
     loaded: bool,
-    /// 目录分类与频道加载错误信息。
+    /// 分类与频道加载错误信息
     catalog_error: Option<SharedString>,
-    /// 频道歌曲加载错误信息。
+    /// 频道歌曲加载错误信息
     songs_error: Option<SharedString>,
-    /// 请求序号：只有最新一次选择频道的响应才允许落地。
+    /// 请求序号（用于丢弃过期响应）
     request_seq: u64,
     _sub: Subscription,
 }
 
 impl RadioView {
-    /// 创建电台视图结构并监听播放器快照更新。
+    /// 创建电台视图并订阅播放器状态
     pub(crate) fn new(
         backend: Backend,
         shell: WeakEntity<AppShell>,
@@ -76,7 +76,7 @@ impl RadioView {
         }
     }
 
-    /// 清空视图内容（登出/换账号时调用），并让在途响应失效。
+    /// 重置视图状态并废弃在途请求
     pub(crate) fn reset(&mut self, cx: &mut Context<Self>) {
         self.classes = Vec::new();
         self.stations = Arc::new(Vec::new());
@@ -94,7 +94,7 @@ impl RadioView {
         cx.notify();
     }
 
-    /// 首次进入视图时触发分类与电台频道列表请求。
+    /// 确保电台分类与频道数据已加载
     pub(crate) fn ensure(&mut self, cx: &mut Context<Self>) {
         if self.loaded || self.loading_catalog {
             return;
@@ -111,7 +111,7 @@ impl RadioView {
             .spawn(async move { Msg::Stations(app.stations().await.map_err(|error| error.to_string())) });
     }
 
-    /// 响应处理电台分类列表数据。
+    /// 处理电台分类响应结果
     pub(crate) fn on_classes(&mut self, result: Result<Vec<StationClass>, String>, cx: &mut Context<Self>) {
         match result {
             Ok(classes) => {
@@ -123,7 +123,7 @@ impl RadioView {
         cx.notify();
     }
 
-    /// 响应处理电台频道列表数据。
+    /// 处理电台频道列表响应结果
     pub(crate) fn on_stations(&mut self, result: Result<Vec<Station>, String>, cx: &mut Context<Self>) {
         self.loading_catalog = false;
         self.loaded = true;
@@ -140,7 +140,7 @@ impl RadioView {
         cx.notify();
     }
 
-    /// 响应处理指定电台频道的歌曲列表。
+    /// 处理电台曲目列表响应结果
     pub(crate) fn on_songs(&mut self, seq: u64, result: Result<Vec<Song>, String>, cx: &mut Context<Self>) {
         if seq != self.request_seq {
             return;
@@ -161,13 +161,13 @@ impl RadioView {
         cx.notify();
     }
 
-    /// 选中指定分类进行频道过滤。
+    /// 切换选中的电台分类
     fn select_class(&mut self, classid: Option<String>, cx: &mut Context<Self>) {
         self.selected_class = classid;
         cx.notify();
     }
 
-    /// 选中指定频道并请求播放曲目列表。
+    /// 选中电台频道并拉取曲目
     fn select_station(&mut self, index: usize, cx: &mut Context<Self>) {
         let Some(station) = self.filtered_stations().get(index).cloned() else {
             return;
@@ -189,7 +189,7 @@ impl RadioView {
         });
     }
 
-    /// 渲染单行歌曲组件。
+    /// 渲染单首曲目行
     fn row(&self, index: usize, cx: &App) -> AnyElement {
         let (is_current, is_playing) = {
             let model = self.player.read(cx);
@@ -212,7 +212,7 @@ impl RadioView {
         )
     }
 
-    /// 渲染分类筛选标签条。
+    /// 渲染分类标签栏
     fn class_chips(&self, cx: &Context<Self>) -> impl IntoElement {
         let mut row = h_flex()
             .flex_wrap()
@@ -227,7 +227,7 @@ impl RadioView {
         row.w_full().border_b_1().border_color(CARD_BORDER)
     }
 
-    /// 构造单个分类过滤胶囊。
+    /// 渲染单个分类胶囊标签
     fn class_chip(&self, classid: Option<String>, label: &str, index: usize, cx: &Context<Self>) -> impl IntoElement {
         let active = self.selected_class == classid;
 
@@ -257,7 +257,7 @@ impl RadioView {
             .child(SharedString::from(label.to_owned()))
     }
 
-    /// 获取当前筛选条件下的电台列表。
+    /// 获取当前分类过滤后的电台频道列表
     fn filtered_stations(&self) -> Vec<Station> {
         let Some(target) = &self.selected_class else {
             return (*self.stations).clone();
@@ -269,7 +269,7 @@ impl RadioView {
             .collect()
     }
 
-    /// 渲染顶部电台频道卡片流。
+    /// 渲染电台频道卡片列表
     fn station_grid(&self, cx: &Context<Self>) -> AnyElement {
         let stations = self.filtered_stations();
         if self.loading_catalog && stations.is_empty() {

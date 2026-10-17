@@ -1,11 +1,11 @@
-//! 界面主题系统与视觉组件：仿照现代主流音乐桌面端（图 2）打造的简约淡雅设计系统。
+//! 界面主题系统与常用视觉组件
 
 use gpui_kit::assets::IconName;
 use gpui_kit::component::Icon;
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 
-/// 常量 RGB 构造辅助函数。
+/// 十六进制 RGB 颜色构造
 pub(crate) const fn hex_rgb(hex: u32) -> Rgba {
     let [_, r, g, b] = hex.to_be_bytes();
     Rgba {
@@ -16,51 +16,51 @@ pub(crate) const fn hex_rgb(hex: u32) -> Rgba {
     }
 }
 
-/// 窗口底色画布：极其轻盈温和的纸白雾灰底色（仿图 2 简约淡雅）。
+/// 窗口画布背景色
 pub(crate) const CANVAS_BG: Rgba = hex_rgb(0xf2f4f7);
 
-/// 主工作区卡片底色：纯白无暇的悬浮主岛屿。
+/// 工作区主卡片背景色
 pub(crate) const CARD_BG: Rgba = hex_rgb(0xffffff);
 
-/// 极细微卡片边框：温润淡灰。
+/// 卡片边框颜色
 pub(crate) const CARD_BORDER: Rgba = hex_rgb(0xe5e7eb);
 
-/// 悬浮交互浅色高亮。
+/// 悬停高亮背景色
 pub(crate) const SURFACE_HOVER: Rgba = hex_rgb(0xe9edf2);
 
-/// 品牌生机翡翠绿主色（仿图 2 主播放键与高光标识）。
+/// 翡翠绿品牌主色
 pub(crate) const ACCENT_GREEN: Rgba = hex_rgb(0x10b981);
 
-/// 翡翠绿悬浮加深色。
+/// 翡翠绿悬停加深色
 pub(crate) const ACCENT_GREEN_HOVER: Rgba = hex_rgb(0x059669);
 
-/// 翡翠绿浅色气泡背景（高亮行与小徽标）。
+/// 翡翠绿浅色背景
 pub(crate) const ACCENT_GREEN_LIGHT: Rgba = hex_rgb(0xecfdf5);
 
-/// 翡翠绿边框。
+/// 翡翠绿边框色
 pub(crate) const ACCENT_GREEN_BORDER: Rgba = hex_rgb(0xa7f3d0);
 
-/// VIP 尊享鎏金色。
+/// VIP 标识金色
 pub(crate) const VIP_GOLD: Rgba = hex_rgb(0xf59e0b);
 
-/// VIP 浅金底色。
+/// VIP 浅金背景色
 #[allow(dead_code)]
 pub(crate) const VIP_GOLD_LIGHT: Rgba = hex_rgb(0xfef3c7);
 
-/// 基础文字层级：高对比度、清晰舒适的排版规范。
+// 基础文字颜色层级
 pub(crate) const TEXT_PRIMARY: Rgba = hex_rgb(0x111827);
 pub(crate) const TEXT_MUTED: Rgba = hex_rgb(0x4b5563);
 pub(crate) const TEXT_FAINT: Rgba = hex_rgb(0x9ca3af);
 
-/// 曲目列表单行高度。
+/// 曲目列表单行高度
 pub(crate) const ROW_HEIGHT: f32 = 52.0;
 
-/// 生成指定行数的等高虚拟列表尺寸集合。
+/// 生成等高虚拟列表行高集合
 pub(crate) fn row_sizes(n: usize) -> std::rc::Rc<Vec<Size<Pixels>>> {
     std::rc::Rc::new((0..n).map(|_| size(px(0.0), px(ROW_HEIGHT))).collect())
 }
 
-/// 构造仿图 2 的纯白大圆角主内容悬浮卡片。
+/// 构造主内容圆角卡片容器
 pub(crate) fn main_card() -> Div {
     div()
         .bg(CARD_BG)
@@ -70,7 +70,7 @@ pub(crate) fn main_card() -> Div {
         .shadow_sm()
 }
 
-/// 构造精巧的高品质胶囊徽标（如 SQ、VIP、无损等）。
+/// 构造胶囊徽标组件（如 SQ、VIP 等）
 pub(crate) fn badge(text: impl Into<SharedString>, bg: impl Into<Hsla>, fg: impl Into<Hsla>) -> impl IntoElement {
     div()
         .px_2()
@@ -83,7 +83,7 @@ pub(crate) fn badge(text: impl Into<SharedString>, bg: impl Into<Hsla>, fg: impl
         .child(text.into())
 }
 
-/// 构造统一样式的区块标题组件。
+/// 构造区块标题组件
 pub(crate) fn title(text: impl Into<SharedString>, _cx: &App) -> impl IntoElement {
     div()
         .text_base()
@@ -92,7 +92,7 @@ pub(crate) fn title(text: impl Into<SharedString>, _cx: &App) -> impl IntoElemen
         .child(text.into())
 }
 
-/// 构造居中展示的状态提示或空态组件（带图标支持）。
+/// 构造居中状态提示组件（支持自定义图标）
 pub(crate) fn notice_with_icon(icon: IconName, text: impl Into<SharedString>, _cx: &App) -> AnyElement {
     div()
         .size_full()
@@ -115,16 +115,16 @@ pub(crate) fn notice_with_icon(icon: IconName, text: impl Into<SharedString>, _c
         .into_any_element()
 }
 
-/// 构造居中展示的状态提示或空态组件。
+/// 构造居中状态提示组件
 pub(crate) fn notice(text: impl Into<SharedString>, cx: &App) -> AnyElement {
     notice_with_icon(IconName::Music, text, cx)
 }
 
-/// 构造淡雅现代的专辑封面占位组件（具有柔和淡彩底色与精致排版）。
+/// 构造专辑封面占位组件
 pub(crate) fn cover_box(label: &str, edge: f32, _cx: &App) -> AnyElement {
     let initial = label.chars().next().map_or_else(|| "♪".to_owned(), |c| c.to_string());
 
-    // 根据歌名生成确定性的淡雅柔和渐变底色
+    // 根据歌名哈希计算稳定的柔和色相
     let hash = label.bytes().fold(0u32, |acc, b| acc.wrapping_add(b as u32));
     let hues = [158.0, 200.0, 240.0, 280.0, 330.0, 30.0];
     let hue = hues[(hash as usize) % hues.len()];
@@ -154,7 +154,7 @@ pub(crate) fn cover_box(label: &str, edge: f32, _cx: &App) -> AnyElement {
         .into_any_element()
 }
 
-/// 构造可点击的交互标签胶囊（用于搜索推荐词、分类等）。
+/// 构造可点击的标签胶囊组件
 pub(crate) fn chip(label: impl Into<SharedString>, active: bool, icon: Option<IconName>) -> Div {
     div()
         .cursor_pointer()

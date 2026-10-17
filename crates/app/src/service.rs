@@ -37,13 +37,13 @@ impl std::fmt::Debug for Kugou {
 }
 
 impl Kugou {
-    /// 注入自定义传输实现创建门面实例。
+    /// 注入自定义传输实现创建门面实例
     pub fn with_transport(transport: Arc<dyn Transport>, store: Store, data_dir: impl Into<PathBuf>) -> Result<Self> {
         let data_dir = data_dir.into();
         std::fs::create_dir_all(&data_dir)?;
         let settings = store.settings()?;
 
-        // 设备身份首次启动时生成并持久化。
+        // 首次启动生成并持久化设备身份
         let device = if let Some(device) = store.device()? {
             device
         } else {
@@ -79,23 +79,22 @@ impl Kugou {
         })
     }
 
-    /// 打开本地数据目录并使用 Reqwest 传输创建实例。
+    /// 打开本地数据目录并创建实例
     pub fn open(data_dir: impl AsRef<Path>) -> Result<Self> {
         let data_dir = data_dir.as_ref();
-        // 确保数据目录存在。
         std::fs::create_dir_all(data_dir)?;
         let store = lyra_store::open(data_dir.join("lyra.redb"))?;
         Self::with_transport(Arc::new(lyra_api::http::ReqwestTransport::new()), store, data_dir)
     }
 
-    /// 挂载音频引擎并注册事件监听回调。
+    /// 挂载音频引擎并注册事件监听回调
     pub fn attach_audio(&mut self, events: Box<dyn Fn(Event) + Send + Sync>) -> Result<bool> {
         let runtime = tokio::runtime::Handle::try_current()
             .map_err(|_| Error::Audio("attach_audio 必须在 tokio 运行时内调用".to_owned()))?;
         let fetcher = Arc::new(BlobFetcher::new(self.blobs.clone(), runtime));
         match lyra_audio::spawn_with(fetcher, events, AudioConfig::default()) {
             Ok(engine) => {
-                // 同步设置中保存的音量至音频引擎。
+                // 同步持久化的音量设置至音频引擎
                 let volume = self.settings().map_or(1.0, |settings| settings.volume);
                 engine.set_volume(volume.clamp(0.0, 1.0));
                 self.engine = Some(engine);
@@ -108,88 +107,87 @@ impl Kugou {
         }
     }
 
-    /// 获取应用数据目录。
+    /// 获取应用数据目录
     #[must_use]
     pub fn data_dir(&self) -> &Path {
         &self.data_dir
     }
 
-    /// 获取持久化存储引用。
+    /// 获取持久化存储引用
     #[must_use]
     pub fn store(&self) -> &Store {
         &self.store
     }
 
-    /// 获取接口层引用。
+    /// 获取 API 客户端引用
     #[must_use]
     pub fn api(&self) -> &Api {
         &self.api
     }
 
-    /// 获取二进制 Blob 缓存引用。
+    /// 获取 Blob 缓存引用
     #[must_use]
     pub fn blobs(&self) -> &lyra_api::blob::BlobCache {
         &self.blobs
     }
 
-    /// 获取音频引擎引用。
+    /// 获取音频引擎引用
     #[must_use]
     pub fn engine(&self) -> Option<&Engine> {
         self.engine.as_ref()
     }
 
-    /// 获取当前会话快照。
+    /// 获取当前会话快照
     #[must_use]
     pub fn session(&self) -> Session {
         self.api.session()
     }
 
-    /// 查询当前是否处于登录状态。
+    /// 查询当前是否处于登录状态
     #[must_use]
     pub fn is_logged_in(&self) -> bool {
         self.api.session().is_logged_in()
     }
 
-    /// 读取用户配置。
+    /// 读取用户配置
     pub fn settings(&self) -> Result<Settings> {
         Ok(self.store.settings()?)
     }
 
-    /// 上次选择的播放模式；读不到配置时回落到列表循环。
+    /// 获取当前播放模式（缺省时回落为列表循环）
     #[must_use]
     pub fn play_mode(&self) -> PlayMode {
         self.settings()
             .map_or_else(|_| PlayMode::default(), |settings| settings.play_mode)
     }
 
-    /// 保存用户配置并同步音量与缓存上限。
+    /// 保存用户配置并同步音量与缓存上限
     pub fn set_settings(&self, settings: &Settings) -> Result<()> {
         self.store.set_settings(settings)?;
         if let Some(engine) = &self.engine {
             engine.set_volume(settings.volume.clamp(0.0, 1.0));
         }
-        // 缓存上限是运行时设置项：改完立刻生效并按 LRU 收敛，不必重启。
+        // 运行时更新缓存上限并按 LRU 即时收敛
         self.blobs.set_max_bytes(settings.max_cache_bytes);
         Ok(())
     }
 
     // ---------------------------------------------------------- 账号与会话
 
-    /// 发送短信验证码并返回剩余可用次数。
+    /// 发送短信验证码并返回剩余可用次数
     pub async fn send_code(&self, mobile: &str) -> Result<u64> {
-        // 校验与加密必须用同一个值：粘贴的号码常带首尾空格，而 `is_mobile` 只裁自己那份副本，
-        // 于是「带空格的号码」能通过校验、再被原样加密进 params（外层掩码也跟着错位），上游发不出短信。
+        // 裁除首尾空白，避免格式校验与加密参数不一致
         let mobile = mobile.trim();
         if !is_mobile(mobile) {
             return Err(Error::Invalid("请输入 11 位手机号".to_owned()));
         }
-        // 上游对「无 dfid 的新设备」发码极易触发风控，因此先补齐设备指纹。
+        // 优先补齐设备指纹降低发码风控概率
         self.ensure_device_registered().await;
         let value = session::send_mobile_code(&self.api, mobile).await?;
         Ok(lyra_api::codec::find_u64(&value, &["count"]))
     }
 
-    /// 无 dfid 时先注册设备；失败只告警，不阻断发码（缺 dfid 不是硬性前置）。
+    /// 确保设备已注册指纹（非硬性前置，失败仅记录警告）
     async fn ensure_device_registered(&self) {
         if self.api.session().dfid() != "-" {
             return;
@@ -199,9 +197,8 @@ impl Kugou {
         }
     }
 
-    /// 短信验证码登录并持久化凭据。
+    /// 短信验证码登录并持久化凭据
     pub async fn login(&self, mobile: &str, code: &str) -> Result<StoreAccount> {
-        // 同 `send_code`：验证码与手机号都可能在粘贴时带空格，必须裁剪后再加密。
         let mobile = mobile.trim();
         let code = code.trim();
         if !is_mobile(mobile) {
@@ -215,7 +212,6 @@ impl Kugou {
             vip_token: result.vip_token,
             nickname: result.nickname,
         };
-        // 敏感令牌安全持久化。
         self.store.set_account(&account)?;
         self.api.set_account(Some(lyra_api::Account {
             userid: account.userid,
@@ -223,21 +219,21 @@ impl Kugou {
             vip_type: account.vip_type,
             vip_token: account.vip_token.clone(),
         }));
-        // 登录后注册设备获取设备指纹；失败不阻断登录，但必须留下痕迹。
+        // 登录后尝试补齐设备指纹，失败不阻断流程
         if let Err(error) = self.register_device().await {
             tracing::warn!(%error, "登录后设备注册失败，dfid 缺失会影响取播放地址");
         }
         Ok(account)
     }
 
-    /// 退出登录并清除已持久化凭据。
+    /// 退出登录并清除持久化凭据
     pub fn logout(&self) -> Result<()> {
         self.store.clear_account()?;
         self.api.set_account(None);
         Ok(())
     }
 
-    /// 注册设备并持久化指纹信息，对空数据响应执行有限重试。
+    /// 注册设备并持久化指纹信息（对空数据有限重试）
     pub async fn register_device(&self) -> Result<String> {
         const ATTEMPTS: u32 = 3;
         const RETRY_DELAY: std::time::Duration = std::time::Duration::from_millis(1_200);
@@ -254,7 +250,7 @@ impl Kugou {
                     self.api.set_session(session);
                     return Ok(dfid);
                 }
-                // 只有「成功状态但数据为空」值得重试；其余错误立即上报，避免无谓等待。
+                // 仅在返回空数据时重试，其余错误立即返回
                 Err(error) => {
                     let retryable = matches!(error, lyra_api::Error::EmptyData(_));
                     last_error = Some(error);
@@ -446,7 +442,7 @@ fn pick_quality(rights: &SongRights, requested: &str) -> Result<String> {
     })
 }
 
-// 辅助目录请求接口封装。
+// 辅助目录请求封装
 async fn catalog_stations(api: &Api) -> Result<Vec<Station>> {
     Ok(lyra_api::endpoint::catalog::fm_recommend(api).await?)
 }

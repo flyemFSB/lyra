@@ -1,9 +1,9 @@
-//! 环形缓冲区辅助：提供容量计算、无锁样本写入以及实时回调出队格式转换。
+//! 环形缓冲区：容量计算、样本写入与实时回调消费。
 
 use cpal::{FromSample, Sample};
 use ringbuf::traits::{Consumer, Producer};
 
-/// 根据采样率、声道数和目标毫秒时长计算环形缓冲区容量。
+/// 计算环形缓冲区容量
 pub(crate) fn ring_capacity(sample_rate: u32, channels: usize, ring_ms: u32) -> usize {
     let channels = channels.max(1);
     let ring_ms = ring_ms.clamp(20, 5_000);
@@ -12,17 +12,17 @@ pub(crate) fn ring_capacity(sample_rate: u32, channels: usize, ring_ms: u32) -> 
     usize::try_from(samples).unwrap_or(usize::MAX).max(channels)
 }
 
-/// 尽力将 PCM 样本写入无锁环形缓冲区，返回实际推入的样本数。
+/// 写入 PCM 样本到环形缓冲区，返回实际推入数量
 pub(crate) fn push_slice(prod: &mut impl Producer<Item = f32>, samples: &[f32]) -> usize {
     prod.push_slice(samples)
 }
 
-/// 清空环形缓冲区中所有待消费样本（由消费端在实时线程安全执行）。
+/// 清空缓冲区待消费样本
 pub(crate) fn drain(cons: &mut impl Consumer<Item = f32>) -> usize {
     cons.clear()
 }
 
-/// 从环形缓冲区提取样本填充输出设备缓冲（应用音量缩放，欠载时自动填充静音）。
+/// 从缓冲区提取样本并填充输出（应用音量缩放，欠载补静音）
 pub(crate) fn fill_output<T>(cons: &mut impl Consumer<Item = f32>, volume: f32, out: &mut [T]) -> usize
 where
     T: Sample + FromSample<f32>,
@@ -34,19 +34,19 @@ where
                 *slot = T::from_sample(s * volume);
                 popped += 1;
             }
-            // 缓冲欠载时填充静音样本
+            // 欠载时填零静音
             None => *slot = T::from_sample(0.0),
         }
     }
     popped
 }
 
-/// 按声道求均值下混为单声道，保留全声道能量。
+/// 均值下混为单声道
 fn downmix_to_mono(frame: &[f32]) -> f32 {
     frame.iter().sum::<f32>() / frame.len() as f32
 }
 
-/// 执行声道映射与转换（声道不足时补齐、多余时截断）。
+/// 声道映射转换
 pub(crate) fn map_channels(input: &[f32], src: usize, dst: usize) -> Vec<f32> {
     if src == dst || src == 0 {
         return input.to_vec();

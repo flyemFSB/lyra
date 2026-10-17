@@ -1,48 +1,46 @@
-//! 领域模型：负责上游多变字段的宽容映射与统一归一化。
+//! 领域业务模型：上游多变数据结构的归一化映射。
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::codec;
 
-/// 归一化歌曲。
+/// 歌曲领域模型
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Song {
-    /// 歌名。
+    /// 歌曲名称
     pub name: String,
-    /// 歌手（多个用 `、` 连接）。
+    /// 歌手列表（顿号分隔）
     pub singer: String,
-    /// 音频 hash（小写）。
+    /// 音频哈希标识（小写十六进制）
     pub hash: String,
-    /// 专辑 ID。
+    /// 专辑 ID
     pub album_id: String,
-    /// 专辑音频 ID（`album_audio_id`，上游的 `mixsongid` 同义）。
+    /// 专辑音频 ID（album_audio_id / mixsongid）
     ///
-    /// 取址与歌词接口都靠它定位音频：**绝不能拿 `audio_id` 冒充**。
-    /// 实测（100 首样本）用 `audio_id` 会让上游解析到另一份音频 —— 13 首直接播成别的歌、
-    /// 30 首取不到地址、歌词接口也判 404；缺省时上游按 hash 解析反而是对的。
+    /// 用于精确定位音源与歌词，不可与全局 audio_id 混淆。
     pub album_audio_id: String,
-    /// 专辑名。
+    /// 专辑名称
     pub album_name: String,
-    /// 时长（毫秒）。
+    /// 音频总时长（毫秒）
     pub duration_ms: u64,
-    /// 歌单内部 fileid，删歌用。
+    /// 歌单内部文件 ID（删除歌曲使用）
     pub fileid: i64,
-    /// `mixsongid`。
+    /// 歌曲综合 ID
     pub mixsongid: i64,
-    /// 权益标记（0 = 免费）。
+    /// 权益标记（0 表示免费）
     pub privilege: i64,
-    /// 封面 URL（可能含 `{size}` 占位符）。
+    /// 封面图片 URL（含尺寸占位符）
     pub cover: String,
-    /// 音质标识，若上游提供。
+    /// 音质标识
     pub quality: String,
 }
 
 impl Song {
-    /// 从任意上游歌曲对象归一化。
+    /// 从上游 JSON 对象解析并归一化歌曲信息
     #[must_use]
     pub fn from_value(value: &Value) -> Option<Self> {
-        // 兼容搜索结果与详情页等不同场景的 Hash 字段别名。
+        // 提取并归一化音频哈希
         let hash = codec::pick_str_paths(
             value,
             &[
@@ -112,13 +110,13 @@ impl Song {
         })
     }
 
-    /// 一批歌曲。
+    /// 批量解析歌曲列表
     #[must_use]
     pub fn list_from(values: &[Value]) -> Vec<Self> {
         values.iter().filter_map(Self::from_value).collect()
     }
 
-    /// 按目标分辨率替换模板中的尺寸占位符获取封面。
+    /// 获取指定分辨率的封面 URL
     #[must_use]
     pub fn cover_at(&self, size: u32) -> String {
         if self.cover.is_empty() {
@@ -128,7 +126,7 @@ impl Song {
     }
 }
 
-/// 字符串非空回退辅助特征。
+/// 字符串非空回退扩展
 trait OrElseNonEmpty {
     fn or_else_nonempty(self, fallback: impl FnOnce() -> String) -> String;
 }
@@ -176,34 +174,34 @@ impl Playlist {
         })
     }
 
-    /// 是否「我喜欢」。
+    /// 检查是否为「我喜欢」歌单
     #[must_use]
     pub fn is_liked(&self) -> bool {
         self.listid == Self::LIKED_LISTID
     }
 }
 
-/// 电台频道（`/v1/rcmd_list`）。
+/// 电台频道模型
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Station {
-    /// `fmid`。
+    /// 频道 ID
     pub fmid: String,
-    /// 名称。
+    /// 频道名称
     pub name: String,
-    /// 所属分类。
+    /// 所属分类 ID
     pub classid: String,
-    /// 封面。
+    /// 封面 URL
     pub cover: String,
-    /// 横幅。
+    /// 横幅 URL
     pub banner: String,
-    /// 热度。
+    /// 热度播放量
     pub heat: u64,
-    /// 描述。
+    /// 频道描述
     pub description: String,
 }
 
 impl Station {
-    /// 归一化。
+    /// 从上游 JSON 解析电台频道
     #[must_use]
     pub fn from_value(value: &Value) -> Option<Self> {
         let fmid = codec::pick_str(value, &["fmid", "fm_id", "id"]);
@@ -222,21 +220,21 @@ impl Station {
     }
 }
 
-/// 电台分类（`/v1/class_fm_song`）。
+/// 电台分类模型
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct StationClass {
-    /// `classid`。
+    /// 分类 ID
     pub classid: String,
-    /// 分类名。
+    /// 分类名称
     pub name: String,
-    /// 该分类下的频道数。
+    /// 频道总数
     pub count: u64,
-    /// 分类内的频道（上游会给一小撮）。
+    /// 包含的电台列表
     pub stations: Vec<Station>,
 }
 
 impl StationClass {
-    /// 归一化。
+    /// 从上游 JSON 解析电台分类
     #[must_use]
     pub fn from_value(value: &Value) -> Option<Self> {
         let classid = codec::pick_str(value, &["classid", "class_id", "id"]);
@@ -303,7 +301,6 @@ impl SongUrl {
             if url.is_empty() {
                 continue;
             }
-            // `backupUrl` 与 `url` 的尾节点重叠，只留一份。
             if !urls.contains(&url) {
                 urls.push(url);
             }
@@ -313,7 +310,7 @@ impl SongUrl {
         }
         let url = urls.first()?.clone();
         let (meta, duration_ms) = node_meta.map_or_else(
-            // 无节点元数据时回退至顶层提取时长（秒转毫秒）。
+            // 无节点元数据时回退至顶层提取时长（秒转毫秒）
             || {
                 (
                     value,
@@ -473,7 +470,7 @@ impl VipStatus {
         Self { entries }
     }
 
-    /// 概念版畅听 VIP 条目。
+    /// 获取概念版畅听 VIP 条目
     #[must_use]
     pub fn concept(&self) -> Option<&VipEntry> {
         self.entries
@@ -481,33 +478,33 @@ impl VipStatus {
             .find(|e| e.busi_type.eq_ignore_ascii_case("concept") && e.product_type.eq_ignore_ascii_case("svip"))
     }
 
-    /// 概念版 VIP 此刻是否有效。
+    /// 检查当前概念版 VIP 是否有效
     #[must_use]
     pub fn is_concept_active(&self) -> bool {
         let now = crate::spec::now_millis();
         self.concept().is_some_and(|e| e.is_active_at(now))
     }
 
-    /// 到期时间（毫秒）。
+    /// 获取概念版 VIP 到期时间戳（毫秒）
     #[must_use]
     pub fn concept_expires_at(&self) -> Option<i64> {
         self.concept().map(|e| e.end_ms)
     }
 }
 
-/// 分页数据封装，统一推荐流与歌单分页游标。
+/// 分页通用数据结构
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct Page<T> {
-    /// 本页条目。
+    /// 本页数据列表
     pub items: Vec<T>,
-    /// 下一页游标；无游标的流（每日推荐）为 `None`。
+    /// 下一页游标（为 None 表示无更多分页）
     pub cursor: Option<String>,
-    /// 流的差异元数据（UI 用同一套列表组件渲染）。
+    /// 伴随元数据
     pub meta: Value,
 }
 
 impl<T> Page<T> {
-    /// 造一页无游标的结果。
+    /// 创建无游标的单页数据
     #[must_use]
     pub fn single(items: Vec<T>) -> Self {
         Self {
@@ -517,7 +514,7 @@ impl<T> Page<T> {
         }
     }
 
-    /// 是否还有下一页。
+    /// 检查是否存在后续分页
     #[must_use]
     pub fn has_more(&self) -> bool {
         self.cursor.as_ref().is_some_and(|c| !c.is_empty())

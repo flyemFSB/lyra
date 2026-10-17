@@ -6,9 +6,7 @@ edition.workspace      = true
 rust-version.workspace = true
 license.workspace      = true
 
-# 只依赖 gpui-kit：它是 GPUI 家族的**门面**，
-# `use gpui_kit::*;` 就是 GPUI，各层用 gpui_kit::base / platform / component / assets 访问。
-# 单独列 gpui-pre / gpui-pre-platform / gpui-pre-macros 只会引入版本漂移的风险（方案风险 R3）。
+# 统一通过 gpui-kit 门面访问 GPUI
 [dependencies]
 gpui-kit    = { workspace = true }
 lyra-app    = { workspace = true }
@@ -17,10 +15,8 @@ lyra-audio  = { workspace = true }
 tokio       = { version = "1", features = ["rt-multi-thread", "macros", "time"] }
 tracing     = { workspace = true }
 
-# 不启用 gpui-kit 的 test-support：它会激活实验性的 gpui-fast 后端，
-# 而该后端的 macOS/wasm 子树的精确版本 pin（cocoa =0.26.0 / unicode-properties =0.1.3）
-# 与默认 gpui-pre 后端锁定的版本冲突，直接导致 Cargo.lock 无法解析。
-# 纯函数单测用普通 #[test] 即可，不需要 GPUI 的 UI 测试框架。
+# 纯函数单测使用普通 #[test]，无需启用 gpui-kit 的 test-support
+
 
 [lints]
 workspace = true

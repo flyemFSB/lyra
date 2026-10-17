@@ -1,4 +1,4 @@
-//! 请求装配：管理默认参数、公共请求头与防篡改签名计算。
+//! HTTP 请求装配：管理公共参数、协议头与防篡改签名。
 
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -8,37 +8,37 @@ use lyra_proto::{Params, Val, sign_key, signature_android, signature_web};
 use crate::error::{Error, Result};
 use crate::transport::{Method, Request};
 
-/// 默认网关。
+/// 默认 API 网关
 pub const GATEWAY: &str = "https://gateway.kugou.com";
-/// 短信登录走的重试网关。
+/// 短信登录重试网关
 pub const LOGIN_GATEWAY: &str = "https://loginserviceretry.kugou.com";
-/// 验证码下发服务（注意：参考实现用的是 **http**，不是 https）。
+/// 验证码下发服务（明文 HTTP 协议）
 pub const CAPTCHA_BASE: &str = "http://login.user.kugou.com";
-/// 设备注册服务。
+/// 设备注册服务
 pub const USER_SERVICE: &str = "https://userservice.kugou.com";
-/// 歌词服务。
+/// 歌词服务
 pub const LYRICS_BASE: &str = "https://lyrics.kugou.com";
-/// 会员服务。
+/// 会员服务
 pub const VIP_BASE: &str = "https://kugouvip.kugou.com";
-/// 行为验证服务。
+/// 行为验证服务
 pub const VERIFY_BASE: &str = "https://verifyservice.kugou.com";
-/// 用户信息（relation）服务。
+/// 用户关系服务
 pub const RELATION_BASE: &str = "http://relation.user.kugou.com";
 
-/// 签名算法选择。
+/// 签名模式
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SignMode {
-    /// android（默认）
+    /// Android 客户端签名（默认）
     Android,
-    /// web（H5）
+    /// Web / H5 签名
     Web,
-    /// 设备注册
+    /// 设备注册签名
     Register,
     /// 不签名
     None,
 }
 
-/// 当前 Unix 毫秒。
+/// 获取当前 Unix 毫秒时间戳
 #[must_use]
 pub fn now_millis() -> i64 {
     SystemTime::now()
@@ -46,72 +46,72 @@ pub fn now_millis() -> i64 {
         .map_or(0, |d| i64::try_from(d.as_millis()).unwrap_or(i64::MAX))
 }
 
-/// 当前 Unix 秒。
+/// 获取当前 Unix 秒级时间戳
 #[must_use]
 pub fn now_secs() -> i64 {
     now_millis() / 1000
 }
 
-/// 登录态与设备身份。
+/// 会话上下文（包含设备标识与登录态）
 #[derive(Debug, Clone)]
 pub struct Session {
-    /// 设备身份（首启生成后固定）。
+    /// 设备指纹信息
     pub device: lyra_proto::Device,
-    /// 登录账号；未登录为 `None`。
+    /// 账号信息（未登录为 None）
     pub account: Option<Account>,
 }
 
-/// 账号登录态。
+/// 账号登录凭据
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Account {
-    /// 用户 ID。
+    /// 用户 ID
     pub userid: i64,
-    /// 登录令牌。
+    /// 登录令牌
     pub token: String,
-    /// 会员类型。
+    /// VIP 会员类型
     pub vip_type: i64,
-    /// 会员令牌。
+    /// VIP 令牌
     pub vip_token: String,
 }
 
 impl Session {
-    /// 用设备身份构造未登录会话。
+    /// 根据设备指纹创建未登录会话
     #[must_use]
     pub fn new(device: lyra_proto::Device) -> Self {
         Self { device, account: None }
     }
 
-    /// 附带登录态。
+    /// 附加账号登录凭据
     #[must_use]
     pub fn with_account(mut self, account: Account) -> Self {
         self.account = Some(account);
         self
     }
 
-    /// 设置 / 清除登录态。
+    /// 更新或清除登录态
     pub fn set_account(&mut self, account: Option<Account>) {
         self.account = account;
     }
 
-    /// 用户 ID（未登录为 0）。
+    /// 获取当前用户 ID（未登录返回 0）
     #[must_use]
     pub fn userid(&self) -> i64 {
         self.account.as_ref().map_or(0, |a| a.userid)
     }
 
-    /// 令牌（未登录为空串）。
+    /// 获取当前登录 Token（未登录返回空串）
     #[must_use]
     pub fn token(&self) -> &str {
         self.account.as_ref().map_or("", |a| a.token.as_str())
     }
 
-    /// 会员类型。
+    /// 获取会员类型
     #[must_use]
     pub fn vip_type(&self) -> i64 {
         self.account.as_ref().map_or(0, |a| a.vip_type)
     }
 
-    /// 是否已登录。
+    /// 检查是否处于已登录状态
     #[must_use]
     pub fn is_logged_in(&self) -> bool {
         self.account
@@ -119,56 +119,56 @@ impl Session {
             .is_some_and(|a| a.userid != 0 && !a.token.is_empty())
     }
 
-    /// `dfid`，未注册时为 `-`（与 JS 的 `|| '-'` 一致）。
+    /// 获取设备指纹 `dfid`（未注册时返回 `"-"`）
     #[must_use]
     pub fn dfid(&self) -> &str {
         self.device.dfid_or_dash()
     }
 }
 
-/// 一次请求的声明式描述。
+/// 请求构建规格
 #[derive(Debug, Clone)]
 pub struct RequestSpec {
-    /// HTTP 方法。
+    /// HTTP 请求方法
     pub method: Method,
-    /// 基础 URL。
+    /// 基础 URL
     pub base_url: String,
-    /// 路径（带不带前导斜杠都行，按 axios 的 combineURLs 语义拼接）。
+    /// 相对路径
     pub path: String,
-    /// 模块声明的参数。
+    /// 业务请求参数
     pub params: Params,
-    /// 请求体（JSON）。
+    /// JSON 请求体
     pub body: Option<serde_json::Value>,
-    /// 原始请求体字节（非 JSON，例如设备注册的 Base64 密文）。与 `body` 一样参与签名。
+    /// 原始二进制请求体（参与签名计算）
     pub raw_body: Option<Vec<u8>>,
-    /// 模块声明的请求头。
+    /// 自定义请求头
     pub headers: Vec<(String, String)>,
-    /// 只用模块声明的参数。
+    /// 是否禁用公共默认参数
     pub clear_default_params: bool,
-    /// 只用模块声明的请求头（不发默认 UA）。
+    /// 是否禁用默认请求头
     pub clear_default_headers: bool,
-    /// 签名方式。
+    /// 签名算法模式
     pub sign: SignMode,
-    /// 是否追加 `signKey`。
+    /// 是否追加音源验证密钥 `signKey`
     pub encrypt_key: bool,
-    /// 客户端 IP 透传。
+    /// 透传客户端 IP
     pub ip: Option<String>,
-    /// 覆盖本次请求的 `dfid`（进入签名与请求头）。
+    /// 覆盖本次请求的 `dfid`
     pub dfid_override: Option<String>,
-    /// 签名之后才追加的查询参数（不受签名影响，例如毫秒扰动）。
+    /// 签名后追加的额外查询参数
     pub extra_query: Vec<(String, String)>,
-    /// 超时。
+    /// 请求超时时长
     pub timeout: Option<Duration>,
 }
 
 impl RequestSpec {
-    /// GET 请求。
+    /// 创建 GET 请求规格
     #[must_use]
     pub fn get(path: impl Into<String>) -> Self {
         Self::new(Method::Get, path)
     }
 
-    /// POST 请求。
+    /// 创建 POST 请求规格
     #[must_use]
     pub fn post(path: impl Into<String>) -> Self {
         Self::new(Method::Post, path)
@@ -194,77 +194,77 @@ impl RequestSpec {
         }
     }
 
-    /// 换基础 URL。
+    /// 覆盖基础 URL
     #[must_use]
     pub fn base(mut self, base: impl Into<String>) -> Self {
         self.base_url = base.into();
         self
     }
 
-    /// 加参数。
+    /// 添加单个查询参数
     #[must_use]
     pub fn param(mut self, key: impl Into<String>, value: impl Into<Val>) -> Self {
         self.params.set(key, value);
         self
     }
 
-    /// 设置请求体。
+    /// 设置 JSON 请求体
     #[must_use]
     pub fn body(mut self, body: serde_json::Value) -> Self {
         self.body = Some(body);
         self
     }
 
-    /// 设置原始请求体（不序列化，但和 JSON 体一样参与签名）。
+    /// 设置原始二进制请求体
     #[must_use]
     pub fn raw_body(mut self, body: impl Into<Vec<u8>>) -> Self {
         self.raw_body = Some(body.into());
         self
     }
 
-    /// 加请求头。
+    /// 添加自定义请求头
     #[must_use]
     pub fn header(mut self, key: impl Into<String>, value: impl Into<String>) -> Self {
         self.headers.push((key.into(), value.into()));
         self
     }
 
-    /// 只用模块声明的参数。
+    /// 禁用公共默认参数
     #[must_use]
     pub fn clear_default_params(mut self) -> Self {
         self.clear_default_params = true;
         self
     }
 
-    /// 不用默认 UA。
+    /// 禁用默认请求头
     #[must_use]
     pub fn clear_default_headers(mut self) -> Self {
         self.clear_default_headers = true;
         self
     }
 
-    /// 不签名。
+    /// 禁用请求签名
     #[must_use]
     pub fn no_signature(mut self) -> Self {
         self.sign = SignMode::None;
         self
     }
 
-    /// 追加 `signKey`。
+    /// 启用音源验证密钥追加
     #[must_use]
     pub fn encrypt_key(mut self) -> Self {
         self.encrypt_key = true;
         self
     }
 
-    /// 覆盖本次请求的 `dfid`（进入签名）。
+    /// 覆盖本次请求的设备指纹 `dfid`
     #[must_use]
     pub fn dfid(mut self, dfid: impl Into<String>) -> Self {
         self.dfid_override = Some(dfid.into());
         self
     }
 
-    /// 透传客户端 IP。
+    /// 设置透传的客户端 IP
     #[must_use]
     pub fn ip(mut self, ip: impl Into<String>) -> Self {
         let ip = ip.into();
@@ -274,27 +274,27 @@ impl RequestSpec {
         self
     }
 
-    /// 追加一个不参与签名的查询参数。
+    /// 添加不参与签名的查询参数
     #[must_use]
     pub fn extra_query(mut self, key: impl Into<String>, value: impl Into<String>) -> Self {
         self.extra_query.push((key.into(), value.into()));
         self
     }
 
-    /// 设置超时。
+    /// 设置请求超时时长
     #[must_use]
     pub fn timeout(mut self, timeout: Duration) -> Self {
         self.timeout = Some(timeout);
         self
     }
 
-    /// 本次请求是否携带登录态（query 带 token，或请求体里带 token）。
+    /// 检查请求是否包含登录 Token
     #[must_use]
     pub fn requires_login(&self) -> bool {
         self.params.contains("token") || self.body.as_ref().is_some_and(|body| body.get("token").is_some())
     }
 
-    /// 装配为可发送的请求。
+    /// 装配并生成可发送的 HTTP 请求
     pub fn build(&self, session: &Session) -> Result<Request> {
         let mut params = Params::new();
         let dfid = self.dfid_override.as_deref().unwrap_or_else(|| session.dfid());
@@ -321,7 +321,7 @@ impl RequestSpec {
             params.set(key, value.clone());
         }
 
-        // signKey 必须参与签名计算。
+        // 注入 signKey 参与签名计算
         if self.encrypt_key {
             let key = sign_key(
                 params.get_str("hash").unwrap_or_default(),
@@ -332,7 +332,7 @@ impl RequestSpec {
             params.set("key", key);
         }
 
-        // 提取请求体字节并参与签名计算（支持 JSON 与原始字节体）。
+        // 统一请求体序列化以参与签名
         let body_bytes: Option<Vec<u8>> = match (&self.body, &self.raw_body) {
             (Some(value), _) => Some(value.to_string().into_bytes()),
             (None, Some(raw)) => Some(raw.clone()),
@@ -375,7 +375,7 @@ impl RequestSpec {
         if !self.clear_default_headers {
             layers.push(("User-Agent".to_owned(), UA_DEFAULT.to_owned()));
         }
-        // 自动注入 JSON 媒体类型头。
+        // 存在 JSON 体时自动设置 Content-Type
         if self.body.is_some() {
             layers.push(("Content-Type".to_owned(), "application/json".to_owned()));
         }
@@ -394,7 +394,7 @@ impl RequestSpec {
     }
 }
 
-/// 从参数表中解析 64 位整数。
+/// 从参数表中解析 64 位整数
 fn param_i64(params: &Params, key: &str, fallback: i64) -> i64 {
     params.get(key).map_or(fallback, |value| match value {
         Val::Raw(text) => text.trim().parse::<i64>().unwrap_or(fallback),
@@ -402,7 +402,7 @@ fn param_i64(params: &Params, key: &str, fallback: i64) -> i64 {
     })
 }
 
-/// 拼接基础地址与相对路径并消除多余斜杠。
+/// 拼接 URL 基础路径与子路径并规范化斜杠
 #[must_use]
 pub fn combine_urls(base: &str, path: &str) -> String {
     let base = base.trim_end_matches('/');
@@ -414,7 +414,7 @@ pub fn combine_urls(base: &str, path: &str) -> String {
     }
 }
 
-/// 合并请求头列表，保留后出现的值并消除重复键。
+/// 合并请求头并消除大小写重复
 #[must_use]
 pub fn merge_headers(layers: Vec<(String, String)>) -> Vec<(String, String)> {
     let mut out: Vec<(String, String)> = Vec::with_capacity(layers.len());
@@ -427,7 +427,7 @@ pub fn merge_headers(layers: Vec<(String, String)>) -> Vec<(String, String)> {
     out
 }
 
-/// 要求已登录，否则返回 `Error::NotLoggedIn`。
+/// 校验当前会话已登录
 pub fn ensure_logged_in(session: &Session) -> Result<()> {
     if session.is_logged_in() {
         Ok(())

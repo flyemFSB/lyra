@@ -5,30 +5,30 @@ use std::time::{Duration, Instant};
 
 use moka::sync::Cache;
 
-/// 缓存新鲜度策略。
+/// 缓存新鲜度策略
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Freshness {
-    /// 有副作用的写操作端点：不缓存并追加时间戳防重。
+    /// 写操作或副作用请求（不缓存并追加时间戳扰动）
     SideEffect,
-    /// 具有时效性的数据条目。
+    /// 指定存活时长的缓存策略
     Ttl(Duration),
-    /// 不缓存，也不加扰动。
+    /// 不缓存且不追加时间戳
     NoStore,
 }
 
 impl Freshness {
-    /// 推荐流：5 分钟。
+    /// 推荐流（5 分钟）
     pub const FLOW: Self = Self::Ttl(Duration::from_secs(300));
-    /// 歌单：30 秒。
+    /// 歌单详情（30 秒）
     pub const PLAYLIST: Self = Self::Ttl(Duration::from_secs(30));
-    /// 歌曲播放地址：60 秒（上游 URL 自带时效）。
+    /// 音频播放地址（60 秒）
     pub const SONG_URL: Self = Self::Ttl(Duration::from_secs(60));
-    /// 曲库 / 电台目录：10 分钟。
+    /// 目录与电台分类（10 分钟）
     pub const CATALOG: Self = Self::Ttl(Duration::from_secs(600));
-    /// 会员与账号状态：30 秒。
+    /// 账号与 VIP 状态（30 秒）
     pub const ACCOUNT: Self = Self::Ttl(Duration::from_secs(30));
 
-    /// 命中时该条目可存活多久；`None` 表示不缓存。
+    /// 获取当前策略的有效 TTL
     #[must_use]
     pub const fn ttl(self) -> Option<Duration> {
         match self {
@@ -44,14 +44,14 @@ struct Entry {
     body: Arc<Vec<u8>>,
 }
 
-/// 内存级响应缓存。
+/// 内存响应缓存
 #[derive(Debug, Clone)]
 pub struct TtlCache {
     inner: Cache<String, Arc<Entry>>,
 }
 
 impl TtlCache {
-    /// 构造指定容量上限的缓存实例。
+    /// 创建指定容量上限的缓存实例
     #[must_use]
     pub fn new(max_capacity: u64) -> Self {
         Self {
@@ -59,7 +59,7 @@ impl TtlCache {
         }
     }
 
-    /// 读取缓存数据，已过期则视为未命中并清理。
+    /// 获取未过期的缓存数据
     #[must_use]
     pub fn get(&self, key: &str) -> Option<Arc<Vec<u8>>> {
         let entry = self.inner.get(key)?;
@@ -70,7 +70,7 @@ impl TtlCache {
         Some(entry.body.clone())
     }
 
-    /// 写入缓存条目并设置有效时长。
+    /// 写入缓存条目
     pub fn insert(&self, key: impl Into<String>, body: Arc<Vec<u8>>, ttl: Duration) {
         self.inner.insert(
             key.into(),
@@ -81,7 +81,7 @@ impl TtlCache {
         );
     }
 
-    /// 失效所有包含指定前缀的缓存键。
+    /// 按键前缀批量失效缓存
     pub fn invalidate_prefix(&self, prefix: &str) {
         let keys: Vec<String> = self
             .inner
@@ -94,19 +94,19 @@ impl TtlCache {
         }
     }
 
-    /// 清空全部缓存条目。
+    /// 清空所有缓存条目
     pub fn clear(&self) {
         self.inner.invalidate_all();
         self.inner.run_pending_tasks();
     }
 
-    /// 当前条目数（触发一次维护以保证准确）。
+    /// 获取当前有效条目数
     pub fn len(&self) -> u64 {
         self.inner.run_pending_tasks();
         self.inner.entry_count()
     }
 
-    /// 是否为空。
+    /// 检查缓存是否为空
     pub fn is_empty(&self) -> bool {
         self.len() == 0
     }

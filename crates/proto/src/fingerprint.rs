@@ -1,55 +1,55 @@
-//! 行为指纹与轨迹模拟（生成 sid 与 edt 参数以应对风控验证）。
+//! 行为指纹与滑动轨迹模拟（生成 sid 与 edt 参数）。
 
 use crate::cipher::{fingerprint_edt, md5_hex, random_string_with, rsa_oaep_sha256_base64};
 use crate::consts::FP_RSA_PUBLIC;
 use crate::error::Result;
 use crate::rng::{JsRng, OsRng, js_round, ri};
 
-/// 窗口高宽（模拟移动端 WebView）。
+/// 模拟移动端 WebView 视口尺寸
 const WIN_W: i64 = 750;
 const WIN_H: i64 = 500;
 
-/// 生成结果。
+/// 指纹生成结果
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Simulate {
-    /// 加密后的行为数据（Base64）。
+    /// 行为数据密文（Base64）
     pub edt: String,
-    /// 加密后的 AES 密钥（Base64）。
+    /// AES 密钥密文（Base64）
     pub sid: String,
 }
 
-/// 一次指纹生成所需的输入。
+/// 指纹输入参数
 #[derive(Debug, Clone, Copy)]
 pub struct SimInputs<'a> {
-    /// 设备 MID。
+    /// 设备 MID
     pub mid: &'a str,
-    /// 用户 ID（未登录传空）。
+    /// 用户 ID（未登录为空）
     pub userid: &'a str,
-    /// 设备 dfid。
+    /// 设备 dfid
     pub dfid: &'a str,
-    /// WebGL 指纹。参考实现里该值缺失会抛错，故必填。
+    /// WebGL 指纹（必填）
     pub webgl: &'a str,
-    /// 毫秒时间戳。
+    /// 毫秒时间戳
     pub ts_millis: i64,
 }
 
-/// 单次指纹生成的随机抽样集合（保证与 JS 参考实现的随机调用序列一致）。
+/// 指纹随机采样参数集合（对齐逆向抽样序列）
 #[derive(Debug, Clone, PartialEq)]
 pub struct Draw {
-    /// 哨兵随机值。
+    /// 哨兵随机值
     pub sentinel: u32,
-    /// EDT 的 AES-128 密钥（16 位十六进制字符串）。
+    /// EDT 密钥（16 位十六进制）
     pub key: String,
-    /// 轨迹采样点数。
+    /// 轨迹采样点数
     pub points: i64,
-    /// 轨迹起点坐标。
+    /// 起点坐标
     pub start: (f64, f64),
-    /// 轨迹终点坐标。
+    /// 终点坐标
     pub end: (f64, f64),
 }
 
 impl Draw {
-    /// 按参考实现的调用顺序抽取各随机参数。
+    /// 按逆向序列抽取各随机参数
     pub fn take(rng: &mut impl JsRng) -> Self {
         // SENTINEL = 0xffffffff - floor(rand * 20)
         #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
@@ -73,7 +73,7 @@ impl Draw {
     }
 }
 
-/// 生成 `sid` / `edt`，随机源可注入。
+/// 生成指纹数据（支持自定义随机源）
 pub fn simulate(rng: &mut impl JsRng, inputs: &SimInputs<'_>) -> Result<Simulate> {
     let draw = Draw::take(rng);
     let data = edt_events(rng, draw.sentinel, draw.start, draw.end, draw.points);
@@ -93,7 +93,7 @@ pub fn simulate(rng: &mut impl JsRng, inputs: &SimInputs<'_>) -> Result<Simulate
     })
 }
 
-/// 生成 `sid` / `edt`，使用系统熵与当前时间。
+/// 使用系统随机源与当前时间生成指纹
 pub fn simulate_now(inputs: &SimInputs<'_>) -> Result<Simulate> {
     #[allow(clippy::cast_possible_truncation)]
     let ts = std::time::SystemTime::now()
@@ -106,15 +106,15 @@ pub fn simulate_now(inputs: &SimInputs<'_>) -> Result<Simulate> {
     simulate(&mut OsRng, &inputs)
 }
 
-/// JS 的 `x || 0`。
+/// 空字符串回退为 "0"
 fn or_zero(s: &str) -> &str {
     if s.is_empty() { "0" } else { s }
 }
 
-/// 行为事件串：`:` 分隔，每条字段用 `,` 分隔。
+/// 构造行为事件字符串（冒号分隔各事件）
 #[must_use]
 pub fn edt_events(rng: &mut impl JsRng, sentinel: u32, start: (f64, f64), end: (f64, f64), points: i64) -> String {
-    // 采样点数至少为 1，避免轨迹出现 NaN 或异常预分配。
+    // 采样点数至少为 1，防除零与越界
     let points = points.max(1);
     let mut entries: Vec<String> = Vec::with_capacity(points as usize * 4 + 32);
     let mut ts: i64 = 0;
@@ -149,7 +149,7 @@ pub fn edt_events(rng: &mut impl JsRng, sentinel: u32, start: (f64, f64), end: (
         entries.push(f3(ts, si, xi, yi));
         entries.push(fs3(sentinel, si, xi, yi));
 
-        // 模拟移动过程中的间歇滚动
+        // 移动过程中的间歇滚动
         if i > 0 && i % 12 == 0 {
             ts += ri(rng, 20, 60);
             entries.push(f5(ts, ei));
@@ -159,7 +159,7 @@ pub fn edt_events(rng: &mut impl JsRng, sentinel: u32, start: (f64, f64), end: (
         si = (si + 1) % 2;
     }
 
-    // 终点微抖动与哨兵事件
+    // 终点抖动与哨兵事件
     ts += ri(rng, 5, 30);
     #[allow(clippy::cast_precision_loss)]
     let (dx, dy) = (ri(rng, -5, 5) as f64, ri(rng, -5, 5) as f64);
@@ -169,10 +169,10 @@ pub fn edt_events(rng: &mut impl JsRng, sentinel: u32, start: (f64, f64), end: (
     entries.join(":")
 }
 
-/// 三阶贝塞尔轨迹 + 递减抖动（3px → 0.5px）。
+/// 生成三阶贝塞尔滑动轨迹（附带衰减抖动）
 #[must_use]
 pub fn bezier_path(rng: &mut impl JsRng, sx: f64, sy: f64, ex: f64, ey: f64, n: i64) -> Vec<(f64, f64)> {
-    // 采样分段数至少为 1，避免除以零导致坐标出现 NaN。
+    // 采样分段数至少为 1，防除零错误
     let n = n.max(1);
     #[allow(clippy::cast_precision_loss)]
     let c1x = sx + (ex - sx) * 0.3 + ri(rng, -80, 80) as f64;

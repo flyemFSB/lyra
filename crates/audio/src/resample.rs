@@ -1,10 +1,10 @@
-//! 重采样层：仅在设备采样率 ≠ 源采样率时启用，运行在解码线程。
+//! 音频重采样：采样率转换（基于 rubato FFT 固定块算法）。
 
 use rubato::{FftFixedInOut, Resampler as _};
 
 use crate::Error;
 
-/// 最大公约数，用于挑选「最小精确块」。
+/// 计算最大公约数
 fn gcd(mut a: usize, mut b: usize) -> usize {
     while b != 0 {
         let t = b;
@@ -14,19 +14,19 @@ fn gcd(mut a: usize, mut b: usize) -> usize {
     a.max(1)
 }
 
-/// 流式音频重采样器：将交织 f32 样本在不同采样率之间进行高精度转换。
+/// 流式音频重采样器
 pub struct Resampler {
     inner: FftFixedInOut<f32>,
     channels: usize,
     chunk_in: usize,
-    /// 尚未凑满一块的交织输入。
+    /// 暂存未成块的输入样本
     stage: Vec<f32>,
     in_buf: Vec<Vec<f32>>,
     out_buf: Vec<Vec<f32>>,
 }
 
 impl Resampler {
-    /// 为给定输入/输出采样率与声道数创建重采样器。
+    /// 创建重采样器
     pub fn new(input_rate: u32, output_rate: u32, channels: usize) -> Result<Self, Error> {
         if channels == 0 {
             return Err(Error::Resample("声道数为 0".into()));
@@ -52,7 +52,7 @@ impl Resampler {
         })
     }
 
-    /// 推入交织输入样本，返回重采样后的交织样本。
+    /// 输入交织样本并执行重采样
     pub fn process(&mut self, interleaved: &[f32]) -> Result<Vec<f32>, Error> {
         self.stage.extend_from_slice(interleaved);
 
@@ -83,7 +83,7 @@ impl Resampler {
     }
 }
 
-/// 一次性将交织 PCM 数据重采样到目标采样率。
+/// 一次性重采样整段 PCM 样本
 pub fn resample_all(samples: &[f32], channels: usize, input_rate: u32, output_rate: u32) -> Result<Vec<f32>, Error> {
     if input_rate == output_rate {
         return Ok(samples.to_vec());

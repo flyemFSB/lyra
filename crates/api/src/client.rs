@@ -1,4 +1,4 @@
-//! 端点调用门面：缓存 → 单飞 → 传输 → 校验 → 指纹重试。
+//! API 调用门面：整合缓存、单飞合并、网络传输与二次验证。
 
 use std::sync::Arc;
 
@@ -12,7 +12,7 @@ use crate::single_flight::SingleFlight;
 use crate::spec::{RequestSpec, Session, now_millis};
 use crate::transport::Transport;
 
-/// 端点调用门面。
+/// API 统一调用客户端
 #[derive(Clone)]
 pub struct Api {
     transport: Arc<dyn Transport>,
@@ -30,7 +30,7 @@ impl std::fmt::Debug for Api {
 }
 
 impl Api {
-    /// 构造。
+    /// 创建 API 客户端实例
     #[must_use]
     pub fn new(transport: Arc<dyn Transport>, session: Session, cache_capacity: u64) -> Self {
         Self {
@@ -41,48 +41,48 @@ impl Api {
         }
     }
 
-    /// 当前会话快照。
+    /// 获取当前会话快照
     #[must_use]
     pub fn session(&self) -> Session {
         self.session.read().clone()
     }
 
-    /// 替换会话（登录 / 登出后调用）。
+    /// 替换当前会话
     pub fn set_session(&self, session: Session) {
         *self.session.write() = session;
     }
 
-    /// 只更新登录态。
+    /// 更新账号登录态
     pub fn set_account(&self, account: Option<crate::spec::Account>) {
         self.session.write().set_account(account);
     }
 
-    /// 传输句柄。少数端点（如设备注册）需要自行组装非 JSON 请求体。
+    /// 获取底层传输实现句柄
     #[must_use]
     pub fn transport(&self) -> &Arc<dyn Transport> {
         &self.transport
     }
 
-    /// L1 缓存句柄（供上层在增删歌单后主动失效）。
+    /// 获取内存缓存句柄
     #[must_use]
     pub fn cache(&self) -> &TtlCache {
         &self.cache
     }
 
-    /// 被单飞合并掉的请求数。
+    /// 获取被单飞合并拦截的请求总数
     #[must_use]
     pub fn coalesced(&self) -> u64 {
         self.flight.coalesced()
     }
 
-    /// 执行端点请求，支持缓存检索、单飞合并与指纹重试。
+    /// 执行 API 请求（整合缓存、单飞与自动重试）
     pub async fn call(&self, spec: RequestSpec, freshness: Freshness) -> Result<Value> {
         let session = self.session();
         if spec.requires_login() && !session.is_logged_in() {
             return Err(Error::NotLoggedIn);
         }
 
-        // 有副作用的端点追加时间戳扰动参数。
+        // 具有副作用的请求追加时间戳防重
         let spec = if matches!(freshness, Freshness::SideEffect) {
             spec.extra_query("_lyra_t", now_millis().to_string())
         } else {
@@ -91,7 +91,7 @@ impl Api {
 
         match self.dispatch(&spec, &session, freshness).await {
             Err(error) if needs_verify(&error) => {
-                // 需要验证时附加行为指纹重试一次。
+                // 上游要求行为验证时生成指纹重试
                 let (edt, sid) = self.fingerprint()?;
                 let retry = spec
                     .clone()
@@ -104,12 +104,12 @@ impl Api {
         }
     }
 
-    /// 鉴权类端点调用，不缓存且不追加时间戳扰动参数。
+    /// 鉴权类端点调用（不缓存且不追加扰动）
     pub async fn call_auth(&self, spec: RequestSpec) -> Result<Value> {
         self.call(spec, Freshness::NoStore).await
     }
 
-    /// 生成行为指纹 `(edt, sid)`。
+    /// 生成设备行为指纹元组 (edt, sid)
     pub fn fingerprint(&self) -> Result<(String, String)> {
         let session = self.session.read().clone();
         let sim = lyra_proto::simulate_now(&lyra_proto::SimInputs {
@@ -156,15 +156,15 @@ impl Api {
     }
 }
 
-/// 根据响应头 ssa-code 标记将上游错误转换为需要验证错误。
+/// 根据 ssa-code 响应头附加验证错误
 fn attach_ssa(error: Error, ssa: Option<String>) -> Error {
     ssa.map_or(error, Error::NeedsVerify)
 }
 
-/// 判断错误是否需要触发行为验证。
+/// 判断错误是否要求二次行为验证
 #[must_use]
 pub fn needs_verify(error: &Error) -> bool {
-    // 匹配验证错误变体或对应业务错误码。
+    // 匹配验证错误变体或对应业务错误码
     matches!(error, Error::NeedsVerify(_)) || error.code() == Some(Code::NeedVerify)
 }
 

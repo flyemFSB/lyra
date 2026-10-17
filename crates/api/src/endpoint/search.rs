@@ -1,4 +1,4 @@
-//! 搜索业务端点，支持单曲、专辑、歌单、歌手及 MV 检索。
+//! 搜索业务端点，支持歌曲关键词检索。
 
 use lyra_proto::consts::SEARCH_CLIENTVER;
 
@@ -9,10 +9,10 @@ use crate::error::{Error, Result};
 use crate::model::Song;
 use crate::spec::RequestSpec;
 
-/// 搜索路由器。
+/// 搜索网关路由主机
 const SEARCH_ROUTER: &str = "complexsearch.kugou.com";
 
-/// 依据关键词分页搜索单曲。
+/// 依据关键词分页搜索单曲
 pub async fn songs(api: &Api, keyword: &str, page: u32, pagesize: u32, tag: Option<&str>) -> Result<Vec<Song>> {
     let keyword = keyword.trim();
     if keyword.is_empty() {
@@ -27,7 +27,7 @@ pub async fn songs(api: &Api, keyword: &str, page: u32, pagesize: u32, tag: Opti
         .param("privilegefilter", 0)
         .param("area_code", 1)
         .param("dopicfull", 1)
-        // 概念版专享搜索版本号。
+        // 概念版专享搜索客户端版本号
         .param("clientver", SEARCH_CLIENTVER)
         .header("x-router", SEARCH_ROUTER);
     if let Some(tag) = tag {

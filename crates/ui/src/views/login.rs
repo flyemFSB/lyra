@@ -1,4 +1,4 @@
-//! 短信验证码登录视图组件：拟态玻璃卡片与沉浸式登录体验。
+//! 手机验证码登录视图。
 
 use std::time::Duration;
 
@@ -13,10 +13,10 @@ use crate::theme::{
     ACCENT_GREEN, ACCENT_GREEN_HOVER, ACCENT_GREEN_LIGHT, CARD_BORDER, TEXT_MUTED, badge, hex_rgb, main_card, title,
 };
 
-/// 发送验证码倒计时时长（秒）。
+/// 验证码重发倒计时时长（秒）
 const RESEND_SECONDS: u32 = 60;
 
-/// 登录表单视图结构。
+/// 登录视图
 pub(crate) struct LoginView {
     backend: Backend,
     mobile: Entity<InputState>,
@@ -24,14 +24,14 @@ pub(crate) struct LoginView {
     remaining: u32,
     sending: bool,
     status: Option<SharedString>,
-    /// 倒计时异步任务句柄。
+    /// 倒计时异步任务
     #[allow(dead_code)]
     countdown: Task<()>,
     _subs: Vec<Subscription>,
 }
 
 impl LoginView {
-    /// 创建登录视图。
+    /// 创建登录视图
     pub(crate) fn new(backend: Backend, window: &mut Window, cx: &mut Context<Self>) -> Self {
         let mobile = cx.new(|cx| InputState::new(window, cx).placeholder("输入 11 位手机号码"));
         let code = cx.new(|cx| InputState::new(window, cx).placeholder("短信验证码"));
@@ -57,7 +57,7 @@ impl LoginView {
         }
     }
 
-    /// 发送短信验证码请求。
+    /// 发送短信验证码
     fn send_code(&mut self, cx: &mut Context<Self>) {
         if self.sending || self.remaining > 0 {
             return;
@@ -76,7 +76,7 @@ impl LoginView {
             .spawn(async move { Msg::AuthCode(app.send_code(&mobile).await.map_err(|error| error.to_string())) });
     }
 
-    /// 提交手机号与验证码执行登录。
+    /// 提交登录请求
     fn submit(&mut self, cx: &mut Context<Self>) {
         if self.sending {
             return;
@@ -107,7 +107,7 @@ impl LoginView {
         });
     }
 
-    /// 处理验证码下发结果响应。
+    /// 处理验证码发送响应
     pub(crate) fn on_auth_code(&mut self, result: Result<u64, String>, cx: &mut Context<Self>) {
         self.sending = false;
         match result {
@@ -120,7 +120,7 @@ impl LoginView {
         cx.notify();
     }
 
-    /// 处理登录接口响应结果。
+    /// 处理登录响应
     pub(crate) fn on_login(&mut self, result: Result<(), String>, cx: &mut Context<Self>) {
         self.sending = false;
         self.status = result
@@ -129,7 +129,7 @@ impl LoginView {
         cx.notify();
     }
 
-    /// 重置登录表单输入状态。
+    /// 重置表单状态
     pub(crate) fn reset(&mut self, cx: &mut Context<Self>) {
         self.remaining = 0;
         self.sending = false;
@@ -138,7 +138,7 @@ impl LoginView {
         cx.notify();
     }
 
-    /// 启动验证码重发每秒递减倒计时任务。
+    /// 启动重发倒计时
     fn begin_countdown(&mut self, cx: &mut Context<Self>) {
         self.remaining = RESEND_SECONDS;
         self.countdown = cx.spawn(async move |this, cx| {
@@ -174,7 +174,7 @@ impl Render for LoginView {
                     .gap(px(16.0))
                     .p_7()
                     .shadow_xl()
-                    // 顶部品牌与音乐标识
+                    // 品牌标识
                     .child(
                         v_flex()
                             .items_center()
@@ -207,7 +207,6 @@ impl Render for LoginView {
                                     .child("输入手机号即可同步个人歌单与每日推荐"),
                             ),
                     )
-                    // 手机号输入框
                     .child(
                         h_flex()
                             .px_3()
@@ -221,7 +220,6 @@ impl Render for LoginView {
                             .child(Icon::new(IconName::Smartphone).size(px(16.0)).text_color(ACCENT_GREEN))
                             .child(div().flex_1().child(Input::new(&self.mobile).w_full())),
                     )
-                    // 验证码输入框与发送按钮
                     .child(
                         h_flex()
                             .gap(px(10.0))
@@ -249,7 +247,6 @@ impl Render for LoginView {
                                     .on_click(cx.listener(|this, _event, _window, cx| this.send_code(cx))),
                             ),
                     )
-                    // 登录主按钮
                     .child(
                         Button::new("login")
                             .primary()
@@ -257,7 +254,6 @@ impl Render for LoginView {
                             .label("立即安全登录")
                             .on_click(cx.listener(|this, _event, _window, cx| this.submit(cx))),
                     )
-                    // 状态反馈信息
                     .children(
                         self.status.clone().map(|text| {
                             h_flex()

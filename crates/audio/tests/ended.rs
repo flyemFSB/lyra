@@ -1,7 +1,4 @@
-//! 自然播完事件回归：验证解码线程在流结束时确实抛出 `Event::Ended`。
-//!
-//! 自动切歌完全依赖这个事件：没有它，一首放完就永远停在最后一声。“播完不切歌”的排查里
-//! 第一步就是先钉死这一层。无声卡环境跳过（与 seek.rs 同样的策略）。
+//! 播放结束事件回归测试：验证曲目自然播完触发 Event::Ended。
 
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
@@ -11,7 +8,7 @@ use std::time::{Duration, Instant};
 
 use lyra_audio::{AudioConfig, Engine, Event, FetchResult, Fetcher, ReadSeek, State, TrackRef, spawn_with};
 
-/// 直接读取本地文件的抓取器。
+/// 本地文件抓取器
 struct FileFetcher(PathBuf);
 
 impl Fetcher for FileFetcher {
@@ -20,7 +17,7 @@ impl Fetcher for FileFetcher {
     }
 }
 
-/// 生成指定秒数、44.1kHz 单声道 16bit 正弦 WAV。
+/// 生成测试正弦波 WAV 文件
 fn write_sine_wav(path: &Path, seconds: u32) {
     let spec = hound::WavSpec {
         channels: 1,
@@ -36,7 +33,7 @@ fn write_sine_wav(path: &Path, seconds: u32) {
     writer.finalize().unwrap();
 }
 
-/// 启动引擎并收集事件。
+/// 创建收集事件的测试引擎
 fn engine_with_events(path: &Path, events: Arc<Mutex<Vec<Event>>>) -> Option<Engine> {
     spawn_with(
         Arc::new(FileFetcher(path.to_path_buf())),

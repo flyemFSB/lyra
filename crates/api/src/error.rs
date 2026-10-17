@@ -1,28 +1,28 @@
-//! 传输与端点错误。
+//! 传输与端点错误定义。
 
 use thiserror::Error;
 
-/// 上游业务错误码（方案 §5.7 的实测错误码表）。
+/// 上游业务错误码。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Code {
-    /// `20002`：userid 类型错 / 未登录。
+    /// 用户 ID 类型错误或未登录（20002）
     BadUserid,
-    /// `20010`：参数缺失（例如歌词未带 id/accesskey）。
+    /// 请求参数缺失（20010）
     MissingParam,
-    /// `20028`：本次请求需要验证 → 带 `sid`/`edt` 重试一次。
+    /// 请求需二次验证（20028）
     NeedVerify,
-    /// `130012`：听歌上报失败，忽略，不阻断。
+    /// 听歌上报失败（130012，非阻断错误）
     ListenReportFailed,
-    /// `131001`：每日领取失败。
+    /// 每日特权领取失败（131001）
     DailyClaimFailed,
-    /// `297002`：已领取过 → 按**幂等成功**处理，不报错。
+    /// 当日已领取（297002，按幂等成功处理）
     AlreadyClaimed,
-    /// 未收录的上游错误码。
+    /// 未收录的上游错误码
     Other(i64),
 }
 
 impl Code {
-    /// 从上游返回的 `error_code` 归类。
+    /// 解析上游错误码
     #[must_use]
     pub const fn from_i64(code: i64) -> Self {
         match code {
@@ -92,7 +92,7 @@ impl From<lyra_proto::Error> for Error {
 }
 
 impl Error {
-    /// 取上游错误码（若有）。
+    /// 获取上游业务错误码
     #[must_use]
     pub fn code(&self) -> Option<Code> {
         match self {
@@ -102,5 +102,5 @@ impl Error {
     }
 }
 
-/// 结果别名。
+/// 模块通用结果类型
 pub type Result<T> = std::result::Result<T, Error>;

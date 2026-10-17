@@ -1,5 +1,5 @@
 #![forbid(unsafe_code)]
-//! 数据持久化层：基于 redb 管理设备、登录态、配置与缓存，敏感令牌隔离存入密钥环。
+//! 数据持久化层：基于 redb 管理设备、账号与缓存，敏感凭据隔离存入密钥环。
 
 mod error;
 mod secrets;
@@ -16,22 +16,22 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use redb::TableDefinition;
 use serde::de::DeserializeOwned;
 
-/// 单例键值表（设备、账户及配置信息）。
+/// 元数据表（设备、账号及设置）
 const META: TableDefinition<&str, &[u8]> = TableDefinition::new("meta");
-/// 命名空间二级缓存表：(ns, key) -> (过期毫秒, 二进制数据)。
+/// 缓存表：(ns, key) -> (过期毫秒, 二进制数据)
 const BLOBS: TableDefinition<(&str, &str), (u64, &[u8])> = TableDefinition::new("blobs");
-/// 临时文件去重自增序号。
+/// 临时文件自增序号
 static TEMP_SEQ: AtomicU64 = AtomicU64::new(0);
 
-/// 持久化存储实例。
+/// 持久化存储实例
 pub struct Store {
     db: redb::Database,
     secrets: Box<dyn Secrets>,
-    /// 临时文件守卫（释放文件句柄后自动清理）。
+    /// 临时文件守卫（析构时自动清理）
     _temp: Option<TempFile>,
 }
 
-/// 临时库文件守卫，`Drop` 时删除。
+/// 临时文件守卫
 struct TempFile(PathBuf);
 
 impl Drop for TempFile {
@@ -40,16 +40,15 @@ impl Drop for TempFile {
     }
 }
 
-/// 打开位于指定路径的存储实例，凭据隔离存入系统密钥环。
+/// 打开指定路径的数据库（凭据存入系统密钥环）
 pub fn open(path: impl AsRef<Path>) -> Result<Store> {
     open_with_secrets(path, Box::new(KeyringSecrets))
 }
 
-/// 打开指定路径的存储实例并注入自定义凭据实现。
+/// 打开指定路径的数据库并指定凭据存储后端
 pub fn open_with_secrets(path: impl AsRef<Path>, secrets: Box<dyn Secrets>) -> Result<Store> {
     let path = path.as_ref();
-    // redb 对数据库文件加独占锁：GUI 在跑时 CLI 必然拿不到锁，
-    // 这属于可解释的“被占用”，不该把英文的 redb 原文直接丢给用户。
+    // redb 使用文件独占锁，已被打开时返回 Busy 错误
     let db = redb::Database::create(path).map_err(|error| match error {
         redb::DatabaseError::DatabaseAlreadyOpen => Error::Busy(path.display().to_string()),
         other => Error::Database(other),
@@ -61,7 +60,7 @@ pub fn open_with_secrets(path: impl AsRef<Path>, secrets: Box<dyn Secrets>) -> R
     })
 }
 
-/// 在系统临时目录创建一次性存储实例，Drop 时自动删除。
+/// 创建临时数据库实例（Drop 时自动删除）
 pub fn open_temp_with_secrets(secrets: Box<dyn Secrets>) -> Result<Store> {
     let path = unique_temp_path()?;
     match redb::Database::create(&path) {
@@ -78,17 +77,17 @@ pub fn open_temp_with_secrets(secrets: Box<dyn Secrets>) -> Result<Store> {
 }
 
 impl Store {
-    /// 读取设备身份，未注册时返回 None。
+    /// 读取设备标识
     pub fn device(&self) -> Result<Option<lyra_proto::Device>> {
         decode(self.get_meta("device")?)
     }
 
-    /// 覆盖写入设备身份。
+    /// 写入设备标识
     pub fn set_device(&self, device: &lyra_proto::Device) -> Result<()> {
         self.put_meta("device", &serde_json::to_vec(device)?)
     }
 
-    /// 读取登录态，并从系统凭据管理器回填令牌。
+    /// 读取登录账号信息（从密钥环回填令牌）
     pub fn account(&self) -> Result<Option<Account>> {
         let Some(mut account) = decode::<Account>(self.get_meta("account")?)? else {
             return Ok(None);
@@ -103,11 +102,11 @@ impl Store {
         Ok(Some(account))
     }
 
-    /// 写入登录态，令牌安全隔离存入系统凭据管理器。
+    /// 保存登录账号信息（令牌写入密钥环，数据库不存明文）
     pub fn set_account(&self, account: &Account) -> Result<()> {
         let user = account.userid.to_string();
         if account.token.is_empty() {
-            // 空令牌视为登出，清理持久化凭据
+            // 令牌为空时删除凭据
             self.secrets.delete(&user)?;
         } else {
             self.secrets.set(&user, &account.token)?;
@@ -124,7 +123,7 @@ impl Store {
         self.put_meta("account", &serde_json::to_vec(&stored)?)
     }
 
-    /// 清除登录态及系统凭据管理器中的关联凭据。
+    /// 清除登录账号与密钥环中的令牌
     pub fn clear_account(&self) -> Result<()> {
         if let Some(account) = decode::<Account>(self.get_meta("account")?)? {
             self.secrets.delete(&account.userid.to_string())?;
@@ -133,17 +132,17 @@ impl Store {
         self.remove_meta("account")
     }
 
-    /// 读取用户配置，未配置时返回默认值。
+    /// 读取配置项（未配置返回默认值）
     pub fn settings(&self) -> Result<Settings> {
         Ok(decode::<Settings>(self.get_meta("settings")?)?.unwrap_or_default())
     }
 
-    /// 覆盖写入用户配置。
+    /// 保存配置项
     pub fn set_settings(&self, s: &Settings) -> Result<()> {
         self.put_meta("settings", &serde_json::to_vec(s)?)
     }
 
-    /// 写入指定命名空间的缓存块及过期时长。
+    /// 写入带 TTL 的缓存数据
     pub fn put_blob(&self, ns: &str, key: &str, bytes: &[u8], ttl: Option<Duration>) -> Result<()> {
         let expires = ttl.map_or(0, |ttl| now_ms().saturating_add(millis(ttl)));
         self.write(|txn| {
@@ -152,7 +151,7 @@ impl Store {
         })
     }
 
-    /// 读取缓存块，未命中或已过期返回 None。
+    /// 读取缓存数据（过期或未命中返回 None）
     pub fn get_blob(&self, ns: &str, key: &str) -> Result<Option<Vec<u8>>> {
         let txn = self.db.begin_read()?;
         let table = match txn.open_table(BLOBS) {
@@ -170,7 +169,7 @@ impl Store {
         Ok(Some(bytes.to_vec()))
     }
 
-    /// 统一写事务辅助方法（执行闭包并在成功后自动提交）。
+    /// 写事务辅助函数
     fn write<F, T>(&self, body: F) -> Result<T>
     where
         F: FnOnce(&redb::WriteTransaction) -> Result<T>,
@@ -181,7 +180,7 @@ impl Store {
         Ok(out)
     }
 
-    /// 读取一个单例键的原始 `JSON` 字节。
+    /// 读取元数据原始字节
     fn get_meta(&self, key: &str) -> Result<Option<Vec<u8>>> {
         let txn = self.db.begin_read()?;
         let table = match txn.open_table(META) {
@@ -192,7 +191,7 @@ impl Store {
         Ok(table.get(key)?.map(|guard| guard.value().to_vec()))
     }
 
-    /// 写入/覆盖一个单例键。
+    /// 写入元数据
     fn put_meta(&self, key: &str, bytes: &[u8]) -> Result<()> {
         self.write(|txn| {
             txn.open_table(META)?.insert(key, bytes)?;
@@ -200,7 +199,7 @@ impl Store {
         })
     }
 
-    /// 删除一个单例键；不存在也算成功。
+    /// 删除元数据
     fn remove_meta(&self, key: &str) -> Result<()> {
         self.write(|txn| {
             txn.open_table(META)?.remove(key)?;
@@ -209,12 +208,12 @@ impl Store {
     }
 }
 
-/// 反序列化可选的 `JSON` 载荷。
+/// 反序列化 JSON 载荷
 fn decode<T: DeserializeOwned>(raw: Option<Vec<u8>>) -> Result<Option<T>> {
     Ok(raw.map(|bytes| serde_json::from_slice(&bytes)).transpose()?)
 }
 
-/// 在系统临时目录里占位一个唯一文件名。
+/// 生成唯一的临时数据库路径
 fn unique_temp_path() -> Result<PathBuf> {
     let dir = std::env::temp_dir();
     for _ in 0..64 {
@@ -233,24 +232,24 @@ fn unique_temp_path() -> Result<PathBuf> {
     )))
 }
 
-/// `expires == 0` 表示永不过期。
+/// 0 表示永不过期
 fn is_expired(expires: u64, now: u64) -> bool {
     expires != 0 && expires <= now
 }
 
-/// 当前 Unix 毫秒时间戳。
+/// 当前时间戳（毫秒）
 fn now_ms() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map_or(0, |d| u64::try_from(d.as_millis()).unwrap_or(u64::MAX))
 }
 
-/// `Duration` 转毫秒（饱和到 u64）。
+/// 时长转毫秒
 fn millis(d: Duration) -> u64 {
     u64::try_from(d.as_millis()).unwrap_or(u64::MAX)
 }
 
-/// 格式化 VIP 令牌在系统凭据库中的专属键名。
+/// 生成 VIP 令牌密钥环键名
 fn vip_secret_user(userid: i64) -> String {
     format!("{userid}#vip")
 }

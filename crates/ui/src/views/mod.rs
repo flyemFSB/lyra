@@ -1,4 +1,4 @@
-//! 各功能页。
+//! 功能视图模块
 
 pub(crate) mod daily;
 pub(crate) mod login;

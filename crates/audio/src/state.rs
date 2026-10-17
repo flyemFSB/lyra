@@ -1,4 +1,4 @@
-//! 音频引擎共享状态管理（基于原子类型提供无锁读写）。
+//! 引擎跨线程共享状态（基于原子操作无锁读写）。
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU32, AtomicU64, Ordering};
@@ -12,9 +12,9 @@ pub(crate) struct Shared {
     position_ms: AtomicU64,
     duration_ms: AtomicU64,
     volume: AtomicU32,
-    /// 缓冲刷新标记（定位时置位，由输出回调消费复位）。
+    /// 缓冲刷新标记（Seek 时置位，回调清空后复位）
     flush: AtomicBool,
-    /// 当前播放曲目引用信息。
+    /// 当前曲目信息
     track: Mutex<Option<TrackRef>>,
 }
 
@@ -48,12 +48,12 @@ impl Shared {
         })
     }
 
-    /// 请求输出回调丢弃环形缓冲区残留音频。
+    /// 请求清空环形缓冲区残留样本
     pub(crate) fn request_flush(&self) {
         self.flush.store(true, Ordering::Release);
     }
 
-    /// 获取并复位缓冲刷新标记，返回是否需要清空缓冲区。
+    /// 读取并复位刷新标记
     pub(crate) fn take_flush_request(&self) -> bool {
         self.flush.swap(false, Ordering::AcqRel)
     }

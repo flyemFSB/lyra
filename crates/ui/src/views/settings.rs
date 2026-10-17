@@ -1,4 +1,4 @@
-//! 系统设置与账户管理视图组件：One Island 模块化卡片与拟态玻璃。
+//! 系统设置与账号管理视图。
 
 use gpui_kit::assets::IconName;
 use gpui_kit::component::button::{Button, ButtonVariants};
@@ -15,7 +15,7 @@ use crate::theme::{
     VIP_GOLD, badge, hex_rgb, title,
 };
 
-/// 缓存容量预设选项。
+/// 缓存容量预设选项
 const CACHE_PRESETS: &[(&str, u64)] = &[
     ("512 MiB", 512 * 1024 * 1024),
     ("1 GiB", 1 << 30),
@@ -23,10 +23,10 @@ const CACHE_PRESETS: &[(&str, u64)] = &[
     ("4 GiB", 4 << 30),
 ];
 
-/// 默认最大缓存字节数（取预设中的 2 GiB，避免与 `CACHE_PRESETS` 重复维护）。
+/// 默认最大缓存字节数
 const DEFAULT_MAX_CACHE_BYTES: u64 = CACHE_PRESETS[2].1;
 
-/// 设置视图状态结构。
+/// 设置视图
 pub(crate) struct SettingsView {
     backend: Backend,
     quality: String,
@@ -34,12 +34,12 @@ pub(crate) struct SettingsView {
     max_cache_bytes: u64,
     vip: Option<VipStatus>,
     loaded: bool,
-    /// 最近一次操作的提示反馈信息。
+    /// 最近一次操作的状态提示
     last_action: Option<SharedString>,
 }
 
 impl SettingsView {
-    /// 创建设置视图实例。
+    /// 创建设置视图
     pub(crate) fn new(backend: Backend, window: &mut Window, cx: &mut Context<Self>) -> Self {
         let settings = backend.app().settings().ok();
         let quality = settings
@@ -68,12 +68,11 @@ impl SettingsView {
         }
     }
 
-    /// 首次进入视图时触发会员信息查询。
+    /// 确保会员状态已加载
     pub(crate) fn ensure(&mut self) {
         if self.loaded {
             return;
         }
-        // 未登录时上游会回 20010（参数缺失），没必要发这次请求，也不该把裸错误抛到界面上。
         if !self.backend.app().is_logged_in() {
             self.last_action = Some(SharedString::new_static("登录后可查看会员状态"));
             return;
@@ -84,7 +83,7 @@ impl SettingsView {
             .spawn(async move { Msg::Vip(app.vip().await.map_err(|error| error.to_string())) });
     }
 
-    /// 响应处理会员状态数据。
+    /// 处理会员状态响应结果
     pub(crate) fn on_vip(&mut self, result: Result<VipStatus, String>, cx: &mut Context<Self>) {
         match result {
             Ok(vip) => self.vip = Some(vip),
@@ -93,7 +92,7 @@ impl SettingsView {
         cx.notify();
     }
 
-    /// 响应处理领取 VIP 结果。
+    /// 处理领取 VIP 响应结果
     pub(crate) fn on_claim(&mut self, result: Result<(), String>, cx: &mut Context<Self>) {
         match result {
             Ok(()) => {
@@ -106,7 +105,7 @@ impl SettingsView {
         cx.notify();
     }
 
-    /// 响应处理设置保存结果。
+    /// 处理设置保存响应结果
     pub(crate) fn on_saved(&mut self, result: Result<(), String>, cx: &mut Context<Self>) {
         self.last_action = Some(match result {
             Ok(()) => SharedString::new_static("设置已成功保存"),
@@ -115,7 +114,7 @@ impl SettingsView {
         cx.notify();
     }
 
-    /// 修改首选播放音质并持久化。
+    /// 修改音质偏好并持久化
     fn set_quality(&mut self, quality: &str, cx: &mut Context<Self>) {
         quality.clone_into(&mut self.quality);
         let app = self.backend.app();
@@ -133,7 +132,7 @@ impl SettingsView {
         cx.notify();
     }
 
-    /// 保存自定义缓存存储路径。
+    /// 保存自定义缓存目录
     fn save_cache_dir(&mut self, cx: &mut Context<Self>) {
         let value = self.cache_dir.read(cx).value().to_string();
         let app = self.backend.app();
@@ -149,7 +148,7 @@ impl SettingsView {
         });
     }
 
-    /// 设置最大本地缓存上限并保存。
+    /// 设置最大缓存容量并保存
     fn set_cache_limit(&mut self, bytes: u64, cx: &mut Context<Self>) {
         self.max_cache_bytes = bytes;
         let app = self.backend.app();
@@ -166,7 +165,7 @@ impl SettingsView {
         cx.notify();
     }
 
-    /// 触发领取每日免费畅听 VIP。
+    /// 申请领取每日畅听 VIP
     fn claim_vip(&mut self, cx: &mut Context<Self>) {
         self.last_action = Some(SharedString::new_static("正在申请领取…"));
         cx.notify();
@@ -181,7 +180,7 @@ impl SettingsView {
         });
     }
 
-    /// 执行退出登录并清理凭据。
+    /// 退出当前账号登录
     fn logout(&mut self) {
         let app = self.backend.app();
         self.backend.spawn(async move {
@@ -190,14 +189,14 @@ impl SettingsView {
         });
     }
 
-    /// 清理内存中的接口请求缓存。
+    /// 清理内存接口缓存
     fn clear_cache(&mut self, cx: &mut Context<Self>) {
         self.backend.app().clear_cache();
         self.last_action = Some(SharedString::new_static("已清理接口缓存"));
         cx.notify();
     }
 
-    /// 生成会员状态展示文案。
+    /// 获取会员状态展示文案
     fn vip_label(&self) -> &'static str {
         match &self.vip {
             Some(vip) if vip.is_concept_active() => "畅听 VIP 权益生效中",
@@ -209,7 +208,7 @@ impl SettingsView {
 
 impl Render for SettingsView {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        // 1. 音质卡片
+        // 音质偏好选择
         let mut quality_row = h_flex().gap(px(8.0)).flex_wrap().items_center();
         for (id, label) in QUALITY_CHOICES.iter().copied() {
             let active = self.quality == id;
@@ -228,7 +227,7 @@ impl Render for SettingsView {
             ACCENT_GREEN_HOVER,
         ));
 
-        // 2. VIP 专属卡片
+        // VIP 权益卡片
         let is_vip_active = self
             .vip
             .as_ref()
@@ -301,7 +300,7 @@ impl Render for SettingsView {
                     .on_click(cx.listener(|view, _event, _window, cx| view.claim_vip(cx))),
             );
 
-        // 3. 存储上限预设
+        // 缓存容量预设
         let mut preset_row = h_flex().gap(px(8.0)).flex_wrap().items_center();
         for (label, bytes) in CACHE_PRESETS.iter().copied() {
             let active = self.max_cache_bytes == bytes;
@@ -320,7 +319,7 @@ impl Render for SettingsView {
             ACCENT_GREEN_HOVER,
         ));
 
-        // 4. 缓存目录
+        // 缓存路径
         let cache_row = h_flex()
             .gap(px(10.0))
             .items_center()
@@ -348,7 +347,7 @@ impl Render for SettingsView {
                     .on_click(cx.listener(|view, _event, _window, cx| view.save_cache_dir(cx))),
             );
 
-        // 5. 账号管理
+        // 账号与维护
         let account_row = h_flex()
             .gap(px(10.0))
             .items_center()
@@ -369,7 +368,7 @@ impl Render for SettingsView {
                     .on_click(cx.listener(|view, _event, _window, _cx| view.logout())),
             );
 
-        // 操作状态反馈
+        // 操作状态反馈条
         let status = self.last_action.clone().map(|text| {
             h_flex()
                 .w_full()
@@ -404,9 +403,7 @@ impl Render for SettingsView {
                     .p_5()
                     .gap(px(16.0))
                     .overflow_y_scroll()
-                    // VIP 权益卡片
                     .child(vip_card)
-                    // 音质卡片
                     .child(
                         v_flex()
                             .p_4()
@@ -450,7 +447,6 @@ impl Render for SettingsView {
                                     .child(preset_row),
                             ),
                     )
-                    // 账户与维护卡片
                     .child(
                         v_flex()
                             .p_4()

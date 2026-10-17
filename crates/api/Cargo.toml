@@ -8,8 +8,7 @@ license.workspace      = true
 
 [features]
 default = []
-# 用 reqwest 实现 Transport：供 CLI / xtask smoke 使用。
-# GUI 侧由 lyra-app 提供基于 GPUI HttpClient 的实现，不吃这个 feature。
+# 基于 reqwest 实现 Transport，供 CLI 和集成测试使用
 http = ["dep:reqwest"]
 
 [dependencies]

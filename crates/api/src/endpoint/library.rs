@@ -1,4 +1,4 @@
-//! 音乐库与用户信息端点，包含用户歌单、歌曲详情及账号资料。
+//! 音乐库与用户信息端点。
 
 use lyra_proto::consts::RSA_PUBLIC;
 use lyra_proto::rsa_raw_encrypt_hex;
@@ -12,7 +12,7 @@ use crate::model::{Page, Playlist, Song};
 use crate::spec::RequestSpec;
 use crate::spec::now_millis;
 
-/// 获取当前登录用户的全部歌单列表。
+/// 获取当前登录用户歌单列表
 pub async fn playlists(api: &Api) -> Result<Vec<Playlist>> {
     let session = api.session();
     crate::spec::ensure_logged_in(&session)?;
@@ -39,7 +39,7 @@ pub async fn playlists(api: &Api) -> Result<Vec<Playlist>> {
         .unwrap_or_default())
 }
 
-/// 分页获取指定歌单内的歌曲列表。
+/// 分页获取指定歌单内的歌曲列表
 pub async fn playlist_tracks(api: &Api, global_collection_id: &str, page: u32, pagesize: u32) -> Result<Page<Song>> {
     let begin_idx = u64::from(page.saturating_sub(1)) * u64::from(pagesize);
     let spec = RequestSpec::get("/pubsongs/v2/get_other_list_file_nofilt")
@@ -69,13 +69,13 @@ pub async fn playlist_tracks(api: &Api, global_collection_id: &str, page: u32, p
     })
 }
 
-/// 清理歌单关联的内存缓存条目。
+/// 失效歌单相关内存缓存
 pub fn invalidate_playlist_cache(api: &Api, _global_collection_id: &str) {
     api.cache().invalidate_prefix("/pubsongs/v2/get_other_list_file_nofilt");
     api.cache().invalidate_prefix("/v7/get_all_list");
 }
 
-/// 获取当前登录用户的详细个人资料。
+/// 获取当前登录用户个人资料
 pub async fn user_detail(api: &Api) -> Result<Value> {
     let session = api.session();
     crate::spec::ensure_logged_in(&session)?;

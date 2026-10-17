@@ -1,4 +1,4 @@
-//! 传输抽象：解耦端点逻辑与底层 HTTP 实现，提供离线打桩能力。
+//! 传输抽象层：解耦端点逻辑与底层 HTTP 实现。
 
 pub mod mock;
 
@@ -10,17 +10,17 @@ use async_trait::async_trait;
 
 use crate::error::{Error, Result};
 
-/// HTTP 方法（本协议只用到这两种）。
+/// HTTP 请求方法
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Method {
-    /// GET
+    /// GET 方法
     Get,
-    /// POST
+    /// POST 方法
     Post,
 }
 
 impl Method {
-    /// 大写形式，便于断言。
+    /// 获取方法名的大写字符串
     #[must_use]
     pub const fn as_str(self) -> &'static str {
         match self {
@@ -30,25 +30,25 @@ impl Method {
     }
 }
 
-/// 请求参数与元数据定义，查询参数暂不进行预编码。
+/// 抽象 HTTP 请求
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Request {
-    /// HTTP 方法。
+    /// 请求方法
     pub method: Method,
-    /// 不含 query 的完整 URL。
+    /// 目标 URL（不含查询参数）
     pub url: String,
-    /// 查询参数，保持插入顺序。
+    /// 查询参数键值对
     pub query: Vec<(String, String)>,
-    /// 请求头。
+    /// 请求头列表
     pub headers: Vec<(String, String)>,
-    /// 请求体原始字节（`None` 表示无体）。
+    /// 请求体原始字节
     pub body: Option<Vec<u8>>,
-    /// 超时。
+    /// 超时时长
     pub timeout: Option<Duration>,
 }
 
 impl Request {
-    /// 新建一个请求。
+    /// 创建新请求实例
     #[must_use]
     pub fn new(method: Method, url: impl Into<String>) -> Self {
         Self {
@@ -61,28 +61,28 @@ impl Request {
         }
     }
 
-    /// 追加查询参数。
+    /// 添加查询参数
     #[must_use]
     pub fn query(mut self, key: impl Into<String>, value: impl Into<String>) -> Self {
         self.query.push((key.into(), value.into()));
         self
     }
 
-    /// 追加请求头。
+    /// 添加请求头
     #[must_use]
     pub fn header(mut self, key: impl Into<String>, value: impl Into<String>) -> Self {
         self.headers.push((key.into(), value.into()));
         self
     }
 
-    /// 设置请求体。
+    /// 设置请求体
     #[must_use]
     pub fn body(mut self, body: Vec<u8>) -> Self {
         self.body = Some(body);
         self
     }
 
-    /// 取某个请求头（大小写不敏感）。
+    /// 获取指定请求头（大小写无关）
     #[must_use]
     pub fn get_header(&self, name: &str) -> Option<&str> {
         self.headers
@@ -91,7 +91,7 @@ impl Request {
             .map(|(_, v)| v.as_str())
     }
 
-    /// 拼接完整目标 URL 并对查询参数进行百分号编码。
+    /// 拼接完整 URL 并对查询参数编码
     #[must_use]
     pub fn full_url(&self) -> String {
         if self.query.is_empty() {
@@ -104,12 +104,12 @@ impl Request {
                     .extend_pairs(self.query.iter().map(|(k, v)| (k, v)));
                 parsed.to_string()
             }
-            // 解析失败保留原始地址。
+            // 解析失败保留原始地址
             Err(_) => self.url.clone(),
         }
     }
 
-    /// 不参与缓存键计算的易变查询参数列表。
+    /// 易变查询参数白名单（不参与缓存键计算）
     const VOLATILE_QUERY: &'static [&'static str] = &[
         "clienttime",
         "clienttime_ms",
@@ -121,7 +121,7 @@ impl Request {
         "_lyra_t",
     ];
 
-    /// 不参与缓存键计算的易变请求体字段列表。
+    /// 易变请求体字段白名单（不参与缓存键计算）
     const VOLATILE_BODY: &'static [&'static str] = &[
         "clienttime",
         "clienttime_ms",
@@ -132,7 +132,7 @@ impl Request {
         "_lyra_t",
     ];
 
-    /// 生成包含主机、路径、稳定查询参数与请求体摘要的唯一缓存键。
+    /// 计算规范化请求缓存键
     #[must_use]
     pub fn cache_key(&self) -> String {
         let mut key = match url::Url::parse(&self.url) {
@@ -161,7 +161,7 @@ impl Request {
         key
     }
 
-    /// 剔除易变字段后的请求体摘要（非 JSON 体直接哈希原始字节）。
+    /// 计算请求体 SHA-256 摘要（剔除易变字段）
     fn body_digest(body: &[u8]) -> String {
         let normalized = match serde_json::from_slice::<serde_json::Value>(body) {
             Ok(serde_json::Value::Object(mut map)) => {
@@ -174,19 +174,19 @@ impl Request {
     }
 }
 
-/// 一次响应。
+/// 抽象 HTTP 响应
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Response {
-    /// HTTP 状态码。
+    /// HTTP 状态码
     pub status: u16,
-    /// 响应头。
+    /// 响应头列表
     pub headers: Vec<(String, String)>,
-    /// 响应体原始字节。
+    /// 响应体原始字节
     pub body: Vec<u8>,
 }
 
 impl Response {
-    /// 构造响应。
+    /// 创建响应实例
     #[must_use]
     pub fn new(status: u16, body: Vec<u8>) -> Self {
         Self {
@@ -196,7 +196,7 @@ impl Response {
         }
     }
 
-    /// 构造 200 + JSON 响应。
+    /// 创建 200 状态码的 JSON 响应
     #[must_use]
     pub fn json_body(value: &serde_json::Value) -> Self {
         Self {
@@ -206,7 +206,7 @@ impl Response {
         }
     }
 
-    /// 取某个响应头（大小写不敏感）。
+    /// 获取指定响应头（大小写无关）
     #[must_use]
     pub fn header(&self, name: &str) -> Option<&str> {
         self.headers
@@ -215,41 +215,41 @@ impl Response {
             .map(|(_, v)| v.as_str())
     }
 
-    /// 响应体按 UTF-8 解读（有损）。
+    /// 响应体转换为 UTF-8 字符串
     #[must_use]
     pub fn text(&self) -> String {
         String::from_utf8_lossy(&self.body).into_owned()
     }
 
-    /// `ssa-code` 响应头：出现即表示需要行为验证。
+    /// 获取二次行为验证头 ssa-code
     #[must_use]
     pub fn ssa_code(&self) -> Option<&str> {
         self.header("ssa-code").filter(|s| !s.is_empty())
     }
 }
 
-/// 流式抓取的分块接收端。
+/// 流式数据分块接收器
 pub trait ChunkSink: Send {
-    /// 收到响应体长度声明（`Content-Length`），供接收端校验下载是否完整。
+    /// 接收上报的内容总长度（Content-Length）
     fn expected_len(&mut self, _len: Option<u64>) {}
 
-    /// 收到一块数据。
+    /// 写入数据分块
     fn chunk(&mut self, bytes: &[u8]);
 }
 
-/// HTTP 传输实现。
+/// HTTP 传输层抽象特征
 #[async_trait]
 pub trait Transport: Send + Sync + 'static {
-    /// 执行一次请求。
+    /// 执行单次 HTTP 请求
     async fn execute(&self, request: Request) -> Result<Response>;
 
-    /// 流式接收数据块至接收端对象。
+    /// 执行流式传输并写入接收器
     async fn execute_streaming(&self, request: Request, sink: &mut (dyn ChunkSink + Send)) -> Result<()> {
         let response = self.execute(request).await?;
         if !(200..300).contains(&response.status) {
             return Err(Error::Http {
                 status: response.status,
-                // 与 http 实现保持同一条界：上游错误体可能是一整页 HTML。
+                // 截断上游异常响应体
                 body: crate::codec::truncate(&String::from_utf8_lossy(&response.body), 512),
             });
         }

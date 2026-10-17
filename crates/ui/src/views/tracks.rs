@@ -1,4 +1,4 @@
-//! 歌曲列表项共用渲染逻辑：简约淡雅排版、动态翡翠绿声波指示与纯图标交互。
+//! 通用曲目行渲染组件。
 
 use std::sync::Arc;
 
@@ -16,7 +16,7 @@ use crate::theme::{
     TEXT_MUTED, TEXT_PRIMARY, badge, cover_box,
 };
 
-/// 渲染单行歌曲列表项组件（支持当前播放高亮与声波指示）。
+/// 渲染单首曲目行
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn track_row(
     index: usize,
@@ -59,7 +59,7 @@ pub(crate) fn track_row(
                 .update(cx, |shell, cx| shell.play_queue(play_queue.clone(), index, cx))
                 .ok();
         })
-        // 序号列或正在播放声波指示器
+        // 序号或声波指示
         .child(
             div()
                 .w(px(28.0))
@@ -83,7 +83,6 @@ pub(crate) fn track_row(
                     )
                 }),
         )
-        // 封面图
         .child(
             div()
                 .when(is_current, |this| {
@@ -93,7 +92,6 @@ pub(crate) fn track_row(
                 })
                 .child(cover_box(&song.name, 36.0, cx)),
         )
-        // 标题与歌手信息
         .child(
             v_flex()
                 .flex_1()
@@ -129,7 +127,6 @@ pub(crate) fn track_row(
                         .child(SharedString::from(song.singer.as_str())),
                 ),
         )
-        // 时长
         .child(
             div()
                 .w(px(56.0))
@@ -137,7 +134,6 @@ pub(crate) fn track_row(
                 .text_color(TEXT_FAINT)
                 .child(SharedString::from(format_duration(song.duration_ms))),
         )
-        // 收藏按钮
         .child(
             Button::new(("like", index))
                 .ghost()
@@ -157,7 +153,7 @@ pub(crate) fn track_row(
                 }),
         );
 
-    // 移除按钮（当且仅当属于可编辑歌单时展示）
+    // 移除按钮（仅自建歌单可用）
     if let Some((listid, fileid)) = removable {
         let remove_backend = backend.clone();
         row = row.child(

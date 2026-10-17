@@ -1,4 +1,4 @@
-//! 工程维护与辅助自动化任务。
+//! 工程维护任务：依赖审计、接口冒烟与打包发布。
 
 #![forbid(unsafe_code)]
 
@@ -20,11 +20,11 @@ fn main() -> anyhow::Result<()> {
     }
 }
 
-/// 明确禁止引入的非纯 Rust 传输或 TLS 依赖项。
+/// 禁止引入的非纯 Rust TLS 依赖
 const BANNED: &[&str] = &["native-tls", "openssl", "openssl-sys"];
-/// 允许引入的非 Rust 底层密码学或编译辅助依赖。
+/// 允许引入的非纯 Rust 密码学依赖
 const KNOWN_NON_RUST: &[&str] = &["ring", "aws-lc-sys", "aws-lc-rs", "cc", "blake3"];
-/// 纯 Rust 实现的系统底层接口绑定库。
+/// 纯 Rust 系统接口绑定
 const SYSTEM_BINDINGS: &[&str] = &[
     "windows",
     "windows-sys",
@@ -36,7 +36,7 @@ const SYSTEM_BINDINGS: &[&str] = &[
     "security-framework-sys",
 ];
 
-/// 依赖分类审计统计结果。
+/// 依赖审计结果
 #[derive(Debug, Default, PartialEq, Eq)]
 struct Report {
     total: usize,
@@ -46,13 +46,13 @@ struct Report {
 }
 
 impl Report {
-    /// 校验依赖清单是否符合合规要求。
+    /// 校验是否合规（无禁用依赖）
     fn is_ok(&self) -> bool {
         self.banned.is_empty()
     }
 }
 
-/// 提取分类归并依赖包列表。
+/// 对依赖进行分类统计
 fn classify(crates: &[String]) -> Report {
     let hit = |names: &[&str]| -> Vec<String> {
         let mut found: Vec<String> = crates
@@ -72,7 +72,7 @@ fn classify(crates: &[String]) -> Report {
     }
 }
 
-/// 执行依赖合规性静态审计。
+/// 执行依赖静态审计
 fn audit() -> anyhow::Result<()> {
     let output = Command::new(env!("CARGO"))
         .args(["tree", "--edges", "normal", "--prefix", "none", "--workspace"])
@@ -109,7 +109,7 @@ fn audit() -> anyhow::Result<()> {
     }
 
     if report.system_bindings.iter().any(|name| name == "schannel") {
-        // 查证引入 Schannel 的直接父级依赖。
+        // 核查 schannel 的依赖来源
         let who = Command::new(env!("CARGO"))
             .args(["tree", "-i", "schannel", "--edges", "normal", "--prefix", "none"])
             .output()?;
@@ -129,7 +129,7 @@ fn audit() -> anyhow::Result<()> {
         "依赖树里出现了被禁用的 C 实现：{:?}。请检查 TLS 后端是否被改成 native-tls / OpenSSL。",
         report.banned
     );
-    // 确保 keyring 启用了 windows-native 后端以正常持久化登录凭据。
+    // 确保 keyring 启用 windows-native 后端
     let features = Command::new(env!("CARGO"))
         .args(["tree", "-e", "features", "-i", "keyring", "--prefix", "none"])
         .output()?;
@@ -144,8 +144,7 @@ fn audit() -> anyhow::Result<()> {
     Ok(())
 }
 
-/// 上游接口存活状态探测。
-/// 输出统计型端点探测结果，空列表记录为告警。
+/// 上报列表型端点结果
 fn report_count(warnings: &mut Vec<&'static str>, name: &'static str, count: usize) {
     if count == 0 {
         println!("  ⚠️ {name:<34} 0 条");
@@ -155,7 +154,7 @@ fn report_count(warnings: &mut Vec<&'static str>, name: &'static str, count: usi
     }
 }
 
-/// 打印失败的端点并登记到失败列表。
+/// 记录失败端点
 fn report_error(failures: &mut Vec<&'static str>, name: &'static str, error: &impl std::fmt::Display) {
     println!("  ❌ {name:<34} {error}");
     failures.push(name);
@@ -184,7 +183,7 @@ fn smoke() -> anyhow::Result<()> {
             Ok(dfid) => println!(
                 "  ✅ {:<34} dfid={}",
                 "/risk/v2/r_register_dev",
-                // 截取前八位字符打印指纹。
+                // 打印前 8 位指纹
                 dfid.chars().take(8).collect::<String>()
             ),
             Err(error) => report_error(&mut failures, "/risk/v2/r_register_dev", &error),
@@ -229,7 +228,7 @@ fn smoke() -> anyhow::Result<()> {
     })
 }
 
-/// 本地构建与打包 Windows 安装包。
+/// 构建与打包 Windows 安装程序
 fn package() -> anyhow::Result<()> {
     println!("📦 开始构建 Release 二进制...");
     let status = Command::new(env!("CARGO"))
@@ -245,10 +244,10 @@ fn package() -> anyhow::Result<()> {
 
     println!("✅ Release 二进制构建完成: {}", exe_src.display());
 
-    // 提取统一的工作区版本号。
+    // 获取工作区版本号
     let version = env!("CARGO_PKG_VERSION");
 
-    // 生成绿色免安装压缩包
+    // 生成便携版压缩包
     let zip_dest = dist_dir.join(format!("Lyra-v{version}-windows-x64-portable.zip"));
     let tar_status = Command::new("tar")
         .args([
@@ -263,12 +262,12 @@ fn package() -> anyhow::Result<()> {
         .status();
     match tar_status {
         Ok(status) if status.success() => println!("✅ 绿色便携包生成完成: {}", zip_dest.display()),
-        // 捕获压缩归档异常退出状态。
+        // 检查归档退出码
         Ok(status) => println!("⚠️  tar 退出码 {status}，便携包可能未生成: {}", zip_dest.display()),
         Err(error) => println!("⚠️  无法执行 tar（{error}），已跳过便携包: {}", zip_dest.display()),
     }
 
-    // 寻找 Inno Setup 编译器 ISCC.exe
+    // 寻找 Inno Setup 编译器 ISCC
     let iscc_paths = [
         "iscc",
         "ISCC.exe",
@@ -334,7 +333,7 @@ mod tests {
 
     #[test]
     fn schannel_alone_is_accepted_because_it_only_reads_the_cert_store() {
-        // 验证允许 schannel 仅用于系统根证书枚举。
+        // 验证允许 schannel 用于系统证书枚举
         assert!(classify(&names(&["schannel", "rustls-native-certs", "ring"])).is_ok());
         assert!(!classify(&names(&["schannel", "native-tls"])).is_ok());
     }

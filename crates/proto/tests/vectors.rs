@@ -1,4 +1,4 @@
-//! 协议黄金向量契约测试（逐字节对齐 JS 参考实现）。
+//! 黄金向量测试（对齐逆向参考实现）。
 
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
@@ -53,7 +53,7 @@ fn signature_web_with_body() {
 
 #[test]
 fn signature_android_with_astral_keyword() {
-    // 包含中文与特殊字符时的 UTF-16 排序与拼接验证
+    // 包含中文与 Emoji 时的排序与拼接验证
     let mut p = Params::new();
     p.set("keyword", "周杰伦 🎵")
         .set("page", 1)
@@ -80,7 +80,7 @@ fn signature_android_renders_object_values_as_json() {
 
 #[test]
 fn aes_derived_matches_reference() {
-    // 派生密钥 AES 加密一致性测试
+    // 派生密钥 AES 加密一致性
     let plain = r#"{"mobile":"13800138000","code":"123456"}"#;
     let hex = cipher::aes_encrypt_with_key_iv_derived(plain, "abcdefghijklmnop").unwrap();
     assert_eq!(
@@ -133,7 +133,7 @@ fn cloudlist_body_matches_reference() {
 
 #[test]
 fn rsa_raw_matches_reference_byte_for_byte() {
-    // 校验无填充 RSA 模幂加密的一致性（用于 song_url_auth 的 pk 字段）
+    // 无填充 RSA 模幂加密（用于 song_url_auth 的 pk 字段）
     let hex = cipher::rsa_raw_encrypt_hex(
         br#"{"token":"T","clienttime":1750000000}"#,
         lyra_proto::consts::RSA_PUBLIC,
@@ -147,7 +147,7 @@ fn rsa_raw_matches_reference_byte_for_byte() {
 
 #[test]
 fn pem_keys_are_pinned_by_hash() {
-    // 校验公钥文件内容的 SHA-256 哈希值，防止公钥被误替换
+    // 校验公钥指纹，防误替换
     assert_eq!(
         cipher::sha256_hex(lyra_proto::consts::RSA_PUBLIC.as_bytes()),
         "294df941e0bea5640abbcc24842d3a8d082c7d15169da587432e8cc6eec697fc"
@@ -160,7 +160,7 @@ fn pem_keys_are_pinned_by_hash() {
 
 #[test]
 fn each_key_has_the_modulus_size_its_padding_path_needs() {
-    // 校验各公钥模长与填充模式的字节要求
+    // 校验公钥模长与填充格式
     assert_eq!(
         cipher::rsa_raw_encrypt_hex(b"{}", lyra_proto::consts::RSA_PUBLIC)
             .unwrap()
@@ -170,7 +170,7 @@ fn each_key_has_the_modulus_size_its_padding_path_needs() {
     );
     let sid = cipher::rsa_oaep_sha256_base64(b"k", lyra_proto::consts::FP_RSA_PUBLIC).unwrap();
     assert_eq!(cipher::base64_decode(&sid).unwrap().len(), 256, "指纹公钥是 2048 位");
-    // 校验 PKCS#1 v1.5 与无填充加密输出差异
+    // PKCS#1 v1.5 与无填充模幂对比
     let pkcs1 = cipher::rsa_pkcs1_encrypt_hex(b"{}", lyra_proto::consts::RSA_PUBLIC).unwrap();
     assert_eq!(pkcs1.len(), 256);
     assert_ne!(
@@ -218,7 +218,7 @@ fn fingerprint_sid_and_edt_match_reference() {
     )
     .unwrap();
     assert_eq!(sim.edt, GOLDEN_EDT.trim_end());
-    // SID 使用随机填充，校验其输出长度与 Base64 解码有效性
+    // 校验 SID 长度与 Base64 解码
     assert_eq!(sim.sid.len(), GOLDEN_SID.trim_end().len());
     assert!(cipher::base64_decode(&sim.sid).is_ok());
     assert_eq!(cipher::base64_decode(&sim.sid).unwrap().len(), 256, "2048-bit 密钥");

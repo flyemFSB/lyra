@@ -20,7 +20,7 @@ authors      = ["lyra contributors"]
 repository   = "https://github.com/flyemFSB/lyra"
 
 [workspace.dependencies]
-# 内部 crate（依赖方向：proto <- api <- app <- ui <- desktop）
+# 内部 crate（依赖链：proto <- api <- app <- ui <- desktop）
 lyra-proto = { path = "crates/proto" }
 lyra-api   = { path = "crates/api" }
 lyra-store = { path = "crates/store" }
@@ -28,15 +28,10 @@ lyra-audio = { path = "crates/audio" }
 lyra-app   = { path = "crates/app" }
 lyra-ui    = { path = "crates/ui" }
 
-# ---- UI：版本由 gpui-kit 传递 pin ----
-# 不再在这里重复声明 gpui / gpui_platform / gpui_macros / reqwest_client：
-# 全仓只通过 `gpui-kit` 门面使用 GPUI（`use gpui_kit::*`），那四个条目没有任何 crate 依赖，
-# 只是悬空的旧声明（方案风险 R3 的「整组 pin」实际上由 gpui-kit 0.7.3 → gpui-pre =0.3.9 保证）。
-# 注意 gpui-kit 0.7.3 **没有** component/base 这两个 feature：
-# component 与 assets 就是它的 default，写 features = ["component","base"] 会解析失败。
+# UI 统一通过 gpui-kit 门面访问 GPUI
 gpui-kit       = "0.7.3"
 
-# 协议原语（全部 RustCrypto / 纯 Rust）
+# 密码学与编解码原语
 md-5       = "0.10"
 sha2       = "0.10"
 aes        = "0.8"
@@ -48,19 +43,16 @@ hex        = "0.4"
 flate2     = "1"
 rand       = "0.8"
 
-# 音频
-# 只解 FLAC / MP3 / OGG-Vorbis / WAV / AAC：关掉默认的 adpcm 与 mkv 后端
+# 音频解码与播放（按需启用 FLAC/MP3/Vorbis/WAV/AAC）
 symphonia = { version = "0.5", default-features = false, features = ["flac", "mp3", "vorbis", "ogg", "wav", "aac", "isomp4", "pcm"] }
 cpal      = "0.16"
 rubato    = "0.15"
 ringbuf   = "0.4"
 
-# 数据 / 通用
+# 通用依赖
 serde              = { version = "1", features = ["derive"] }
-# preserve_order 必须显式打开：默认 BTreeMap 会重排键，与 JS 的 JSON.stringify 不一致；
-# 而 gpui-pre 也开了这个 feature，不显式声明会让"是否有 UI 依赖"改变序列化结果
+# 保持键顺序，对齐逆向协议中的 JSON 序列化行为
 serde_json         = { version = "1", features = ["preserve_order"] }
-# moka 0.12 必须显式选 sync/future 之一，默认两者都没开
 moka               = { version = "0.12", features = ["sync"] }
 redb               = "2"
 dashmap            = "6"
@@ -73,13 +65,12 @@ async-trait        = "0.1"
 parking_lot        = "0.12"
 crossbeam-channel  = "0.5"
 async-channel      = "2"
-# keyring 3.x 没有 default feature：不显式选后端时，Windows 上会**静默**回退到进程内 mock
-# （`set` 返回 Ok、换进程就取不到）—— 登录态看似写成功却从未落盘。xtask audit 会钉死这一项。
+# 显式使用 Windows 原生凭据管理器，保证跨进程持久化
 keyring            = { version = "3", features = ["windows-native"] }
 url                = "2"
 reqwest            = { version = "0.12", default-features = false, features = ["rustls-tls-native-roots", "http2", "json", "charset"] }
 
-# 仅测试用
+# 测试依赖
 tempfile = "3"
 hound    = "3"
 
@@ -96,27 +87,19 @@ expect_used  = "warn"
 todo         = "deny"
 dbg_macro    = "deny"
 
-# pedantic 里对本项目**系统性无价值**的几条，逐条说明理由后关闭。
-# 其余 pedantic 规则保持 warn —— 关一个写一个，不做整组降级。
-#
-# 错误语义统一写在 Error 枚举与模块文档上；给 ~90 个内部函数各写一段
-# `# Errors` 只是把同一句话抄 90 遍。
+# 忽略无实际收益的 pedantic 规则，保持代码简洁
 missing_errors_doc = "allow"
 missing_panics_doc = "allow"
-# 本 crate 大量数值是**照抄 JS 行为**（md5 的 hex 当 UTF-8 用、按位取索引、
-# 毫秒/秒互转）。改写成 From/try_into 反而会掩盖"这里就是要有损"的意图，
-# 而且算术正确性由 crates/proto/tests/vectors.rs 的黄金向量逐字节守住。
+# 协议计算需与逆向 JS/原端行为一致，允许数值有损转换
 cast_possible_truncation = "allow"
 cast_sign_loss = "allow"
 cast_precision_loss = "allow"
 cast_possible_wrap = "allow"
 cast_lossless = "allow"
-# 协议常量（appid、时间戳、盐值）加分隔符反而更难和抓包结果对照
+# 协议常量保持原样以便与抓包结果核对
 unreadable_literal = "allow"
-# 中文文档里夹英文标识符，反引号规则收益很低
 doc_markdown = "allow"
 must_use_candidate = "allow"
-# 只是要求把 assert!(!x.is_empty()) 换个写法，不改变任何语义
 assert_is_empty = "allow"
 struct_excessive_bools = "allow"
 too_many_lines = "allow"

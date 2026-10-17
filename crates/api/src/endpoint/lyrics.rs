@@ -1,4 +1,4 @@
-//! 歌词检索与解析端点，支持两阶段取词及 LRC/KRC 格式解析。
+//! 歌词检索与解析端点。
 
 use lyra_proto::krc_decode_base64;
 
@@ -9,18 +9,18 @@ use crate::model::{LyricLine, Song};
 use crate::spec::LYRICS_BASE;
 use crate::spec::RequestSpec;
 
-/// 歌词候选的定位信息。
+/// 歌词候选引用凭据
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct LyricRef {
-    /// 歌词 id。
+    /// 歌词 ID
     pub id: String,
-    /// accesskey。
+    /// 访问密钥（accesskey）
     pub accesskey: String,
 }
 
-/// 第一阶段：根据音频特征搜索歌词候选并提取首个匹配项。
+/// 第一阶段：搜索歌曲匹配的歌词候选
 pub async fn search_lyric(api: &Api, hash: &str, duration_ms: u64, album_audio_id: &str) -> Result<LyricRef> {
-    // 歌词搜索使用自定义参数集并计算防篡改签名。
+    // 歌词搜索使用独立签名参数集
     let spec = RequestSpec::get("/v1/search")
         .base(LYRICS_BASE)
         .clear_default_params()
@@ -47,7 +47,7 @@ pub async fn search_lyric(api: &Api, hash: &str, duration_ms: u64, album_audio_i
     })
 }
 
-/// 第二阶段：根据歌词标识下载原始内容并解密。
+/// 第二阶段：下载并解密指定歌词内容
 pub async fn download_lyric(api: &Api, reference: &LyricRef, fmt: &str) -> Result<String> {
     let spec = RequestSpec::get("/download")
         .base(LYRICS_BASE)
@@ -70,31 +70,31 @@ pub async fn download_lyric(api: &Api, reference: &LyricRef, fmt: &str) -> Resul
     krc_decode_base64(&content).map_err(Error::from)
 }
 
-/// 获取指定歌曲的结构化逐行歌词。
+/// 获取并解析指定歌曲的结构化歌词
 pub async fn lyric_for_song(api: &Api, song: &Song) -> Result<Vec<LyricLine>> {
     let reference = search_lyric(api, &song.hash, song.duration_ms, &song.album_audio_id).await?;
     let text = download_lyric(api, &reference, "krc").await?;
     Ok(parse_lyrics(&text))
 }
 
-/// 解析 LRC 与 KRC 文本为时间序列歌词行列表。
+/// 解析 LRC 与 KRC 歌词文本为时间序列列表
 #[must_use]
 pub fn parse_lyrics(text: &str) -> Vec<LyricLine> {
     let mut lines = Vec::new();
     for raw in text.lines() {
         let mut body = raw.trim();
         let mut stamps: Vec<u64> = Vec::new();
-        // 一行可以挂多个时间标签（如重复副歌 `[00:12][01:30]`），每个标签都要生成一行。
+        // 单行多时间戳展开为独立歌词行
         while let Some(tail) = body.strip_prefix('[') {
             let Some((head, after)) = tail.split_once(']') else {
                 break;
             };
-            // 以字母开头的是元数据头（`[ti:]` / `[ar:]`），整行跳过。
+            // 跳过元数据标签
             if head.chars().take(2).any(|c| c.is_ascii_alphabetic()) {
                 stamps.clear();
                 break;
             }
-            // KRC 头形如 `start,duration`，每行只有一个标签。
+            // 解析 KRC 标签
             let is_krc = head.contains(',');
             let time_ms = if is_krc {
                 head.split(',')
@@ -124,7 +124,7 @@ pub fn parse_lyrics(text: &str) -> Vec<LyricLine> {
     lines
 }
 
-/// `mm:ss.xx` / `mm:ss:xx` → 毫秒。
+/// 解析 LRC 时间标签为毫秒时间戳
 fn parse_lrc_time(head: &str) -> u64 {
     let mut parts = head.split(':');
     let minutes = parts.next().and_then(|v| v.trim().parse::<u64>().ok()).unwrap_or(0);
@@ -145,7 +145,7 @@ fn parse_lrc_time(head: &str) -> u64 {
     minutes * 60_000 + seconds * 1000 + millis
 }
 
-/// 去掉 KRC 的 `<...>` 标签。
+/// 剔除 KRC 字级逐字高亮标签
 fn strip_krc_tags(body: &str) -> String {
     let mut out = String::with_capacity(body.len());
     let mut depth = 0_u32;

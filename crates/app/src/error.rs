@@ -67,5 +67,5 @@ impl From<std::io::Error> for Error {
     }
 }
 
-/// 结果别名。
+/// 应用层 Result 类型别名
 pub type Result<T> = std::result::Result<T, Error>;

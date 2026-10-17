@@ -1,4 +1,4 @@
-//! 应用层集成测试：基于 MockTransport 验证端到端业务流。
+//! 应用层集成测试：基于 MockTransport 验证端到端业务流
 
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
@@ -7,7 +7,7 @@ use std::sync::Arc;
 use lyra_api::transport::{MockTransport, Response};
 use lyra_app::{Kugou, PlayMode};
 
-/// 构造测试登录响应桩。
+// 构造测试登录响应桩
 fn login_stub(mock: &MockTransport) {
     mock.on_json(
         "/v7/login_by_verifycode",
@@ -18,7 +18,7 @@ fn login_stub(mock: &MockTransport) {
     );
 }
 
-/// 构造测试歌单与歌曲列表响应桩。
+// 构造测试歌单与歌曲列表响应桩
 fn library_stubs(mock: &MockTransport) {
     mock.on_json(
         "/v7/get_all_list",
@@ -35,7 +35,7 @@ fn library_stubs(mock: &MockTransport) {
     );
 }
 
-/// 构造测试音质权益与播放直链响应桩。
+// 构造测试音质权益与播放直链响应桩
 fn playback_stubs(mock: &MockTransport) {
     mock.on_json(
         "/v2/get_res_privilege/lite",
@@ -59,7 +59,7 @@ fn playback_stubs(mock: &MockTransport) {
     );
 }
 
-/// 创建装配测试桩的应用门面与临时目录。
+// 创建装配测试桩的应用门面与临时目录
 fn app(mock: Arc<MockTransport>) -> (Kugou, tempfile::TempDir) {
     let dir = tempfile::tempdir().unwrap();
     let store = lyra_store::open_temp_with_secrets(Box::new(lyra_store::MemorySecrets::new())).unwrap();
@@ -75,27 +75,27 @@ async fn full_flow_login_playlists_tracks_song_url() {
     playback_stubs(&mock);
     let (app, _dir) = app(mock.clone());
 
-    // 未登录时访问受限且不触发网络请求。
+    // 未登录时访问受限且不发出请求
     assert!(app.playlists().await.is_err());
     assert_eq!(mock.count(), 0, "未登录不应发请求");
 
-    // 执行短信登录。
+    // 执行短信登录
     let account = app.login("13800138000", "123456").await.unwrap();
     assert_eq!(account.userid, 2_043_841_403);
     assert!(app.is_logged_in());
 
-    // 验证敏感令牌已安全持久化并可往返读取。
+    // 验证令牌持久化成功
     let persisted = app.store().account().unwrap().expect("账号应已落盘");
     assert_eq!(persisted.token, "TOKEN-ABC");
     assert_eq!(persisted.vip_token, "VT");
 
-    // 获取歌单列表。
+    // 获取歌单列表
     let lists = app.playlists().await.unwrap();
     assert_eq!(lists.len(), 1);
     assert!(lists[0].is_liked());
     assert_eq!(lists[0].global_collection_id, "gcid-2");
 
-    // 获取歌单歌曲列表。
+    // 获取歌单歌曲列表
     let page = app.tracks(&lists[0].global_collection_id, 1).await.unwrap();
     assert_eq!(page.items.len(), 1);
     assert_eq!(page.items[0].name, "夜曲");
@@ -103,7 +103,7 @@ async fn full_flow_login_playlists_tracks_song_url() {
     assert_eq!(page.items[0].duration_ms, 226_000);
     assert_eq!(page.items[0].fileid, 7);
 
-    // 获取播放直链并校验音质选择逻辑。
+    // 获取播放直链并校验音质选择
     let url = app.song_url(&page.items[0], "").await.unwrap();
     assert_eq!(url.ext, "flac");
     assert_eq!(url.ext_or_guess(), "flac");
@@ -115,7 +115,7 @@ async fn full_flow_login_playlists_tracks_song_url() {
         Some("flac")
     );
 
-    // 校验请求携带授权票据与签名密钥。
+    // 校验请求携带授权票据与签名密钥
     let request = mock.last_request().unwrap();
     let get = |key: &str| request.query.iter().find(|(k, _)| k == key).map(|(_, v)| v.clone());
     assert_eq!(get("auth").unwrap(), "AUTH-TICKET");
@@ -133,7 +133,7 @@ async fn quality_falls_back_when_the_preferred_one_is_locked() {
     app.login("13800138000", "123456").await.unwrap();
     let song = app.tracks("gcid-2", 1).await.unwrap().items.remove(0);
 
-    // 请求未开放音质时应自动回落至最佳可用音质。
+    // 请求未开放音质时回落至最佳可用音质
     let url = app.song_url(&song, "viper_tape").await.unwrap();
     assert_eq!(url.ext, "flac");
     let request = mock.last_request().unwrap();
@@ -170,7 +170,7 @@ async fn upstream_business_error_surfaces_instead_of_panicking() {
 #[tokio::test(start_paused = true)]
 async fn device_registration_retries_while_upstream_returns_empty_data() {
     let mock = Arc::new(MockTransport::new());
-    // 模拟上游返回空数据触发重试机制。
+    // 模拟上游返回空数据触发重试机制
     mock.on(
         "/risk/v2/r_register_dev",
         Response::new(200, br#"{"status":1,"error_code":0,"data":[]}"#.to_vec()),
@@ -196,7 +196,7 @@ async fn device_identity_is_generated_once_and_reused() {
     let guid = first.session().device.guid.clone();
     drop(first);
 
-    // 重启数据库验证设备身份标识保持不变。
+    // 重启数据库验证设备身份标识保持不变
     let second = {
         let store =
             lyra_store::open_with_secrets(path.join("lyra.redb"), Box::new(lyra_store::MemorySecrets::new())).unwrap();
@@ -206,7 +206,7 @@ async fn device_identity_is_generated_once_and_reused() {
     assert_eq!(second.session().device.guid, guid);
 }
 
-/// 创建已带 dfid 的应用门面：跳过前置的设备注册请求，让 `last_request` 就是待断言的那一次。
+// 创建预置 dfid 的应用门面，跳过设备注册阶段
 fn registered_app(mock: Arc<MockTransport>) -> (Kugou, tempfile::TempDir) {
     let dir = tempfile::tempdir().unwrap();
     let store = lyra_store::open_temp_with_secrets(Box::new(lyra_store::MemorySecrets::new())).unwrap();
@@ -219,7 +219,7 @@ fn registered_app(mock: Arc<MockTransport>) -> (Kugou, tempfile::TempDir) {
     (app, dir)
 }
 
-/// 断言发往 `path` 的请求体中，外层号码掩码按 trim 后的号码计算。
+// 校验请求体中的外层手机号掩码按裁剪后的号码生成
 fn assert_body_mobile(mock: &MockTransport, path: &str) {
     let request = mock
         .requests()
@@ -254,7 +254,7 @@ async fn login_trims_pasted_whitespace_before_encrypting_the_credentials() {
     assert_body_mobile(&mock, "/v7/login_by_verifycode");
 }
 
-/// 播放模式必须跨启动沿用（旧实现每次开机都回到列表循环）。
+// 验证播放模式支持跨启动持久化
 #[tokio::test]
 async fn play_mode_survives_a_restart() {
     let mock = Arc::new(MockTransport::new());
@@ -272,7 +272,7 @@ async fn play_mode_survives_a_restart() {
         .unwrap();
     }
 
-    // 重开客户端（同一数据目录）：模式必须是上次选的随机播放。
+    // 重启后保持上次配置的播放模式
     let reopened = Kugou::with_transport(
         mock,
         lyra_store::open_with_secrets(&path, Box::new(lyra_store::MemorySecrets::new())).unwrap(),

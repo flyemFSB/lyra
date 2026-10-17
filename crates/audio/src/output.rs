@@ -1,4 +1,4 @@
-//! 音频输出层：基于 cpal 构建实时音频流，在回调中执行无锁出队与格式转换。
+//! 音频输出层：基于 cpal 构建输出流并在实时回调中出队。
 
 use std::sync::Arc;
 
@@ -10,13 +10,13 @@ use crate::Error;
 use crate::ring;
 use crate::state::Shared;
 
-/// 从 `Option` 取出环形缓冲消费者。
+/// 取出消费者句柄
 fn take_cons(cons: &mut Option<HeapCons<f32>>) -> Result<HeapCons<f32>, Error> {
     cons.take()
         .ok_or_else(|| Error::BuildStream("环形缓冲消费者已被占用".into()))
 }
 
-/// 按设备采样格式构建一个 `T` 类型的输出流。
+/// 构建强类型输出流
 fn build_typed<T>(
     device: &cpal::Device,
     config: &StreamConfig,
@@ -31,14 +31,14 @@ where
         .build_output_stream(
             config,
             move |data: &mut [T], _info| {
-                // 处理重定位刷新信号，清空环形缓冲残留音频
+                // 响应刷新请求，清空残留音频
                 if shared.take_flush_request() {
                     ring::drain(&mut cons);
                 }
                 if shared.is_playing() {
                     ring::fill_output(&mut cons, shared.volume(), data);
                 } else {
-                    // 暂停或停止状态写入静音样本，不消耗缓冲队列数据
+                    // 非播放状态填充静音，不消耗队列
                     for slot in data.iter_mut() {
                         *slot = T::from_sample(0.0);
                     }
@@ -50,7 +50,7 @@ where
         .map_err(|e| Error::BuildStream(e.to_string()))
 }
 
-/// 根据设备采样格式分派具体样本类型并构建输出流。
+/// 按采样格式构建输出流
 pub(crate) fn build_stream(
     device: &cpal::Device,
     config: &StreamConfig,
@@ -78,7 +78,7 @@ pub(crate) fn build_stream(
     }
 }
 
-/// 启动音频输出流。
+/// 启动音频输出流
 pub(crate) fn start(stream: &Stream) -> Result<(), Error> {
     stream.play().map_err(|e| Error::PlayStream(e.to_string()))
 }

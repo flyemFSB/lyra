@@ -17,12 +17,12 @@ pub enum Error {
     /// 加密 / 解密失败。
     #[error("crypto failed: {0}")]
     Crypto(String),
-    /// 明文超过 RSA 密钥长度。
+    /// 明文超过 RSA 模长
     #[error("plaintext of {len} bytes exceeds the {key_bytes}-byte RSA modulus")]
     PayloadTooLong {
-        /// 明文长度。
+        /// 明文长度
         len: usize,
-        /// 密钥模长的字节数。
+        /// 密钥模长字节数
         key_bytes: usize,
     },
     /// 解压失败。
@@ -30,5 +30,5 @@ pub enum Error {
     Inflate(String),
 }
 
-/// 协议层 Result 别名。
+/// 协议层 Result 别名
 pub type Result<T> = std::result::Result<T, Error>;

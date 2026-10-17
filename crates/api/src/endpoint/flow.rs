@@ -1,4 +1,4 @@
-//! 推荐流业务端点，涵盖每日推荐、私人电台、首页发现及卡片流。
+//! 推荐流业务端点。
 
 use lyra_proto::consts::{APPID, CLIENTVER};
 use lyra_proto::sign_params_key;
@@ -12,10 +12,10 @@ use crate::model::{Page, Song};
 use crate::spec::RequestSpec;
 use crate::spec::now_millis;
 
-/// 首页发现端点专属客户端版本号。
+/// 首页发现接口客户端版本号
 pub const DISCOVER_CLIENTVER: u32 = 20_809;
 
-/// 获取每日个性化推荐歌曲列表。
+/// 获取每日推荐歌曲列表
 pub async fn daily(api: &Api, platform: &str) -> Result<Page<Song>> {
     let body = serde_json::json!({
         "platform": if platform.is_empty() { "android" } else { platform },
@@ -28,7 +28,7 @@ pub async fn daily(api: &Api, platform: &str) -> Result<Page<Song>> {
     Ok(Page::single(songs_of(&value)))
 }
 
-/// 获取私人电台歌曲，支持通过游标分页拉取。
+/// 分页获取私人 FM 电台歌曲
 pub async fn personal_fm(
     api: &Api,
     action: &str,
@@ -86,7 +86,7 @@ pub async fn personal_fm(
     })
 }
 
-/// 获取首页发现推荐流歌曲。
+/// 获取首页发现推荐歌曲
 pub async fn home_discover(api: &Api, pagesize: u32, today_play_num: u32) -> Result<Page<Song>> {
     let userid = api.session().userid();
     let body = serde_json::json!({
@@ -113,7 +113,7 @@ pub async fn home_discover(api: &Api, pagesize: u32, today_play_num: u32) -> Res
     Ok(Page::single(songs_of(&value)))
 }
 
-/// 获取特定卡片分类的推荐歌曲。
+/// 获取场景卡片推荐歌曲
 pub async fn card(api: &Api, card_id: u32, pagesize: u32) -> Result<Page<Song>> {
     let body = serde_json::json!({
         "tagid": "",
@@ -133,7 +133,7 @@ pub async fn card(api: &Api, card_id: u32, pagesize: u32) -> Result<Page<Song>> 
     Ok(Page::single(songs_of(&value)))
 }
 
-/// 统一从响应体多变字段中提取歌曲列表。
+/// 从响应体多变结构中解析歌曲列表
 fn songs_of(value: &Value) -> Vec<Song> {
     codec::find_array(value, &["song_list", "songs", "items", "list", "data"])
         .map(|items| Song::list_from(items))

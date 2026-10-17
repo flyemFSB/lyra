@@ -1,4 +1,4 @@
-//! 电台与分类目录端点，支持获取分类列表、推荐频道及频道歌曲。
+//! 电台与分类目录端点。
 
 use lyra_proto::consts::{APPID, CLIENTVER};
 use lyra_proto::sign_params_key;
@@ -13,7 +13,7 @@ use crate::spec::now_millis;
 
 const FM_ROUTER: &str = "fm.service.kugou.com";
 
-/// 获取电台全部分类与各分类下的频道。
+/// 获取电台全部分类及其频道列表
 pub async fn fm_classes(api: &Api) -> Result<Vec<StationClass>> {
     let session = api.session();
     let date_time = now_millis();
@@ -37,7 +37,7 @@ pub async fn fm_classes(api: &Api) -> Result<Vec<StationClass>> {
         .unwrap_or_default())
 }
 
-/// 获取系统推荐电台频道列表。
+/// 获取系统推荐电台频道列表
 pub async fn fm_recommend(api: &Api) -> Result<Vec<Station>> {
     let session = api.session();
     let date_time = now_millis();
@@ -62,7 +62,7 @@ pub async fn fm_recommend(api: &Api) -> Result<Vec<Station>> {
         .unwrap_or_default())
 }
 
-/// 分页获取指定电台频道下的歌曲列表。
+/// 分页获取指定电台频道歌曲
 pub async fn fm_songs(api: &Api, fmid: &str, fmtype: u32, offset: i64, size: u32) -> Result<Vec<Song>> {
     let session = api.session();
     let date_time = now_millis();
@@ -96,7 +96,7 @@ pub async fn fm_songs(api: &Api, fmid: &str, fmtype: u32, offset: i64, size: u32
         .header("x-router", FM_ROUTER)
         .header("Content-Type", "application/json");
     let value = api.call(spec, Freshness::CATALOG).await?;
-    // 嵌套结构优先匹配 songs/song_list 字段提取歌曲数组。
+    // 提取歌曲数组
     Ok(codec::find_array(&value, &["songs", "song_list"])
         .map(|items| Song::list_from(items))
         .unwrap_or_default())

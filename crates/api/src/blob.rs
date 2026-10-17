@@ -15,18 +15,18 @@ use parking_lot::{Condvar, Mutex};
 use crate::error::{Error, Result};
 use crate::transport::{ChunkSink, Method, Request, Transport};
 
-/// 多久没有收到新字节就判定下载已停滞（CDN 建连后再也不发数据时不会自行报错）。
+/// 数据流停滞超时阈值（30 秒未收到数据判定为停滞）
 const STALL_TIMEOUT: Duration = Duration::from_secs(30);
 
-/// 下载进度与完成状态。
+/// 下载进度与完成状态
 #[derive(Debug)]
 struct Progress {
     downloaded: AtomicU64,
     complete: AtomicBool,
     error: Mutex<Option<String>>,
-    /// 最后一次收到新字节的时间，用于识别停滞。
+    /// 最近接收数据的时间戳
     last_byte_at: Mutex<Instant>,
-    /// 伴随条件变量用于通知新数据写入。
+    /// 数据写入通知锁与条件变量
     gate: Mutex<()>,
     cond: Condvar,
 }
@@ -47,18 +47,18 @@ impl Progress {
         self.cond.notify_all();
     }
 
-    /// 收到新字节：推进「最后活跃时间」。
+    /// 刷新最后活跃时间
     fn touch(&self) {
         *self.last_byte_at.lock() = Instant::now();
     }
 
-    /// 是否已经长时间没有任何新字节。
+    /// 检查下载是否长时间停滞
     fn stalled(&self) -> bool {
         self.last_byte_at.lock().elapsed() >= STALL_TIMEOUT
     }
 }
 
-/// 在途下载收尾守卫，负责注销登记并唤醒等待的读取端。
+/// 在途下载收尾守卫
 struct InflightGuard {
     cache: BlobCache,
     flight_key: String,
@@ -68,7 +68,7 @@ struct InflightGuard {
 
 impl Drop for InflightGuard {
     fn drop(&mut self) {
-        // 先注销登记再标记完成，避免与新发起的同名下载产生文件清理竞争。
+        // 先注销在途登记再标记完成，避免同名文件竞争
         self.cache.inflight.remove(&self.flight_key);
         if !self.finished {
             self.progress
@@ -81,7 +81,7 @@ impl Drop for InflightGuard {
     }
 }
 
-/// 「正在增长的文件」视图，实现了 `Read + Seek`。
+/// 边下边播文件流（实现 Read 与 Seek）
 #[derive(Debug)]
 pub struct GrowingFile {
     file: std::fs::File,
@@ -90,23 +90,23 @@ pub struct GrowingFile {
 }
 
 impl GrowingFile {
-    /// 当前已落盘字节数。
+    /// 当前已落盘字节数
     #[must_use]
     pub fn downloaded(&self) -> u64 {
         self.progress.downloaded.load(Ordering::Acquire)
     }
 
-    /// 下载是否已结束（成功或失败）。
+    /// 下载是否已结束（成功或失败）
     #[must_use]
     pub fn is_complete(&self) -> bool {
         self.progress.complete.load(Ordering::Acquire)
     }
 
-    /// 等待读到至少 `wanted` 字节，或下载结束；停滞超时则报 `TimedOut`。
+    /// 等待数据流到达指定字节数
     fn wait_for(&self, wanted: u64) -> std::io::Result<()> {
         while self.downloaded() < wanted && !self.is_complete() {
             let mut gate = self.progress.gate.lock();
-            // 超时等待防止丢唤醒导致死锁。
+            // 轮询并等待数据写入通知
             self.progress.cond.wait_for(&mut gate, Duration::from_millis(100));
             drop(gate);
             if self.progress.stalled() {
@@ -135,7 +135,6 @@ impl std::io::Read for GrowingFile {
                 let want = buf
                     .len()
                     .min(usize::try_from(available - self.pos).unwrap_or(usize::MAX));
-                // 显式全限定调用寻址与读取方法。
                 std::io::Seek::seek(&mut self.file, std::io::SeekFrom::Start(self.pos))?;
                 let read = std::io::Read::read(&mut self.file, &mut buf[..want])?;
                 self.pos += read as u64;
@@ -157,7 +156,7 @@ impl std::io::Seek for GrowingFile {
         let target = match pos {
             std::io::SeekFrom::Start(offset) => offset,
             std::io::SeekFrom::End(offset) => {
-                // 寻址至文件末尾需等待下载完全结束。
+                // 从末尾寻址需等待下载完全结束
                 while !self.is_complete() {
                     self.wait_for(self.downloaded() + 1)?;
                 }
@@ -176,7 +175,7 @@ impl std::io::Seek for GrowingFile {
     }
 }
 
-/// 异步下载任务，由调用方驱动完成数据拉取。
+/// 异步下载任务句柄
 pub struct Download {
     inner: Pin<Box<dyn Future<Output = ()> + Send>>,
 }
@@ -188,7 +187,7 @@ impl std::fmt::Debug for Download {
 }
 
 impl Download {
-    /// 不需要驱动下载的占位任务：缓存命中或复用他人下载时使用。
+    /// 创建空操作占位任务（缓存命中或复用在途任务时使用）
     fn idle() -> Self {
         Self {
             inner: Box::pin(async {}),
@@ -204,14 +203,14 @@ impl Future for Download {
     }
 }
 
-/// 磁盘 blob 缓存。
+/// 磁盘 Blob 缓存管理器
 #[derive(Clone)]
 pub struct BlobCache {
     root: PathBuf,
-    /// 容量上限可运行时调整（设置页改完不必重启），各克隆共享同一个值。
+    /// 缓存容量上限（字节）
     max_bytes: Arc<AtomicU64>,
     transport: Arc<dyn Transport>,
-    /// 在途下载（按 `{key}.{ext}` 去重），避免两路下载互相截断同一个 `.part`。
+    /// 在途下载表（按 `{key}.{ext}` 去重，避免并发写入冲突）
     inflight: Arc<DashMap<String, Arc<Progress>>>,
 }
 
@@ -225,7 +224,7 @@ impl std::fmt::Debug for BlobCache {
 }
 
 impl BlobCache {
-    /// 构造（不创建目录，首次写入时再建）。
+    /// 创建磁盘缓存实例
     #[must_use]
     pub fn new(root: impl Into<PathBuf>, max_bytes: u64, transport: Arc<dyn Transport>) -> Self {
         Self {
@@ -236,19 +235,19 @@ impl BlobCache {
         }
     }
 
-    /// 缓存根目录。
+    /// 缓存根目录
     #[must_use]
     pub fn root(&self) -> &Path {
         &self.root
     }
 
-    /// 容量上限。
+    /// 获取当前容量上限
     #[must_use]
     pub fn max_bytes(&self) -> u64 {
         self.max_bytes.load(Ordering::Relaxed)
     }
 
-    /// 修改容量上限；已超出新上限时立即按 LRU 淘汰。
+    /// 设置容量上限并触发超额淘汰
     pub fn set_max_bytes(&self, bytes: u64) {
         self.max_bytes.store(bytes, Ordering::Relaxed);
         if self.total_bytes() > bytes {
@@ -256,10 +255,10 @@ impl BlobCache {
         }
     }
 
-    /// 正式文件路径：`{root}/{key前两位}/{key}.{ext}`。
+    /// 获取已完成缓存文件的绝对路径
     #[must_use]
     pub fn path_for(&self, key: &str, ext: &str) -> PathBuf {
-        // 桶目录必须剔除 `.` / `..`：否则 `..x` 会拼成 `root/../..x`，写到缓存根之外。
+        // 分桶前两位防目录穿越
         let bucket = key
             .get(0..2)
             .filter(|bucket| *bucket != "." && *bucket != "..")
@@ -267,19 +266,19 @@ impl BlobCache {
         self.root.join(bucket).join(format!("{key}.{ext}"))
     }
 
-    /// 下载中的临时文件路径。
+    /// 获取下载临时文件路径
     #[must_use]
     pub fn part_path(&self, key: &str, ext: &str) -> PathBuf {
         self.root.join(format!("{key}.{ext}.part"))
     }
 
-    /// 是否已完整缓存。
+    /// 检查指定资源是否已完整缓存
     #[must_use]
     pub fn is_cached(&self, key: &str, ext: &str) -> bool {
         self.path_for(key, ext).is_file()
     }
 
-    /// 缓存占用的总字节数。
+    /// 获取缓存占用总字节数
     #[must_use]
     pub fn total_bytes(&self) -> u64 {
         walk_files(&self.root)
@@ -289,7 +288,7 @@ impl BlobCache {
             .sum()
     }
 
-    /// 检查指定路径是否为当前在途下载正在写入的临时文件。
+    /// 检查指定路径是否为当前在途写入的临时文件
     fn is_being_written(&self, path: &Path) -> bool {
         path.file_name()
             .and_then(|name| name.to_str())
@@ -297,7 +296,7 @@ impl BlobCache {
             .is_some_and(|flight_key| self.inflight.contains_key(flight_key))
     }
 
-    /// 按修改时间从旧到新淘汰，直到总量不超过 `target_bytes`。返回删除的字节数。
+    /// 按 LRU 淘汰旧缓存至目标大小，返回释放的字节数
     pub fn evict_lru(&self, target_bytes: u64) -> u64 {
         let mut files: Vec<(std::time::SystemTime, u64, PathBuf)> = walk_files(&self.root)
             .into_iter()
@@ -307,7 +306,7 @@ impl BlobCache {
                 Some((meta.modified().ok()?, meta.len(), path))
             })
             .collect();
-        // 时间戳并列时以文件路径次级排序保证确定性。
+        // 按修改时间与路径排序保证确定性
         files.sort_by(|a, b| a.0.cmp(&b.0).then_with(|| a.2.cmp(&b.2)));
 
         let mut total: u64 = files.iter().map(|(_, len, _)| *len).sum();
@@ -324,7 +323,7 @@ impl BlobCache {
         freed
     }
 
-    /// 校验缓存键和扩展名字符安全，防范目录遍历注入。
+    /// 校验路径片段字符安全性
     fn is_safe_path_component(value: &str) -> bool {
         !value.is_empty()
             && value.len() <= 64
@@ -335,10 +334,9 @@ impl BlobCache {
                 .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'-' | b'_'))
     }
 
-    /// 打开边下边播文件视图并返回下载任务（并发访问自动复用同一在途下载）。
+    /// 打开流式读取句柄（并发请求自动复用在途任务）
     pub fn open_stream(&self, url: &str, key: &str, ext: &str) -> Result<(GrowingFile, Download)> {
-        // key 参与桶目录拼接，前导点一并拒绝（`..x` 会被拼成 `root/../..x`）；
-        // ext 允许 `.flac` 这种带点写法，不共用这条约束。
+        // 拒绝非法路径字符与前导点
         if !Self::is_safe_path_component(key) || key.starts_with('.') || !Self::is_safe_path_component(ext) {
             return Err(Error::Io(format!(
                 "非法的缓存标识：key={key:?} ext={ext:?}（只允许字母数字与 . - _）"
@@ -351,13 +349,13 @@ impl BlobCache {
 
         let flight_key = format!("{key}.{ext}");
         match self.inflight.entry(flight_key.clone()) {
-            // 已有在途下载：只加一个只读视图，不再截断、不再发请求。
+            // 复用在途下载的只读视图
             MapEntry::Occupied(occupied) => {
                 let progress = occupied.get().clone();
                 drop(occupied);
                 let file = match std::fs::File::open(self.part_path(key, ext)) {
                     Ok(file) => file,
-                    // 若在途下载恰好完成并已重命名或清理，则根据实际状态回退处理。
+                    // 临时文件已完成重命名时直接读取正式文件
                     Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
                         if let Some(message) = progress.error.lock().clone() {
                             return Err(Error::Transport(message));
@@ -374,14 +372,14 @@ impl BlobCache {
                     std::fs::create_dir_all(parent)?;
                 }
                 let part_path = self.part_path(key, ext);
-                // 每次重新截断下载，避免 CDN 忽略 Range 导致的数据重复错位。
+                // 创建或截断临时文件
                 std::fs::OpenOptions::new()
                     .create(true)
                     .write(true)
                     .truncate(true)
                     .open(&part_path)?;
                 let progress = Arc::new(Progress::new(0, false));
-                // 前置准备全部成功后再插入登记，避免因中间失败残留悬挂在途条目。
+                // 注册在途状态
                 let file = std::fs::File::open(&part_path)?;
                 vacant.insert(progress.clone());
                 let view = GrowingFile {
@@ -392,7 +390,7 @@ impl BlobCache {
 
                 let cache = self.clone();
                 let url = url.to_owned();
-                // 守卫随 `Download` 一起移动：即使调用方从不驱动它，Drop 也会收尾。
+                // 在途清理守卫
                 let guard = InflightGuard {
                     cache: self.clone(),
                     flight_key,
@@ -407,7 +405,6 @@ impl BlobCache {
                             Ok(()) => {
                                 if let Err(error) = std::fs::rename(&part_path, &final_path) {
                                     *progress.error.lock() = Some(format!("rename 失败: {error}"));
-                                    // 未成品的字节一旦被 rename 成功就是永久的：宁可不缓存。
                                     let _ = std::fs::remove_file(&part_path);
                                 }
                             }
@@ -416,9 +413,9 @@ impl BlobCache {
                                 let _ = std::fs::remove_file(&part_path);
                             }
                         }
-                        // 标记正常完成以避免守卫注入取消错误。
+                        // 标记成功
                         guard.finished = true;
-                        // 检查当前磁盘缓存用量，超出上限时按 LRU 策略淘汰。
+                        // 超限淘汰
                         let limit = cache.max_bytes();
                         if cache.total_bytes() > limit {
                             cache.evict_lru(limit);
@@ -430,7 +427,7 @@ impl BlobCache {
         }
     }
 
-    /// 打开已经下载完成的正式文件视图。
+    /// 打开已完成缓存文件的只读视图
     fn finished(&self, key: &str, ext: &str) -> Result<(GrowingFile, Download)> {
         let file = std::fs::File::open(self.path_for(key, ext))?;
         let len = file.metadata()?.len();
@@ -444,7 +441,7 @@ impl BlobCache {
         ))
     }
 
-    /// 确保完整文件已缓存落盘，支持复用在途下载。
+    /// 确保完整文件已缓存落盘，支持复用在途下载
     pub async fn ensure(&self, url: &str, key: &str, ext: &str) -> Result<PathBuf> {
         let (view, download) = self.open_stream(url, key, ext)?;
         download.await;
@@ -458,7 +455,7 @@ impl BlobCache {
     }
 }
 
-/// 收集目录下的全部文件（忽略失败）。
+/// 递归收集目录下所有文件
 fn walk_files(root: &Path) -> Vec<PathBuf> {
     let mut out = Vec::new();
     let mut stack = vec![root.to_path_buf()];
@@ -478,7 +475,7 @@ fn walk_files(root: &Path) -> Vec<PathBuf> {
     out
 }
 
-/// 把 HTTP 响应流式写入 `part_path`。
+/// 流式写入 HTTP 响应至临时文件
 async fn stream_to_file(
     transport: Arc<dyn Transport>,
     url: &str,
@@ -486,7 +483,7 @@ async fn stream_to_file(
     progress: &Arc<Progress>,
 ) -> Result<()> {
     let mut request = Request::new(Method::Get, url.to_owned());
-    // 大文件不做整体超时（由传输层的读超时 + 客户端的停滞检测兜底）。
+    // 流式传输依赖读超时与停滞检测
     request.timeout = None;
     let mut file = std::fs::OpenOptions::new()
         .create(true)
@@ -509,12 +506,12 @@ async fn stream_to_file(
         return Err(Error::Io(message));
     }
     verify_length(written, expected)?;
-    // 强制同步落盘，保证读取端进度与文件长度一致。
+    // 强制同步落盘
     file.sync_data()?;
     Ok(())
 }
 
-/// 校验已下载字节数与上游声明长度是否一致，并拒绝空文件。
+/// 校验下载字节数与预设长度
 fn verify_length(written: u64, expected: Option<u64>) -> Result<()> {
     if written == 0 {
         return Err(Error::Io("下载不完整：上游返回 0 字节".to_owned()));
@@ -527,7 +524,7 @@ fn verify_length(written: u64, expected: Option<u64>) -> Result<()> {
     }
 }
 
-/// 把分块写盘并推进进度。
+/// 文件写入接收器
 struct FileSink<'a> {
     file: &'a mut std::fs::File,
     written: u64,

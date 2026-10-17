@@ -1,4 +1,4 @@
-//! 上游响应宽容解码：统一字段类型归一化与有界键名检索。
+//! 响应宽容解码：字段类型归一化与有界键名检索。
 
 use std::collections::VecDeque;
 
@@ -6,10 +6,10 @@ use serde_json::Value;
 
 use crate::error::{Error, Result};
 
-/// 有界搜索的最大深度，避免在异常响应上做无谓遍历。
+/// 递归搜索的最大深度限制
 const MAX_DEPTH: u8 = 4;
 
-/// 宽容转 `i64`：数字、数字字符串都接受。
+/// 宽容解析为 64 位有符号整数
 #[must_use]
 pub fn as_i64(value: &Value) -> i64 {
     match value {
@@ -24,13 +24,13 @@ pub fn as_i64(value: &Value) -> i64 {
     }
 }
 
-/// 宽容转 `u64`。
+/// 宽容解析为 64 位无符号整数
 #[must_use]
 pub fn as_u64(value: &Value) -> u64 {
     u64::try_from(as_i64(value)).unwrap_or(0)
 }
 
-/// 宽容转 `String`：数字会转成十进制串。
+/// 宽容解析为字符串
 #[must_use]
 pub fn as_str(value: &Value) -> String {
     match value {
@@ -42,7 +42,7 @@ pub fn as_str(value: &Value) -> String {
     }
 }
 
-/// 宽容转 `bool`：`true` / `"true"` / `1` 都算真。
+/// 宽容解析为布尔值
 #[must_use]
 pub fn as_bool(value: &Value) -> bool {
     match value {
@@ -53,7 +53,7 @@ pub fn as_bool(value: &Value) -> bool {
     }
 }
 
-/// 按候选键名取第一个存在的字段（大小写不敏感）。
+/// 按候选键名优先提取字段（大小写无关）
 #[must_use]
 pub fn pick<'a>(value: &'a Value, keys: &[&str]) -> Option<&'a Value> {
     let map = value.as_object()?;
@@ -70,25 +70,25 @@ pub fn pick<'a>(value: &'a Value, keys: &[&str]) -> Option<&'a Value> {
     None
 }
 
-/// 按候选键名取字符串。
+/// 按候选键名提取字符串
 #[must_use]
 pub fn pick_str(value: &Value, keys: &[&str]) -> String {
     pick(value, keys).map(as_str).unwrap_or_default()
 }
 
-/// 按候选键名取 `i64`。
+/// 按候选键名提取 64 位有符号整数
 #[must_use]
 pub fn pick_i64(value: &Value, keys: &[&str]) -> i64 {
     pick(value, keys).map(as_i64).unwrap_or_default()
 }
 
-/// 按候选键名取 `u64`。
+/// 按候选键名提取 64 位无符号整数
 #[must_use]
 pub fn pick_u64(value: &Value, keys: &[&str]) -> u64 {
     pick(value, keys).map(as_u64).unwrap_or_default()
 }
 
-/// 按候选**路径**取字段，例如 `&["trans_param", "union_cover"]`。
+/// 按多级路径提取字段
 #[must_use]
 pub fn pick_path<'a>(value: &'a Value, path: &[&str]) -> Option<&'a Value> {
     let mut node = value;
@@ -98,7 +98,7 @@ pub fn pick_path<'a>(value: &'a Value, path: &[&str]) -> Option<&'a Value> {
     Some(node)
 }
 
-/// 按候选路径列表取第一个能取到的字符串。
+/// 按候选多级路径列表提取首个匹配字符串
 #[must_use]
 pub fn pick_str_paths(value: &Value, paths: &[&[&str]]) -> String {
     paths
@@ -108,7 +108,7 @@ pub fn pick_str_paths(value: &Value, paths: &[&[&str]]) -> String {
         .unwrap_or_default()
 }
 
-/// 按候选路径列表取第一个能取到的 `i64`。
+/// 按候选多级路径列表提取首个匹配整数
 #[must_use]
 pub fn pick_i64_paths(value: &Value, paths: &[&[&str]]) -> i64 {
     paths
@@ -118,7 +118,7 @@ pub fn pick_i64_paths(value: &Value, paths: &[&[&str]]) -> i64 {
         .unwrap_or_default()
 }
 
-/// 按候选路径列表取第一个能取到的 `u64`。
+/// 按候选多级路径列表提取首个匹配无符号整数
 #[must_use]
 pub fn pick_u64_paths(value: &Value, paths: &[&[&str]]) -> u64 {
     paths
@@ -128,7 +128,7 @@ pub fn pick_u64_paths(value: &Value, paths: &[&[&str]]) -> u64 {
         .unwrap_or_default()
 }
 
-/// 广度优先枚举全部键值对，受 `MAX_DEPTH` 有界限制。
+/// 广度优先遍历 JSON 树（受最大深度约束）
 fn walk(root: &Value) -> Vec<(&str, &Value)> {
     let mut found = Vec::new();
     let mut queue = VecDeque::from([(root, 0_u8)]);
@@ -158,7 +158,7 @@ fn matches(key: &str, keys: &[&str]) -> bool {
     keys.iter().any(|want| key.eq_ignore_ascii_case(want))
 }
 
-/// 任意深度查找第一个键名命中的字段。
+/// 遍历查找首个匹配键名的字段
 #[must_use]
 pub fn find<'a>(root: &'a Value, keys: &[&str]) -> Option<&'a Value> {
     walk(root)
@@ -167,25 +167,25 @@ pub fn find<'a>(root: &'a Value, keys: &[&str]) -> Option<&'a Value> {
         .map(|(_, value)| value)
 }
 
-/// 任意深度查找第一个键名命中的字符串。
+/// 遍历查找首个匹配键名的字符串
 #[must_use]
 pub fn find_str(root: &Value, keys: &[&str]) -> String {
     find(root, keys).map(as_str).unwrap_or_default()
 }
 
-/// 任意深度查找第一个键名命中的 `i64`。
+/// 遍历查找首个匹配键名的 64 位整数
 #[must_use]
 pub fn find_i64(root: &Value, keys: &[&str]) -> i64 {
     find(root, keys).map(as_i64).unwrap_or_default()
 }
 
-/// 任意深度查找第一个键名命中的 `u64`。
+/// 遍历查找首个匹配键名的 64 位无符号整数
 #[must_use]
 pub fn find_u64(root: &Value, keys: &[&str]) -> u64 {
     find(root, keys).map(as_u64).unwrap_or_default()
 }
 
-/// 任意深度查找第一个键名命中的数组。
+/// 遍历查找首个匹配键名的数组
 #[must_use]
 pub fn find_array<'a>(root: &'a Value, keys: &[&str]) -> Option<&'a Vec<Value>> {
     walk(root).into_iter().find_map(|(key, value)| match value {
@@ -194,14 +194,14 @@ pub fn find_array<'a>(root: &'a Value, keys: &[&str]) -> Option<&'a Vec<Value>> 
     })
 }
 
-/// 取上游的错误描述文本。
+/// 提取上游响应中的错误提示文本
 #[must_use]
 pub fn error_message(value: &Value) -> String {
     let message = pick_str(
         value,
         &["msg", "error", "errmsg", "message", "error_msg", "errorMessage"],
     );
-    // 兜底路径会把整份响应体塞进错误，必须同 http 层一样截断。
+    // 缺省时截断原始响应体作为错误描述
     if message.is_empty() {
         truncate(&value.to_string(), 200)
     } else {
@@ -209,7 +209,7 @@ pub fn error_message(value: &Value) -> String {
     }
 }
 
-/// 解密会话密钥加密的响应体，解密失败时平滑降级为原始明文。
+/// 解密会话响应体（解密失败时降级为明文）
 #[must_use]
 pub fn decode_session_body(cipher: &[u8], secret: &str) -> String {
     lyra_proto::secret_decrypt_bytes(cipher, secret)
@@ -221,7 +221,7 @@ pub fn decode_session_body(cipher: &[u8], secret: &str) -> String {
         )
 }
 
-/// 检查上游响应业务状态，当 status 为 0 或 error_code 非 0 时返回错误。
+/// 检查上游业务状态码
 pub fn check_business(value: &Value) -> Result<()> {
     let status_failed = pick(value, &["status"]).is_some_and(|status| as_i64(status) == 0);
     let code_failed = pick(value, &["error_code"]).is_some_and(|code| as_i64(code) != 0);
@@ -234,7 +234,7 @@ pub fn check_business(value: &Value) -> Result<()> {
     })
 }
 
-/// 校验 HTTP 状态码并解析校验上游 JSON 响应体。
+/// 校验 HTTP 状态码并反序列化上游 JSON 响应
 pub fn check_response(status: u16, body: &[u8]) -> Result<Value> {
     if !(200..300).contains(&status) {
         return Err(Error::Http {

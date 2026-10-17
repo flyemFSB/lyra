@@ -1,4 +1,4 @@
-//! 每日推荐视图组件：仿照图 2 风格打造的「今日为你推荐」问候卡片、分类专辑与精选曲目流。
+//! 每日推荐视图，包含问候卡片、分类专辑与推荐曲目列表。
 
 use std::rc::Rc;
 use std::sync::Arc;
@@ -37,7 +37,7 @@ fn get_greeting() -> &'static str {
     }
 }
 
-/// 每日推荐视图结构。
+/// 每日推荐视图
 pub(crate) struct DailyView {
     backend: Backend,
     shell: WeakEntity<AppShell>,
@@ -52,7 +52,7 @@ pub(crate) struct DailyView {
 }
 
 impl DailyView {
-    /// 创建每日推荐视图并监听播放器状态。
+    /// 创建每日推荐视图并订阅播放器状态
     pub(crate) fn new(
         backend: Backend,
         shell: WeakEntity<AppShell>,
@@ -76,7 +76,7 @@ impl DailyView {
         }
     }
 
-    /// 清空视图内容（登出/换账号时调用）。
+    /// 重置视图状态
     pub(crate) fn reset(&mut self, cx: &mut Context<Self>) {
         self.songs = Arc::new(Vec::new());
         self.sizes = row_sizes(0);
@@ -87,14 +87,14 @@ impl DailyView {
         cx.notify();
     }
 
-    /// 视图初次加载时触发推荐歌曲请求。
+    /// 确保推荐数据已加载
     pub(crate) fn ensure(&mut self, cx: &mut Context<Self>) {
         if !self.loaded && !self.loading {
             self.reload(cx);
         }
     }
 
-    /// 强制重新请求每日推荐歌曲。
+    /// 重新拉取每日推荐歌曲
     pub(crate) fn reload(&mut self, cx: &mut Context<Self>) {
         self.loading = true;
         self.error = None;
@@ -104,7 +104,7 @@ impl DailyView {
             .spawn(async move { Msg::Daily(app.daily().await.map_err(|error| error.to_string())) });
     }
 
-    /// 响应处理每日推荐歌曲列表数据。
+    /// 处理每日推荐响应结果
     pub(crate) fn on_daily(&mut self, result: Result<Vec<Song>, String>, cx: &mut Context<Self>) {
         self.loading = false;
         match result {
@@ -119,7 +119,7 @@ impl DailyView {
         cx.notify();
     }
 
-    /// 渲染单行歌曲组件。
+    /// 渲染单首曲目行
     fn row(&self, index: usize, cx: &App) -> AnyElement {
         let (is_current, is_playing) = {
             let model = self.player.read(cx);
@@ -155,7 +155,7 @@ impl Render for DailyView {
         let songs_for_play = self.songs.clone();
         let shell_play = self.shell.clone();
 
-        // 1. 今日为你推荐 Header
+        // 标题栏
         let recommend_header = h_flex()
             .w_full()
             .px_4()
@@ -180,7 +180,7 @@ impl Render for DailyView {
                     .on_click(cx.listener(|view, _event, _window, cx| view.reload(cx))),
             );
 
-        // 2. 仿图 2：第一张问候大卡片（天空蓝底、黑胶碟插画、翡翠绿圆形主播放键）
+        // 问候大卡片
         let greeting_card = v_flex()
             .w(px(220.0))
             .gap(px(6.0))
@@ -199,7 +199,6 @@ impl Render for DailyView {
                     .flex()
                     .flex_col()
                     .justify_between()
-                    // 黑胶大碟插画
                     .child(
                         div()
                             .absolute()
@@ -240,7 +239,6 @@ impl Render for DailyView {
                                     .child("尝试来点儿音乐\n提提神吧~"),
                             ),
                     )
-                    // 醒目翡翠绿播放圆钮
                     .child(
                         div()
                             .id("greeting_play_btn")
@@ -291,7 +289,7 @@ impl Render for DailyView {
                     ),
             );
 
-        // 3. 特色推荐主题卡片（使用真实推荐歌曲驱动）
+        // 主题推荐卡片
         let card_styles = [
             ("精选", hex_rgb(0xfde2e4), hex_rgb(0x3b82f6)),
             ("热歌", hex_rgb(0xd1fae5), ACCENT_GREEN),
@@ -360,7 +358,7 @@ impl Render for DailyView {
             cards_row = cards_row.child(card);
         }
 
-        // 4. 第二区域：推荐歌曲 Header
+        // 歌曲列表标题栏
         let mut list_header = h_flex()
             .w_full()
             .px_4()

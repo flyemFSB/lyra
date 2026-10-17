@@ -1,4 +1,4 @@
-//! 音质权益矩阵与会员领奖端点，处理概念版特权、音质可用性及每日领奖。
+//! 音质权益矩阵与会员领奖端点。
 
 use lyra_proto::consts::{APPID, CLIENTVER};
 use serde_json::Value;
@@ -10,7 +10,7 @@ use crate::error::{Code, Result};
 use crate::model::{QualityRight, Song, SongRights, VipStatus};
 use crate::spec::RequestSpec;
 
-/// 音质排序优先级，从低到高。
+/// 音质等级排序（从低到高）
 pub const QUALITY_ORDER: &[&str] = &[
     "128",
     "320",
@@ -23,7 +23,7 @@ pub const QUALITY_ORDER: &[&str] = &[
     "multitrack",
 ];
 
-/// 上游全量音质查询列表。
+/// 上游全量音质查询列表
 const UPSTREAM_QUALITIES: &[&str] = &[
     "128",
     "320",
@@ -36,20 +36,20 @@ const UPSTREAM_QUALITIES: &[&str] = &[
     "multitrack",
 ];
 
-/// 客户端默认请求的音质列表。
+/// 客户端默认请求的音质列表
 const DEFAULT_QUALITIES: &str = "128,320,flac,high,viper_tape,viper_clear,viper_atmos";
 
-/// 一个待查询的歌曲资源。
+/// 音质权益查询项
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RightRequest {
-    /// 音频 hash。
+    /// 音频 hash
     pub hash: String,
-    /// 专辑 ID。
+    /// 专辑 ID
     pub album_id: i64,
 }
 
 impl RightRequest {
-    /// 从歌曲构造。
+    /// 从歌曲构建查询项
     #[must_use]
     pub fn from_song(song: &Song) -> Self {
         Self {
@@ -59,33 +59,33 @@ impl RightRequest {
     }
 }
 
-/// 音质级别的强类型枚举表示。
+/// 音质枚举表示
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Quality {
-    /// `128`：概念版免费听覆盖的就是它。
+    /// 标准音质（128k，概念版免费听）
     Standard,
-    /// `320`。
+    /// 高品音质（320k）
     High,
-    /// `flac`。
+    /// 无损音质（FLAC）
     Flac,
-    /// `high`（Hi-Res）。
+    /// Hi-Res 高解析
     HiRes,
-    /// `super`。
+    /// 超高清音质
     Super,
-    /// `viper_tape`（蝰蛇母带）。
+    /// 蝰蛇母带音质
     ViperTape,
-    /// `viper_clear`（蝰蛇超清）。
+    /// 蝰蛇超清音质
     ViperClear,
-    /// `viper_atmos`（蝰蛇全景声）。
+    /// 蝰蛇全景声音质
     ViperAtmos,
-    /// `multitrack`。
+    /// 多轨音质
     Multitrack,
-    /// 上游新出现的、本版本还不认识的音质。
+    /// 未知音质
     Unknown,
 }
 
 impl Quality {
-    /// 解析上游音质字符串。
+    /// 解析音质枚举
     fn parse(text: &str) -> Self {
         match text {
             "128" => Self::Standard,
@@ -101,7 +101,7 @@ impl Quality {
         }
     }
 
-    /// 在 relate_goods 中优先匹配的等级标识候选。
+    /// 获取 relate_goods 候选等级标识
     fn level_candidates(self) -> &'static [i64] {
         match self {
             Self::Standard => &[1, 2],
@@ -109,12 +109,12 @@ impl Quality {
             Self::Flac => &[5],
             Self::HiRes => &[6],
             Self::Super => &[7],
-            // 蝰蛇系与多轨在上游没有固定 level，按 quality 名匹配
+            // 蝰蛇系与多轨在上游按 quality 字段匹配
             Self::ViperTape | Self::ViperClear | Self::ViperAtmos | Self::Multitrack | Self::Unknown => &[],
         }
     }
 
-    /// 获取当前音质所需 VIP 会员级别。
+    /// 获取音质所需的 VIP 会员级别
     fn required_vip(self) -> &'static str {
         match self {
             Self::ViperTape | Self::ViperClear | Self::ViperAtmos => "suvip",
@@ -124,7 +124,7 @@ impl Quality {
         }
     }
 
-    /// 获取 OGG 变体在 trans_param 中的前缀标识。
+    /// 获取 OGG 变体参数前缀
     fn ogg_key_prefix(self) -> Option<&'static str> {
         match self {
             Self::Standard => Some("ogg_128_"),
@@ -141,13 +141,13 @@ impl Quality {
     }
 }
 
-/// 批量查询歌曲音质权益矩阵。
+/// 批量查询歌曲音质权益矩阵
 pub async fn privilege(api: &Api, items: &[RightRequest], qualities: Option<&str>) -> Result<Vec<SongRights>> {
     if items.is_empty() {
         return Err(crate::error::Error::Decode("缺少歌曲 hash".to_owned()));
     }
 
-    // 不携带 album_audio_id 保证上游下发 128 标准音质的 OGG 节点。
+    // 避免携带 album_audio_id 以获取标准音质 OGG 变体
     let resource: Vec<Value> = items
         .iter()
         .map(|item| {
@@ -161,7 +161,7 @@ pub async fn privilege(api: &Api, items: &[RightRequest], qualities: Option<&str
         .collect();
 
     let wanted: Vec<String> = match qualities {
-        // all 表示查询全部音质。
+        // all 表示查询全部音质
         Some("all") => UPSTREAM_QUALITIES.iter().map(|s| (*s).to_owned()).collect(),
         Some(list) if !list.trim().is_empty() => list
             .split(',')
@@ -195,7 +195,7 @@ pub async fn privilege(api: &Api, items: &[RightRequest], qualities: Option<&str
         .enumerate()
         .map(|(index, item)| {
             let hash = item.hash.to_lowercase();
-            // 依据 Hash 进行结果关联匹配。
+            // 依据 Hash 进行结果关联匹配
             let entry = data
                 .iter()
                 .find(|candidate| codec::pick_str(candidate, &["hash"]).to_lowercase() == hash)
@@ -302,7 +302,7 @@ fn build_quality_vip(hash: &str, _album_id: i64, resource: &Value, qualities: &[
         .collect();
     let missing_qualities: Vec<String> = list.iter().filter(|q| !q.exists).map(|q| q.quality.clone()).collect();
     let free_song = !list.is_empty() && list.iter().all(|q| !q.need_vip);
-    // 综合 level 与音质顺序计算最优可播音质。
+    // 按层级与音质优先级选取最优可用音质
     let best_free_quality = list
         .iter()
         .filter(|q| q.obtainable)
@@ -329,7 +329,7 @@ fn order_index(quality: &str) -> usize {
     QUALITY_ORDER.iter().position(|q| *q == quality).unwrap_or(usize::MAX)
 }
 
-/// 在商品关联表中查找指定音质条目。
+/// 在商品关联表中查找指定音质条目
 fn pick_relate<'a>(relate_goods: &'a [Value], quality: &str) -> Option<&'a Value> {
     for level in Quality::parse(quality).level_candidates() {
         let hit = relate_goods
@@ -344,7 +344,7 @@ fn pick_relate<'a>(relate_goods: &'a [Value], quality: &str) -> Option<&'a Value
         .find(|item| codec::pick_str(item, &["quality"]) == quality)
 }
 
-/// 提取 128/320 标准音质的 OGG 变体 Hash 与文件大小。
+/// 提取 128/320 音质的 OGG 变体哈希与文件大小
 fn ogg_of(quality: Quality, resource: &Value) -> (String, u64) {
     let Some(prefix) = quality.ogg_key_prefix() else {
         return (String::new(), 0);
@@ -358,7 +358,7 @@ fn ogg_of(quality: Quality, resource: &Value) -> (String, u64) {
     (hash, u64::try_from(size).unwrap_or(0))
 }
 
-/// 查询当前账号的会员权益有效性。
+/// 查询当前账号的会员状态
 pub async fn vip_status(api: &Api) -> Result<VipStatus> {
     let spec = RequestSpec::get("/v1/get_union_vip")
         .base(crate::spec::VIP_BASE)
@@ -367,18 +367,18 @@ pub async fn vip_status(api: &Api) -> Result<VipStatus> {
     Ok(VipStatus::from_value(&value))
 }
 
-/// 每日畅听 VIP 领取结果。
+/// 每日畅听 VIP 领取结果
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct VipClaim {
-    /// 今天已经领过（上游 `297002`）—— 视为幂等成功。
+    /// 今日是否已领取（上游 297002，按幂等成功处理）
     pub already_claimed: bool,
-    /// 本次到账时长（小时），上游 `recharge_hours`。
+    /// 到账时长（小时，对应上游 recharge_hours）
     pub recharge_hours: u64,
-    /// 原始响应。
+    /// 原始响应数据
     pub raw: Value,
 }
 
-/// 领取每日 24 小时畅听 VIP。
+/// 领取每日 24 小时畅听 VIP
 pub async fn claim_daily_vip(api: &Api) -> Result<VipClaim> {
     let session = api.session();
     crate::spec::ensure_logged_in(&session)?;
@@ -386,14 +386,14 @@ pub async fn claim_daily_vip(api: &Api) -> Result<VipClaim> {
         .param("kugouid", session.userid())
         .param("ad_type", 1);
 
-    // 领取是账号侧写操作：不能带毫秒扰动，上游对多出的未签名参数直接回 `20006 err signature`。
+    // 账号写操作不附加时间扰动，避免上游签名校验失败 (20006)
     match api.call_auth(spec).await {
         Ok(value) => Ok(VipClaim {
             already_claimed: false,
             recharge_hours: codec::pick_u64_paths(&value, &[&["data", "recharge_hours"][..], &["recharge_hours"][..]]),
             raw: value,
         }),
-        // 已领取错误按幂等成功处理。
+        // 已经领取视为幂等成功
         Err(error) if error.code() == Some(Code::AlreadyClaimed) => Ok(VipClaim {
             already_claimed: true,
             recharge_hours: 0,
@@ -418,7 +418,7 @@ mod tests {
             "hash": "abc", "name": "夜曲", "singername": "周杰伦", "albumname": "十一月的萧邦", "album_id": 1234,
             "trans_param": {"ogg_128_hash": "OGG128", "ogg_128_filesize": 3_000_000,
                             "ogg_320_hash": "OGG320", "ogg_320_filesize": 8_000_000},
-            // 128 的 level=1 是付费条目 → 触发概念版「免费听」
+            // 128 音质 level=1 为付费条目，触发概念版免费听权益
             "relate_goods": [
                 {"level": 1, "quality": "128", "privilege": 10, "status": 1, "info": {"filesize": 2_000_000, "bitrate": 128}},
                 {"level": 2, "quality": "128", "privilege": 0, "status": 1, "info": {"extname": "mp3", "bitrate": 128}},
@@ -449,7 +449,7 @@ mod tests {
         assert_eq!(rights.name, "夜曲");
         assert!(!rights.free_song, "存在付费音质");
 
-        // 验证 128 音质优先命中 OGG 变体。
+        // 128 音质优先选取 OGG 变体
         let q128 = rights.quality("128").unwrap();
         assert!(q128.exists);
         assert!(q128.free_listen, "128 需会员时概念版免费听");
@@ -458,19 +458,19 @@ mod tests {
         assert_eq!(q128.hash, "OGG128");
         assert_eq!(q128.size, 3_000_000);
 
-        // 验证 320 高品质音质需要普通 VIP。
+        // 320 音质需要普通 VIP
         let q320 = rights.quality("320").unwrap();
         assert!(q320.need_vip);
         assert!(!q320.obtainable);
         assert_eq!(q320.require_vip_type, "concept");
 
-        // 验证无损音质使用关联条目的 Hash。
+        // 无损音质取关联条目哈希
         let flac = rights.quality("flac").unwrap();
         assert_eq!(flac.hash, "flachash");
         assert_eq!(flac.level, 5);
         assert_eq!(flac.size, 40_000_000);
 
-        // 验证全景声音质需要超级 VIP。
+        // 全景声音质需要超级 VIP
         let atmos = rights.quality("viper_atmos").unwrap();
         assert!(atmos.exists);
         assert_eq!(atmos.require_vip_type, "suvip");
@@ -506,7 +506,7 @@ mod tests {
         .await
         .unwrap();
         assert!(rights.free_song);
-        // 两个音质均免费时最佳音质判定为无损。
+        // 均免费时优先选取高规格音质
         assert_eq!(rights.best_free_quality, "flac");
         assert_eq!(rights.qualities.len(), 2, "只返回请求的音质");
         assert!(rights.missing_qualities.is_empty());
@@ -533,7 +533,7 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(rights[0].missing_qualities, vec!["flac".to_owned(), "high".to_owned()]);
-        // 确保未提供的音质标记为不存在。
+        // 未匹配音质标记为不存在
         let flac = rights[0].quality("flac").expect("请求过的音质应有条目");
         assert!(!flac.exists);
         assert_eq!(flac.privilege, -1);
@@ -560,7 +560,7 @@ mod tests {
         .unwrap();
         assert_eq!(rights[0].qualities.len(), UPSTREAM_QUALITIES.len());
 
-        // 验证请求体未携带 album_audio_id。
+        // 验证请求体未携带 album_audio_id
         let body: Value = serde_json::from_slice(mock.last_request().unwrap().body.as_deref().unwrap()).unwrap();
         assert_eq!(body["resource"][0]["type"], "audio");
         assert!(body["resource"][0].get("album_audio_id").is_none());
@@ -605,7 +605,7 @@ mod tests {
             request.query.iter().find(|(k, _)| k == "kugouid").unwrap().1,
             "2043841403"
         );
-        // 账号侧写操作不能带毫秒扰动：上游会回 20006 err signature。
+        // 账号写操作不应携带时间扰动参数
         assert!(
             !request.query.iter().any(|(k, _)| k == "_lyra_t"),
             "{:?}",

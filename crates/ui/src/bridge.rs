@@ -1,86 +1,86 @@
-//! 异步消息桥接：将 Tokio 运行时任务结果转发回 GPUI 线程。
+//! 异步消息桥接：将 Tokio 运行时任务结果转发回 GPUI 线程
 
 use std::sync::mpsc::Sender;
 
 use lyra_api::model::{LyricLine, Page, Playlist, Song, Station, StationClass, VipStatus};
 use lyra_app::Kugou;
 
-/// 左侧导航目标页枚举。
+/// 导航页面枚举
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Nav {
-    /// 我的歌单。
+    /// 我的歌单
     Playlists,
-    /// 每日推荐。
+    /// 每日推荐
     Daily,
-    /// 电台。
+    /// 电台
     Radio,
-    /// 搜索。
+    /// 搜索
     Search,
-    /// 歌词。
+    /// 歌词
     Lyrics,
-    /// 设置。
+    /// 设置
     Settings,
-    /// 登录。
+    /// 登录
     Login,
 }
 
-/// 界面消息枚举。
+/// UI 异步消息枚举
 pub(crate) enum Msg {
-    /// 验证码下发结果（剩余可发次数）。
+    /// 验证码下发结果（剩余可用次数）
     AuthCode(Result<u64, String>),
-    /// 登录结果。
+    /// 短信登录结果
     Login(Result<(), String>),
-    /// 歌单列表。
+    /// 歌单列表结果
     Playlists(Result<Vec<Playlist>, String>),
-    /// 某歌单的一页歌曲（带上发起时的请求序号，用于丢弃过期响应）。
+    /// 歌单歌曲分页结果（附带请求序号以过滤过期响应）
     Tracks(u64, Result<Page<Song>, String>),
-    /// 每日推荐。
+    /// 每日推荐歌曲列表
     Daily(Result<Vec<Song>, String>),
-    /// 搜索结果（带上发起时的请求序号）。
+    /// 搜索结果（附带请求序号）
     Search(u64, Result<Vec<Song>, String>),
-    /// 电台频道目录。
+    /// 电台推荐频道列表
     Stations(Result<Vec<Station>, String>),
-    /// 电台分类目录。
+    /// 电台分类目录列表
     StationClasses(Result<Vec<StationClass>, String>),
-    /// 某频道的歌（带上发起时的请求序号）。
+    /// 电台频道歌曲列表（附带请求序号）
     StationSongs(u64, Result<Vec<Song>, String>),
-    /// 当前曲目的歌词。
+    /// 歌词获取结果（附带请求序号）
     Lyrics(u64, Result<Vec<LyricLine>, String>),
-    /// 会员状态。
+    /// 会员状态查询结果
     Vip(Result<VipStatus, String>),
-    /// 领取每日畅听 VIP 的结果。
+    /// 每日畅听 VIP 领取结果
     VipClaim(Result<(), String>),
-    /// 设置保存结果。
+    /// 设置保存结果
     SettingsSaved(Result<(), String>),
-    /// 从歌单移除的结果。
+    /// 移除歌曲结果
     TrackRemoved(Result<(), String>),
-    /// 当前曲目自然播完。
+    /// 当前曲目播放自然结束
     AudioEnded,
-    /// 取播放地址失败（带上发起请求时的歌曲 hash，用于丢弃过期响应）。
+    /// 播放直链解析失败
     AudioFailed {
-        /// 发起请求时的歌曲 hash。
+        /// 发起请求时的歌曲哈希
         hash: String,
-        /// 错误描述。
+        /// 错误描述
         message: String,
     },
-    /// 音频引擎报错（拉流 / 解码失败）。
+    /// 音频引擎拉流或解码异常
     EngineFailed(String),
-    /// 完成但无需上报。
+    /// 空操作
     Noop,
-    /// 顶部提示。
+    /// 顶部气泡提示
     Toast(String),
-    /// 已登出。
+    /// 已退出登录
     LoggedOut,
-    /// 从歌单移除一首（`listid`, `fileid`）。
+    /// 触发从歌单移除单曲
     RemoveTrack {
-        /// 歌单 `listid`。
+        /// 歌单 listid
         listid: String,
-        /// 歌曲 `fileid`。
+        /// 歌曲 fileid
         fileid: i64,
     },
 }
 
-/// 聚合服务门面、异步运行时句柄与消息发送端。
+/// 后端桥接上下文：聚合服务门面、运行时句柄与通道发送端
 #[derive(Clone)]
 pub(crate) struct Backend {
     app: Kugou,
@@ -89,32 +89,32 @@ pub(crate) struct Backend {
 }
 
 impl Backend {
-    /// 创建后端桥接实例。
+    /// 创建后端桥接实例
     pub(crate) fn new(app: Kugou, handle: tokio::runtime::Handle, tx: Sender<Msg>) -> Self {
         Self { app, handle, tx }
     }
 
-    /// 获取应用服务门面克隆。
+    /// 获取应用服务门面副本
     pub(crate) fn app(&self) -> Kugou {
         self.app.clone()
     }
 
-    /// 查询是否存在可用音频引擎。
+    /// 查询音频引擎是否可用
     pub(crate) fn has_engine(&self) -> bool {
         self.app.engine().is_some()
     }
 
-    /// 获取音频引擎克隆。
+    /// 获取音频引擎副本
     pub(crate) fn engine(&self) -> Option<lyra_audio::Engine> {
         self.app.engine().cloned()
     }
 
-    /// 发送消息至界面主线程。
+    /// 发送消息至 UI 主线程
     pub(crate) fn send(&self, msg: Msg) {
         let _ = self.tx.send(msg);
     }
 
-    /// 在后台运行时派发异步任务并将结果回传界面。
+    /// 派发异步任务并将结果回传至 UI
     pub(crate) fn spawn<F>(&self, future: F)
     where
         F: std::future::Future<Output = Msg> + Send + 'static,

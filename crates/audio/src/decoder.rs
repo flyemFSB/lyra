@@ -1,4 +1,4 @@
-//! 音频解码层：基于 symphonia 将输入音频流解码为交织 f32 PCM 样本。
+//! 音频解码层：基于 Symphonia 将输入流解码为交织 f32 PCM。
 
 use std::io::{ErrorKind as IoErrorKind, Read, Seek, SeekFrom};
 use std::sync::Mutex;
@@ -13,25 +13,25 @@ use symphonia::core::probe::Hint;
 
 use crate::{Error, ReadSeek};
 
-/// 一段完整解码的 PCM。
+/// 解码后的 PCM 音频数据
 #[derive(Debug, Clone)]
 pub struct Decoded {
-    /// 采样率（Hz）。
+    /// 采样率（Hz）
     pub sample_rate: u32,
-    /// 声道数。
+    /// 声道数
     pub channels: usize,
-    /// 交织排列的样本。
+    /// 交织 PCM 样本
     pub samples: Vec<f32>,
 }
 
 impl Decoded {
-    /// 帧数（= 样本数 / 声道数）。
+    /// 音频帧数（样本数 / 声道数）
     #[must_use]
     pub fn frames(&self) -> usize {
         self.samples.len().checked_div(self.channels).unwrap_or(0)
     }
 
-    /// 时长（毫秒）。
+    /// 音频时长（毫秒）
     #[must_use]
     pub fn duration_ms(&self) -> u64 {
         if self.sample_rate == 0 {
@@ -42,14 +42,14 @@ impl Decoded {
     }
 }
 
-/// 桥接 ReadSeek 数据源至 symphonia 的 MediaSource 特征（使用免竞争互斥锁满足 Sync 约束）。
+/// 适配 ReadSeek 为 Symphonia MediaSource
 struct SharedSource {
     inner: Mutex<Box<dyn ReadSeek + Send>>,
 }
 
 impl Read for SharedSource {
     fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
-        // 独占可变引用访问，免锁且无中毒风险
+        // 获取内部可变引用进行读取
         match self.inner.get_mut() {
             Ok(s) => s.read(buf),
             Err(e) => e.into_inner().read(buf),
@@ -76,7 +76,7 @@ impl MediaSource for SharedSource {
     }
 }
 
-/// 顺序音频解码器，将输入流逐包解出交织 f32 样本。
+/// 音频流分包解码器
 pub struct Decoder {
     format: Box<dyn FormatReader>,
     codec: Box<dyn SymphoniaDecoder>,
@@ -86,12 +86,12 @@ pub struct Decoder {
 }
 
 impl Decoder {
-    /// 打开音频流并自动探测容器格式与编解码器。
+    /// 打开音频流并探测格式
     pub fn open(reader: Box<dyn ReadSeek + Send>) -> Result<Self, Error> {
         Self::open_with_hint(reader, None)
     }
 
-    /// 打开音频流并根据指定文件扩展名提示辅助探测。
+    /// 打开音频流并结合扩展名探测格式
     pub fn open_with_hint(reader: Box<dyn ReadSeek + Send>, extension: Option<&str>) -> Result<Self, Error> {
         let source = SharedSource {
             inner: Mutex::new(reader),
@@ -138,19 +138,19 @@ impl Decoder {
         })
     }
 
-    /// 源采样率（Hz）。
+    /// 获取采样率（Hz）
     #[must_use]
     pub fn sample_rate(&self) -> u32 {
         self.sample_rate
     }
 
-    /// 源声道数。
+    /// 获取声道数
     #[must_use]
     pub fn channels(&self) -> usize {
         self.channels
     }
 
-    /// 解码下一段交织 PCM 样本，到达流末尾返回 Ok(None)。
+    /// 解码下一个音频数据块（到达流末尾返回 Ok(None)）
     pub fn next_chunk(&mut self) -> Result<Option<Vec<f32>>, Error> {
         loop {
             let packet = match self.format.next_packet() {
@@ -174,9 +174,9 @@ impl Decoder {
                     if let Some(samples) = interleave(&audio) {
                         return Ok(Some(samples));
                     }
-                    // 0 帧的包没有音频，继续取下一包。
+                    // 跳过空帧包
                 }
-                // 忽略单帧解码损坏，继续尝试解码下一包
+                // 忽略单帧损坏错误，继续解码
                 Err(SymphoniaError::DecodeError(_)) => {}
                 Err(SymphoniaError::IoError(e)) if e.kind() == IoErrorKind::UnexpectedEof => {
                     return Ok(None);
@@ -187,7 +187,7 @@ impl Decoder {
     }
 }
 
-/// 将解码音频缓冲转换为交织 f32 样本数组，0 帧包返回 None。
+/// 提取交织 f32 样本（空帧包返回 None）
 fn interleave(audio: &AudioBufferRef<'_>) -> Option<Vec<f32>> {
     if audio.frames() == 0 {
         return None;
@@ -197,7 +197,7 @@ fn interleave(audio: &AudioBufferRef<'_>) -> Option<Vec<f32>> {
     Some(buf.samples().to_vec())
 }
 
-/// 一次性解码整条音频流（适用于测试与短音频）。
+/// 一次性解码整条音频流
 pub fn decode_all(reader: Box<dyn ReadSeek + Send>) -> Result<Decoded, Error> {
     let mut decoder = Decoder::open(reader)?;
     let sample_rate = decoder.sample_rate();
@@ -219,7 +219,7 @@ mod tests {
     use super::*;
     use std::f32::consts::TAU;
 
-    /// 写一个 44.1kHz、单声道、16-bit 的正弦 WAV，返回可直接解码的读取器。
+    /// 生成测试用正弦波 WAV 流
     pub(crate) fn sine_wav(seconds: f32) -> Box<dyn ReadSeek + Send> {
         let spec = hound::WavSpec {
             channels: 1,
@@ -244,7 +244,7 @@ mod tests {
 
     #[test]
     fn zero_frame_packets_are_skipped_instead_of_panicking() {
-        // 跳过 0 帧音频包，防止底层库空缓冲切片引发恐慌。
+        // 跳过 0 帧包，防止切片越界恐慌
         use std::borrow::Cow;
         use symphonia::core::audio::{AudioBuffer, Channels, Signal, SignalSpec};
 

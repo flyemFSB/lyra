@@ -1,18 +1,18 @@
-//! 请求参数有序表与签名格式化（对齐 JS 的 UTF-16 排序与渲染规则）。
+//! 请求参数映射表与签名序列化（对齐 JS UTF-16 排序）。
 
 use std::fmt::Write as _;
 
-/// 单个参数值。
+/// 参数值类型
 #[derive(Debug, Clone, PartialEq)]
 pub enum Val {
-    /// 标量：按原样参与拼接。
+    /// 字符串标量
     Raw(String),
-    /// 对象 / 数组：参与拼接前先序列化为紧凑 JSON。
+    /// JSON 对象或数组
     Json(serde_json::Value),
 }
 
 impl Val {
-    /// 渲染为参与签名拼接的字符串。
+    /// 序列化为签名用字符串
     #[must_use]
     pub fn render(&self) -> String {
         match self {
@@ -21,7 +21,7 @@ impl Val {
         }
     }
 
-    /// 取标量视图；`Json` 返回 `None`。
+    /// 获取标量字符串切片
     #[must_use]
     pub fn as_str(&self) -> Option<&str> {
         match self {
@@ -66,20 +66,20 @@ macro_rules! val_from_int {
 }
 val_from_int!(i8, i16, i32, i64, isize, u8, u16, u32, u64, usize);
 
-/// 保序参数表（重复 set 同一 key 会覆盖，与 JS 对象语义一致）。
+/// 保序参数表（重复 key 自动覆盖）
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct Params {
     entries: Vec<(String, Val)>,
 }
 
 impl Params {
-    /// 空表。
+    /// 创建空参数表
     #[must_use]
     pub const fn new() -> Self {
         Self { entries: Vec::new() }
     }
 
-    /// 写入 / 覆盖一个参数。
+    /// 设置参数（存在则覆盖）
     pub fn set(&mut self, key: impl Into<String>, val: impl Into<Val>) -> &mut Self {
         let key = key.into();
         let val = val.into();
@@ -90,48 +90,48 @@ impl Params {
         self
     }
 
-    /// 读一个参数。
+    /// 获取参数值
     #[must_use]
     pub fn get(&self, key: &str) -> Option<&Val> {
         self.entries.iter().find(|(k, _)| k == key).map(|(_, v)| v)
     }
 
-    /// 读一个标量参数。
+    /// 获取标量参数值
     #[must_use]
     pub fn get_str(&self, key: &str) -> Option<&str> {
         self.get(key).and_then(Val::as_str)
     }
 
-    /// 删除一个参数。
+    /// 删除指定参数
     pub fn remove(&mut self, key: &str) -> Option<Val> {
         let idx = self.entries.iter().position(|(k, _)| k == key)?;
         Some(self.entries.remove(idx).1)
     }
 
-    /// 是否包含某参数。
+    /// 是否包含指定参数
     #[must_use]
     pub fn contains(&self, key: &str) -> bool {
         self.get(key).is_some()
     }
 
-    /// 参数个数。
+    /// 参数数量
     #[must_use]
     pub fn len(&self) -> usize {
         self.entries.len()
     }
 
-    /// 是否为空。
+    /// 是否为空
     #[must_use]
     pub fn is_empty(&self) -> bool {
         self.entries.is_empty()
     }
 
-    /// 遍历 `(key, val)`。
+    /// 迭代所有参数键值对
     pub fn iter(&self) -> impl Iterator<Item = (&str, &Val)> {
         self.entries.iter().map(|(k, v)| (k.as_str(), v))
     }
 
-    /// 先拼 "k=v" 再整串排序后拼接（供 Web 签名使用）。
+    /// 拼接 "k=v" 后整串排序（Web 签名规则）
     #[must_use]
     pub fn sorted_kv(&self) -> String {
         let mut chunks: Vec<String> = self
@@ -147,7 +147,7 @@ impl Params {
         chunks.concat()
     }
 
-    /// 按键排序后拼接键值对字符串（供 Android 签名使用）。
+    /// 按 key 排序后拼接键值对（Android 签名规则）
     #[must_use]
     pub fn sorted_kv_by_key(&self) -> String {
         let mut chunks: Vec<(&str, String)> = self
@@ -163,7 +163,7 @@ impl Params {
         chunks.into_iter().map(|(_, chunk)| chunk).collect()
     }
 
-    /// 仅对参数值排序后拼接（供设备注册签名使用）。
+    /// 仅对参数值排序后拼接（设备注册签名规则）
     #[must_use]
     pub fn sorted_values(&self) -> String {
         let mut chunks: Vec<String> = self.entries.iter().map(|(_, v)| v.render()).collect();
@@ -171,14 +171,14 @@ impl Params {
         chunks.concat()
     }
 
-    /// 展开为查询参数对（传输层负责百分号编码）。
+    /// 转换为查询参数对
     #[must_use]
     pub fn to_pairs(&self) -> Vec<(String, String)> {
         self.entries.iter().map(|(k, v)| (k.clone(), v.render())).collect()
     }
 }
 
-/// 按 UTF-16 代码单元排序（对齐 JS Array#sort 默认字典序）。
+/// 按 UTF-16 代码单元排序（对齐 JS 字典序）
 fn sort_utf16(items: &mut [String]) {
     items.sort_by(|a, b| a.encode_utf16().cmp(b.encode_utf16()));
 }
@@ -217,7 +217,7 @@ mod tests {
     fn sorts_whole_kv_string_not_key() {
         let mut p = Params::new();
         p.set("bb", "1").set("b", "2");
-        // 字符串 "b=2" 排在 "bb=1" 之前（等号字符码 0x3D 小于字母 b 码值）
+        // "b=2" 排在 "bb=1" 之前（'=' 码值小于 'b'）
         assert_eq!(p.sorted_kv(), "b=2bb=1");
     }
 
@@ -225,11 +225,11 @@ mod tests {
     fn android_sorts_keys_before_joining_while_web_does_not() {
         let mut p = Params::new();
         p.set("hash", "1").set("hash2", "2");
-        // 先拼后排（Web）："hash2=2" 的 '2'(0x32) 小于 '='(0x3D) → hash2 在前。
+        // Web 规则（先拼接后排序）："hash2=2" 优先于 "hash=1"
         assert_eq!(p.sorted_kv(), "hash2=2hash=1");
-        // 先排后拼（Android）：按 key 排 → hash 在前。两种签名的顺序必须能区分开。
+        // Android 规则（按键排序）："hash" 优先于 "hash2"
         assert_eq!(p.sorted_kv_by_key(), "hash=1hash2=2");
-        // 无前缀关系时两者一致（这是绝大多数真实参数集的情况）。
+        // 无公共前缀时两种规则排序结果一致
         let mut q = Params::new();
         q.set("mid", "m").set("appid", "a").set("plat", "p");
         assert_eq!(q.sorted_kv(), q.sorted_kv_by_key());

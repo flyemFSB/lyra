@@ -1,4 +1,4 @@
-//! 音频引擎装配与控制：管理解码线程、输出流生命周期及跨线程命令调度。
+//! 音频引擎控制：解码线程生命周期与跨线程播放调度。
 
 use std::sync::Arc;
 use std::thread::{self, JoinHandle};
@@ -16,10 +16,10 @@ use crate::ring::{map_channels, push_slice, ring_capacity};
 use crate::state::Shared;
 use crate::{Error, Event, Fetcher, Snapshot, State, TrackRef};
 
-/// 引擎可调参数，[`Default`] 给出推荐值。
+/// 音频引擎配置参数
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct AudioConfig {
-    /// 环形缓冲目标时长（毫秒）。越大越抗抖动，越大切歌 / 暂停延迟越明显。
+    /// 环形缓冲区目标时长（毫秒，默认 200ms）
     pub ring_ms: u32,
 }
 
@@ -29,7 +29,7 @@ impl Default for AudioConfig {
     }
 }
 
-/// UI → 解码线程的控制命令。
+/// 解码线程控制命令
 enum Command {
     Play(TrackRef),
     Toggle,
@@ -37,7 +37,7 @@ enum Command {
     Shutdown,
 }
 
-/// UI 侧句柄。所有方法非阻塞、幂等；`Clone` 共享同一底层引擎。
+/// 音频引擎控制句柄（非阻塞、线程安全）
 #[derive(Clone)]
 pub struct Engine {
     inner: Arc<EngineInner>,
@@ -47,7 +47,7 @@ struct EngineInner {
     shared: Arc<Shared>,
     cmd_tx: Sender<Command>,
     thread: Option<JoinHandle<()>>,
-    /// 输出流必须存活；`Stream` 在 drop 时停止播放。
+    /// 输出流句柄（随引擎销毁而停止）
     _stream: cpal::Stream,
 }
 
@@ -57,7 +57,7 @@ impl Drop for EngineInner {
         let Some(handle) = self.thread.take() else {
             return;
         };
-        // 最多等待解码线程 2 秒，避免因网络或解码阻塞导致退出挂起。
+        // 最多等待解码线程 2 秒，防退出挂起
         let deadline = Instant::now() + Duration::from_secs(2);
         while !handle.is_finished() && Instant::now() < deadline {
             thread::sleep(Duration::from_millis(20));
@@ -71,27 +71,27 @@ impl Drop for EngineInner {
 }
 
 impl Engine {
-    /// 播放一首曲目（会替换当前曲目）。
+    /// 播放指定曲目
     pub fn play(&self, track: TrackRef) {
         self.send(Command::Play(track));
     }
 
-    /// 播放 / 暂停切换。
+    /// 切换播放与暂停状态
     pub fn toggle(&self) {
         self.send(Command::Toggle);
     }
 
-    /// 定位到指定毫秒。无当前曲目时无效果。
+    /// 定位到指定毫秒位置
     pub fn seek(&self, ms: u64) {
         self.send(Command::Seek(ms));
     }
 
-    /// 设置音量，范围外的值会被夹紧到 `0.0..=1.0`。
+    /// 设置音量（0.0..=1.0）
     pub fn set_volume(&self, v: f32) {
         self.inner.shared.set_volume(v.clamp(0.0, 1.0));
     }
 
-    /// 读取当前状态快照。只读原子字段；曲目字段仅短暂加锁，不做任何 IO 或等待。
+    /// 获取当前状态快照（非阻塞）
     #[must_use]
     pub fn snapshot(&self) -> Snapshot {
         let shared = &self.inner.shared;
@@ -109,12 +109,12 @@ impl Engine {
     }
 }
 
-/// 使用默认配置启动音频引擎。
+/// 使用默认配置启动音频引擎
 pub fn spawn(fetcher: Arc<dyn Fetcher>, events: Box<dyn Fn(Event) + Send + Sync>) -> Result<Engine, Error> {
     spawn_with(fetcher, events, AudioConfig::default())
 }
 
-/// 打开默认输出设备、构建环形缓冲与音频输出流并启动解码线程。
+/// 启动音频引擎（配置输出设备、缓冲区与解码线程）
 pub fn spawn_with(
     fetcher: Arc<dyn Fetcher>,
     events: Box<dyn Fn(Event) + Send + Sync>,
@@ -164,7 +164,7 @@ pub fn spawn_with(
     })
 }
 
-/// 解码线程持有的上下文。
+/// 解码线程运行上下文
 struct RunCtx {
     fetcher: Arc<dyn Fetcher>,
     events: Box<dyn Fn(Event) + Send + Sync>,
@@ -175,20 +175,20 @@ struct RunCtx {
     channels: usize,
 }
 
-/// 一首正在播放的曲目：解码器 + 可选重采样器 + 待推送样本。
+/// 单曲播放会话
 struct Session {
     decoder: Decoder,
-    /// 当前曲目，定位时需要用它重新打开解码器。
+    /// 当前曲目信息
     track: TrackRef,
     resampler: Option<Resampler>,
     src_channels: usize,
     dst_channels: usize,
     dst_rate: u32,
     duration_ms: u64,
-    /// 已转换、尚未推入 ring 的交织样本（目标采样率 / 声道）。
+    /// 待推入缓冲区的转换后样本
     pending: Vec<f32>,
     pending_off: usize,
-    /// 已推入 ring 的帧数（目标采样率），用于推算播放进度。
+    /// 已推入缓冲区的总帧数
     pushed_frames: u64,
 }
 
@@ -198,7 +198,7 @@ impl Session {
         let decoder = Decoder::open_with_hint(reader, Some(&track.ext))?;
         let src_channels = decoder.channels();
         let src_rate = decoder.sample_rate();
-        // 仅当设备采样率与音频源采样率不一致时启用重采样
+        // 采样率不一致时启用重采样
         let resampler = if src_rate == ctx.sample_rate {
             None
         } else {
@@ -218,7 +218,7 @@ impl Session {
         })
     }
 
-    /// 把一段源 PCM 转换（重采样 + 声道映射）进入 pending 队列。
+    /// 转换源 PCM 样本并加入待推送队列
     fn stage(&mut self, pcm: &[f32]) -> Result<(), Error> {
         let resampled = match &mut self.resampler {
             Some(r) => r.process(pcm)?,
@@ -229,7 +229,7 @@ impl Session {
         Ok(())
     }
 
-    /// 尽量把 pending 推入 ring；返回是否已全部推入（false 表示 ring 已满）。
+    /// 推送样本到环形缓冲区（返回是否已全部写入）
     fn flush(&mut self, prod: &mut HeapProd<f32>) -> bool {
         let pushed = push_slice(prod, &self.pending[self.pending_off..]);
         self.pending_off += pushed;
@@ -243,14 +243,7 @@ impl Session {
         }
     }
 
-    /// 从流开头顺序解码并丢弃，直到跨过 `ms` 毫秒。
-    ///
-    /// 成本与目标位置成正比：release 下实测 Ogg 定位到 60 秒约 100 ms（约 1.7 ms/秒音频），
-    /// 因此超长音频（一小时以上）的远距离定位会有可见延迟，届时再考虑加索引。
-    ///
-    /// 定位一律走这条路径而不复用 symphonia 的 seek：symphonia 0.5.5 的 Ogg 解复用器
-    /// 在数据源报告 `byte_len() == None`（边下边播时长度未知）时，会在 seek 内部
-    /// `Option::unwrap()` panic；release 构建 panic=abort，表现为整个进程闪退。
+    /// 顺序解码并丢弃样本直到指定位置（避免未定长流 seek 导致 panic）
     fn advance_to(&mut self, ms: u64) -> Result<(), Error> {
         let target = ms.saturating_mul(u64::from(self.decoder.sample_rate())) / 1000;
         let mut skipped = 0_u64;
@@ -263,7 +256,7 @@ impl Session {
         Ok(())
     }
 
-    /// 当前播放进度（毫秒）：已推送帧数减去仍在 ring 中未播的帧数。
+    /// 计算当前播放进度（毫秒）
     fn position_ms(&self, prod: &HeapProd<f32>) -> u64 {
         if self.dst_rate == 0 {
             return 0;
@@ -274,7 +267,7 @@ impl Session {
     }
 }
 
-/// 一次 `pump` 的结果。
+/// 单次数据泵状态
 enum Pump {
     Progress,
     Full,
@@ -282,7 +275,7 @@ enum Pump {
     Failed(String),
 }
 
-/// 解码线程主循环的状态机。
+/// 播放器主状态机
 struct Player {
     ctx: RunCtx,
     state: State,
@@ -304,7 +297,7 @@ impl Player {
         while self.tick() {}
     }
 
-    /// 处理一轮命令 + 解码 + 进度上报；返回 false 表示退出线程。
+    /// 执行单轮事件处理与解码调度（返回 false 表示退出线程）
     fn tick(&mut self) -> bool {
         let busy = self.state == State::Playing && self.session.is_some();
         if busy {
@@ -330,7 +323,7 @@ impl Player {
                 Pump::Progress => {}
                 Pump::Full => thread::sleep(Duration::from_millis(2)),
                 Pump::Ended => {
-                    // 等待环形缓冲区尾音样本播放完毕（最长等待 2 秒以防死锁）
+                    // 等待缓冲区尾音播放完毕（超时 2 秒防挂死）
                     let mut waited = 0_u32;
                     while self.ctx.prod.occupied_len() > 0 && waited < 400 {
                         thread::sleep(Duration::from_millis(5));
@@ -369,7 +362,7 @@ impl Player {
     }
 
     fn start(&mut self, track: &TrackRef) {
-        // 更新加载态与当前曲目信息
+        // 更新加载态与当前曲目
         self.set_state(State::Loading);
         self.ctx.shared.set_track(track.clone());
 
@@ -377,7 +370,7 @@ impl Player {
             Ok(session) => {
                 self.session = Some(session);
                 self.ctx.shared.set_position(0, track.duration_ms);
-                // 切歌时主动请求清空环形缓冲区，避免混入上一首的残留音频。
+                // 切歌请求刷新缓冲区，避免混入前一首尾音
                 self.ctx.shared.request_flush();
                 self.set_state(State::Playing);
             }
@@ -394,9 +387,9 @@ impl Player {
         let Some(track) = self.session.as_ref().map(|session| session.track.clone()) else {
             return;
         };
-        // 先清空环形缓冲，定位期间不再继续播放旧位置的音频。
+        // 请求清空缓冲区，停止输出旧位置样本
         self.ctx.shared.request_flush();
-        // 重开解码器再顺序丢弃到目标位置（见 `Session::advance_to` 的 panic 说明）。
+        // 重新打开解码器并快进至目标位置
         let mut session = match Session::open(&self.ctx, &track) {
             Ok(session) => session,
             Err(error) => {
@@ -414,11 +407,11 @@ impl Player {
         }
         session.pushed_frames = ms.saturating_mul(u64::from(dst_rate)) / 1000;
         self.session = Some(session);
-        // 目标定位位置直接更新，避免受异步清空延迟影响。
+        // 立即更新进度位置
         self.ctx.shared.set_position(ms, track.duration_ms);
     }
 
-    /// 解码一段并推入 ring。ring 满时返回 [`Pump::Full`]，由外层短暂休眠后重试。
+    /// 解码并推送样本（缓冲区满时返回 Full）
     fn pump(&mut self) -> Pump {
         let Self { ctx, session, .. } = self;
         let Some(session) = session.as_mut() else {
@@ -452,7 +445,7 @@ impl Player {
         self.ctx.shared.set_state(state);
     }
 
-    /// 每约 150ms 上报一次进度；仅在存在当前曲目时进行。
+    /// 定期上报播放进度（约 150ms 间隔）
     fn report_position(&mut self) {
         if self.last_report.elapsed() < Duration::from_millis(150) {
             return;

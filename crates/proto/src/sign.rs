@@ -1,4 +1,4 @@
-//! 请求签名算法（Android、Web、设备注册、signKey 与 signParamsKey）。
+//! 签名算法实现（Android、Web、设备注册、signKey 与 signParamsKey）。
 
 use md5::{Digest as _, Md5};
 
@@ -13,7 +13,7 @@ fn md5_concat(parts: &[&[u8]]) -> String {
     hex::encode(h.finalize())
 }
 
-/// Android 端请求签名：md5(SALT_MD5 + 按键排序的键值对 + 请求体 + SALT_MD5)。
+/// Android 端签名：md5(SALT_MD5 + 排序键值对 + 请求体 + SALT_MD5)
 #[must_use]
 pub fn signature_android(params: &Params, body: &str) -> String {
     md5_concat(&[
@@ -24,7 +24,7 @@ pub fn signature_android(params: &Params, body: &str) -> String {
     ])
 }
 
-/// Web 端请求签名：md5(SALT_WEB + 排序键值对 + 请求体 + SALT_WEB)。
+/// Web 端签名：md5(SALT_WEB + 排序键值对 + 请求体 + SALT_WEB)
 #[must_use]
 pub fn signature_web(params: &Params, body: &str) -> String {
     md5_concat(&[
@@ -35,7 +35,7 @@ pub fn signature_web(params: &Params, body: &str) -> String {
     ])
 }
 
-/// 设备注册请求签名：仅按参数值排序后拼接并加盐计算 MD5。
+/// 设备注册签名：按参数值排序拼接后加盐计算 MD5
 #[must_use]
 pub fn signature_register(params: &Params) -> String {
     md5_concat(&[
@@ -45,7 +45,7 @@ pub fn signature_register(params: &Params) -> String {
     ])
 }
 
-/// 歌曲播放地址授权密钥 sign_key：md5(hash + SALT_SIGNKEY + appid + mid + userid)。
+/// 取址授权 sign_key：md5(hash + SALT_SIGNKEY + appid + mid + userid)
 #[must_use]
 pub fn sign_key(hash: &str, mid: &str, userid: i64, appid: u32) -> String {
     md5_concat(&[
@@ -57,7 +57,7 @@ pub fn sign_key(hash: &str, mid: &str, userid: i64, appid: u32) -> String {
     ])
 }
 
-/// 电台接口参数密钥 sign_params_key：md5(appid + SALT_MD5 + clientver + data)。
+/// 电台参数密钥 sign_params_key：md5(appid + SALT_MD5 + clientver + data)
 #[must_use]
 pub fn sign_params_key(data: i64, appid: u32, clientver: u32) -> String {
     md5_concat(&[
@@ -77,7 +77,7 @@ mod tests {
 
     #[test]
     fn sign_key_and_params_key_are_stable() {
-        // 验证固定测试向量的签名计算稳定性
+        // 校验固定向量签名一致性
         assert_eq!(
             sign_key("HASHABCDEF0123456789", "12345678901234567890", 2043841403, APPID),
             "b17dc2425bb03196dbff0a4e502fc54c"

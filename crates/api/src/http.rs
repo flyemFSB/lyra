@@ -1,11 +1,11 @@
-//! 基于 reqwest 的 HTTP 传输实现，供 CLI 与自动化测试使用。
+//! 基于 reqwest 的 HTTP 传输层实现。
 
 use async_trait::async_trait;
 
 use crate::error::{Error, Result};
 use crate::transport::{ChunkSink, Method, Request, Response, Transport};
 
-/// 基于 `reqwest` 的传输实现。
+/// Reqwest HTTP 传输层
 #[derive(Debug, Clone)]
 pub struct ReqwestTransport {
     client: reqwest::Client,
@@ -18,12 +18,12 @@ impl Default for ReqwestTransport {
 }
 
 impl ReqwestTransport {
-    /// 创建配置了 HTTP/2 自适应窗口与读超时的客户端实例。
+    /// 创建预设超时的 HTTP 传输实例
     #[must_use]
     pub fn new() -> Self {
         Self {
             client: reqwest::Client::builder()
-                // 启用 HTTP/2 自适应窗口提升吞吐。
+                // 启用 HTTP/2 自适应流控窗口
                 .http2_adaptive_window(true)
                 .read_timeout(std::time::Duration::from_secs(30))
                 .build()
@@ -31,7 +31,7 @@ impl ReqwestTransport {
         }
     }
 
-    /// 将网络错误转换为传输错误并剔除 URL，防止令牌等敏感信息泄露。
+    /// 转换网络错误并脱敏 URL
     fn transport_error(error: reqwest::Error) -> Error {
         Error::Transport(error.without_url().to_string())
     }
@@ -89,13 +89,13 @@ impl Transport for ReqwestTransport {
         if !response.status().is_success() {
             return Err(Error::Http {
                 status: response.status().as_u16(),
-                // 截断错误响应文本，避免大型 HTML 页面污染错误文案。
+                // 截断异常响应体
                 body: crate::codec::truncate(&response.text().await.unwrap_or_default(), 512),
             });
         }
-        // 上报期望内容长度以校验下载完整性。
+        // 上报声明的内容总长度
         sink.expected_len(response.content_length());
-        // 流式分块传输避免大文件占用额外内存。
+        // 流式分块读取并写入接收器
         while let Some(chunk) = response.chunk().await.map_err(ReqwestTransport::transport_error)? {
             sink.chunk(&chunk);
         }

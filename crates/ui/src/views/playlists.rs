@@ -1,4 +1,4 @@
-//! 个人歌单与歌曲列表视图组件：分栏 One Island 结构与高响应度联动。
+//! 歌单详情与曲目列表视图。
 
 use std::rc::Rc;
 use std::sync::Arc;
@@ -16,7 +16,7 @@ use crate::theme::{CARD_BORDER, TEXT_MUTED, cover_box, notice_with_icon, row_siz
 use crate::views::player::PlayerModel;
 use crate::views::tracks::track_row;
 
-/// 歌单分类 Tab：自建歌单（包含我喜欢）与收藏歌单。
+/// 歌单分类标签页
 #[derive(Clone, Copy, PartialEq, Eq, Default)]
 pub(crate) enum PlaylistTab {
     #[default]
@@ -24,7 +24,7 @@ pub(crate) enum PlaylistTab {
     Collected,
 }
 
-/// 我的歌单视图结构。
+/// 歌单详情视图
 pub(crate) struct PlaylistsView {
     backend: Backend,
     shell: WeakEntity<AppShell>,
@@ -41,17 +41,17 @@ pub(crate) struct PlaylistsView {
     error: Option<SharedString>,
     heading: SharedString,
     listid: Option<String>,
-    /// 请求序号：只有最新一次选择歌单的响应才允许落地。
+    /// 请求序号（用于丢弃过期响应）
     request_seq: u64,
-    /// 下一页页码（为 None 表示已到达最后一页）。
+    /// 下一页页码（None 表示已加载完毕）
     next_page: Option<u32>,
-    /// 本次响应是「追加下一页」还是「替换整个列表」。
+    /// 是否为追加分页数据
     appending: bool,
     _sub: Subscription,
 }
 
 impl PlaylistsView {
-    /// 创建歌单视图实例并订阅播放状态变化。
+    /// 创建歌单视图并订阅播放器状态
     pub(crate) fn new(
         backend: Backend,
         shell: WeakEntity<AppShell>,
@@ -84,7 +84,7 @@ impl PlaylistsView {
         }
     }
 
-    /// 清空视图内容（登出/换账号时调用），并让在途响应失效。
+    /// 重置视图状态并废弃在途请求
     pub(crate) fn reset(&mut self, cx: &mut Context<Self>) {
         self.playlists = Arc::new(Vec::new());
         self.selected = None;
@@ -104,14 +104,14 @@ impl PlaylistsView {
         cx.notify();
     }
 
-    /// 视图初次加载时触发歌单列表请求。
+    /// 确保歌单数据已加载
     pub(crate) fn ensure(&mut self, cx: &mut Context<Self>) {
         if !self.loaded && !self.loading_playlists {
             self.reload(cx);
         }
     }
 
-    /// 强制重新请求歌单列表。
+    /// 重新拉取歌单列表
     pub(crate) fn reload(&mut self, cx: &mut Context<Self>) {
         self.loading_playlists = true;
         self.error = None;
@@ -121,7 +121,7 @@ impl PlaylistsView {
             .spawn(async move { Msg::Playlists(app.playlists().await.map_err(|error| error.to_string())) });
     }
 
-    /// 响应处理歌单列表数据。
+    /// 处理歌单列表响应结果
     pub(crate) fn on_playlists(&mut self, result: Result<Vec<Playlist>, String>, cx: &mut Context<Self>) {
         self.loading_playlists = false;
         self.loaded = true;
@@ -145,13 +145,12 @@ impl PlaylistsView {
         cx.notify();
     }
 
-    /// 切换自建歌单与收藏歌单分类。
+    /// 切换自建与收藏标签页
     pub(crate) fn switch_tab(&mut self, tab: PlaylistTab, cx: &mut Context<Self>) {
         if self.tab == tab {
             return;
         }
         self.tab = tab;
-        // 查找当前 Tab 下的第一个歌单并选中
         let first_in_tab = self
             .playlists
             .iter()
@@ -168,7 +167,7 @@ impl PlaylistsView {
         cx.notify();
     }
 
-    /// 选中指定歌单并请求曲目列表。
+    /// 选中指定歌单并拉取曲目
     pub(crate) fn select(&mut self, index: usize, cx: &mut Context<Self>) {
         let Some(list) = self.playlists.get(index) else {
             return;
@@ -190,7 +189,7 @@ impl PlaylistsView {
             .spawn(async move { Msg::Tracks(seq, app.tracks(&global_id, 1).await.map_err(|error| error.to_string())) });
     }
 
-    /// 响应处理歌曲列表分页数据。
+    /// 处理曲目列表分页响应
     pub(crate) fn on_tracks(&mut self, seq: u64, result: Result<Page<Song>, String>, cx: &mut Context<Self>) {
         if seq != self.request_seq {
             return;
@@ -218,7 +217,7 @@ impl PlaylistsView {
         cx.notify();
     }
 
-    /// 加载下一页歌曲。
+    /// 加载下一页曲目
     fn load_more(&mut self, cx: &mut Context<Self>) {
         if self.loading_tracks || self.appending {
             return;
@@ -246,14 +245,14 @@ impl PlaylistsView {
         });
     }
 
-    /// 增删歌曲后刷新当前选中的歌单。
+    /// 刷新当前选中歌单
     pub(crate) fn refresh_current(&mut self, cx: &mut Context<Self>) {
         if let Some(index) = self.selected {
             self.select(index, cx);
         }
     }
 
-    /// 渲染单行歌曲组件。
+    /// 渲染单首曲目行
     fn row(&self, index: usize, cx: &App) -> AnyElement {
         let removable = self.listid.as_ref().and_then(|listid| {
             self.songs
@@ -283,7 +282,7 @@ impl PlaylistsView {
         )
     }
 
-    /// 渲染右侧歌曲列表区。
+    /// 渲染曲目列表区域
     fn track_area(&self, cx: &Context<Self>) -> AnyElement {
         let mut header = h_flex()
             .w_full()

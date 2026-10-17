@@ -1,4 +1,4 @@
-//! 底部控制条与跨视图共享播放状态：简约淡雅白底卡片、翡翠绿圆形主控键与全功能触控交互。
+//! 底部播放控制条与共享播放模型。
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -20,15 +20,15 @@ use crate::theme::{
     cover_box,
 };
 
-/// 播放模式在界面层的展示与循环行为（模式的持久化定义在 `lyra-store`，两边共用同一个枚举）。
 pub(crate) use lyra_app::PlayMode;
 
+/// 播放模式 UI 展示与切换扩展
 pub(crate) trait PlayModeUi {
-    /// 展示文本标签。
+    /// 显示文本标签
     fn label(self) -> &'static str;
-    /// 对应的 Lucide 矢量图标。
+    /// 对应图标
     fn icon(self) -> IconName;
-    /// 循环切换至下一个模式。
+    /// 循环切换至下一模式
     fn next(self) -> Self;
 }
 
@@ -58,22 +58,22 @@ impl PlayModeUi for PlayMode {
     }
 }
 
-/// 播放控制与歌词共享的数据模型。
+/// 播放状态共享数据模型
 pub(crate) struct PlayerModel {
-    /// 音频引擎运行状态快照。
+    /// 音频引擎状态快照
     pub(crate) snapshot: Snapshot,
-    /// 当前是否存在可用的音频输出硬件。
+    /// 是否存在可用音频输出设备
     pub(crate) has_engine: bool,
-    /// 当前播放列表曲目队列。
+    /// 当前播放曲目队列
     pub(crate) queue: Arc<Vec<Song>>,
-    /// 当前播放曲目在队列中的下标。
+    /// 当前播放曲目在队列中的索引
     pub(crate) index: usize,
-    /// 当前播放模式。
+    /// 当前播放模式
     pub(crate) mode: PlayMode,
 }
 
 impl PlayerModel {
-    /// 创建初始状态；`mode` 为上次退出时持久化的播放模式。
+    /// 创建初始播放状态
     pub(crate) fn new(has_engine: bool, mode: PlayMode) -> Self {
         Self {
             snapshot: Snapshot {
@@ -90,13 +90,13 @@ impl PlayerModel {
         }
     }
 
-    /// 循环切换播放模式。
+    /// 循环切换播放模式
     pub(crate) fn cycle_mode(&mut self) -> PlayMode {
         self.mode = self.mode.next();
         self.mode
     }
 
-    /// 获取下一首曲目索引（受播放模式制约）。
+    /// 获取下一首曲目索引
     pub(crate) fn next_index(&self) -> Option<usize> {
         let len = self.queue.len();
         if len == 0 {
@@ -119,7 +119,7 @@ impl PlayerModel {
         }
     }
 
-    /// 获取上一首曲目索引（受播放模式制约）。
+    /// 获取上一首曲目索引
     pub(crate) fn prev_index(&self) -> Option<usize> {
         let len = self.queue.len();
         if len == 0 {
@@ -142,7 +142,7 @@ impl PlayerModel {
         }
     }
 
-    /// 获取当前曲目的展示元数据：`(哈希, 标题, 歌手)`。
+    /// 获取当前曲目元数据（哈希、标题、歌手）
     pub(crate) fn current_labels(&self) -> (Option<String>, SharedString, SharedString) {
         self.current_song().map_or_else(
             || (None, SharedString::new_static("未在播放"), SharedString::new_static("")),
@@ -156,19 +156,19 @@ impl PlayerModel {
         )
     }
 
-    /// 获取当前播放的歌曲实体。
+    /// 获取当前播放歌曲
     pub(crate) fn current_song(&self) -> Option<&Song> {
         self.queue.get(self.index)
     }
 
-    /// 替换播放队列并跳转至指定索引曲目。
+    /// 设置播放队列与当前索引
     pub(crate) fn set_queue(&mut self, queue: Arc<Vec<Song>>, index: usize) {
         self.queue = queue;
         self.index = index;
         self.snapshot.position_ms = 0;
     }
 
-    /// 合并音频引擎最新快照，返回是否有可见属性变更。
+    /// 应用引擎最新快照并返回是否发生变更
     pub(crate) fn apply_snapshot(&mut self, next: Snapshot) -> bool {
         let track_changed = self.snapshot.track.as_ref().map(|t| &t.hash) != next.track.as_ref().map(|t| &t.hash);
         let changed = track_changed
@@ -183,7 +183,7 @@ impl PlayerModel {
     }
 }
 
-/// 底部浮动播放条组件。
+/// 底部播放条视图
 pub(crate) struct PlayerBar {
     backend: Backend,
     shell: WeakEntity<AppShell>,
@@ -200,7 +200,7 @@ pub(crate) struct PlayerBar {
 }
 
 impl PlayerBar {
-    /// 创建播放条实例并注册滑块监听与快照轮询任务。
+    /// 创建播放条并启动状态同步任务
     pub(crate) fn new(
         backend: Backend,
         shell: WeakEntity<AppShell>,
@@ -271,7 +271,7 @@ impl PlayerBar {
         }
     }
 
-    /// 将音频引擎状态快照同步至滑块与状态缓存。
+    /// 同步音频快照状态
     fn sync(&mut self, snapshot: Snapshot, window: &mut Window, cx: &mut Context<Self>) {
         let changed = self.player.update(cx, |model, model_cx| {
             let changed = model.apply_snapshot(snapshot);
@@ -321,7 +321,7 @@ impl PlayerBar {
         }
     }
 
-    /// 切换播放与暂停状态。
+    /// 切换播放与暂停状态
     fn toggle(&self) {
         if let Some(engine) = self.backend.engine() {
             engine.toggle();
@@ -330,7 +330,7 @@ impl PlayerBar {
         }
     }
 
-    /// 按百分比跳转播放进度。
+    /// 按进度百分比跳转播放位置
     fn seek_percent(&self, percent: f32, cx: &Context<Self>) {
         let Some(engine) = self.backend.engine() else {
             return;
@@ -341,7 +341,7 @@ impl PlayerBar {
         engine.seek(ms);
     }
 
-    /// 持久化播放模式，下次启动沿用（与音量同一套读改写设置的方式）。
+    /// 持久化播放模式
     fn persist_mode(&self, mode: PlayMode) {
         let app = self.backend.app();
         self.backend.spawn(async move {
@@ -355,7 +355,7 @@ impl PlayerBar {
         });
     }
 
-    /// 设置音量并在松开时持久化设置。
+    /// 调整音量并在释放时持久化
     fn apply_volume(&self, value: f32, persist: bool) {
         let value = value.clamp(0.0, 1.0);
         if let Some(engine) = self.backend.engine() {
@@ -376,7 +376,7 @@ impl PlayerBar {
     }
 }
 
-/// 提取单值滑块的浮点数值。
+/// 提取滑块浮点数值
 fn value_single(value: SliderValue) -> f32 {
     match value {
         SliderValue::Single(single) => single,
@@ -420,7 +420,7 @@ impl Render for PlayerBar {
             .border_1()
             .border_color(CARD_BORDER)
             .shadow_sm()
-            // 左侧：封面（点击进入歌词写真）、歌名歌手与收藏按钮
+            // 封面、曲目信息与收藏按钮
             .child(
                 h_flex()
                     .w(px(260.0))
@@ -490,7 +490,7 @@ impl Render for PlayerBar {
                             }),
                     ),
             )
-            // 中间：核心播放控制器与进度时间轴
+            // 核心控制区与进度条
             .child(
                 v_flex()
                     .flex_1()
@@ -502,7 +502,7 @@ impl Render for PlayerBar {
                         h_flex()
                             .gap(px(14.0))
                             .items_center()
-                            // 播放模式切换
+                            // 切换播放模式
                             .child(
                                 Button::new("mode_toggle")
                                     .ghost()
@@ -519,7 +519,6 @@ impl Render for PlayerBar {
                                         this.backend.send(Msg::Toast(format!("已切换为：{}", next.label())));
                                     })),
                             )
-                            // 上一首
                             .child(
                                 Button::new("prev")
                                     .ghost()
@@ -530,7 +529,7 @@ impl Render for PlayerBar {
                                         shell_prev.update(cx, AppShell::play_prev).ok();
                                     }),
                             )
-                            // 翡翠绿圆形主播放/暂停按键
+                            // 播放/暂停按钮
                             .child(
                                 div()
                                     .id("toggle_play_btn")
@@ -548,7 +547,6 @@ impl Render for PlayerBar {
                                     .on_click(cx.listener(|this, _event, _window, _cx| this.toggle()))
                                     .child(Icon::new(play_icon).size(px(20.0)).text_color(rgb(0xffffff))),
                             )
-                            // 下一首
                             .child(
                                 Button::new("next")
                                     .ghost()
@@ -560,7 +558,7 @@ impl Render for PlayerBar {
                                     }),
                             ),
                     )
-                    // 进度时间条
+                    // 进度条
                     .child(
                         h_flex()
                             .w_full()
@@ -591,7 +589,7 @@ impl Render for PlayerBar {
                             ),
                     ),
             )
-            // 右侧：音频设备状态、音量调节组（静音切换+滑块拖动）与播放队列抽屉
+            // 音量与播放队列
             .child(
                 h_flex()
                     .w(px(260.0))
@@ -601,7 +599,7 @@ impl Render for PlayerBar {
                     .when(!has_engine, |this| {
                         this.child(badge("无音频设备", hsla(0.0, 0.85, 0.95, 1.0), hsla(0.0, 0.85, 0.45, 1.0)))
                     })
-                    // 音量调节集群：静音图标 + 自由拖动音量滑块
+                    // 音量调节
                     .child(
                         h_flex()
                             .items_center()
@@ -646,14 +644,14 @@ impl Render for PlayerBar {
 mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used, clippy::pedantic)]
 
-    // 不能 `use super::*`：播放条模块 glob 引入了 `gpui_kit::*`，会把 Rust 自带的 `#[test]` 发现成 GPUI 的同名宏。
+    // 避免与 gpui_kit::* 宏冲突
     use std::sync::Arc;
 
     use lyra_api::model::Song;
 
     use super::{PlayMode, PlayerModel};
 
-    /// 造一个 3 首曲目的队列，当前停在第 `index` 首。
+    /// 构建包含 3 首曲目的测试播放模型
     fn model(mode: PlayMode, index: usize) -> PlayerModel {
         let songs: Vec<Song> = ["a", "b", "c"]
             .iter()
@@ -669,7 +667,7 @@ mod tests {
 
     #[test]
     fn persisted_mode_is_what_the_session_starts_with() {
-        // 上次选的模式经配置落盘，重开客户端必须沿用，而不是回到列表循环。
+        // 恢复持久化的播放模式
         assert_eq!(PlayerModel::new(true, PlayMode::Shuffle).mode, PlayMode::Shuffle);
         assert_eq!(PlayerModel::new(true, PlayMode::SingleLoop).mode, PlayMode::SingleLoop);
         assert_eq!(PlayerModel::new(true, PlayMode::ListLoop).mode, PlayMode::ListLoop);

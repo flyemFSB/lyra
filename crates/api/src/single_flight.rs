@@ -1,4 +1,4 @@
-//! 单飞并发去重：合并同 key 并发请求并广播执行结果。
+//! 单飞并发去重：合并同键并发请求并广播结果。
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -25,7 +25,7 @@ impl<T> Default for Flight<T> {
     }
 }
 
-/// Leader 守卫：在被取消或异常退出时向所有等待者广播失败。
+/// 执行者异常退出守卫（向所有等待者广播失败）
 struct LeaderGuard<'a, T: Clone + Send + Sync + 'static> {
     owner: &'a SingleFlight<T>,
     key: String,
@@ -40,17 +40,17 @@ impl<T: Clone + Send + Sync + 'static> Drop for LeaderGuard<'_, T> {
         }
         self.owner.inflight.remove(&self.key);
         let error = Error::Transport("single-flight leader 被取消".to_owned());
-        // 互斥写入完成状态并转移全部等待通道。
+        // 标记完成并唤醒所有等待通道
         *self.flight.done.lock() = Some(Err(error.clone()));
         let waiters = std::mem::take(&mut *self.flight.waiters.lock());
         for waiter in waiters {
-            // 非阻塞唤醒等待者并派发取消错误。
+            // 派发取消错误
             let _ = waiter.try_send(Err(error.clone()));
         }
     }
 }
 
-/// 并发同 key 请求的合并器。
+/// 并发请求合并器
 #[derive(Debug)]
 pub struct SingleFlight<T> {
     inflight: DashMap<String, Arc<Flight<T>>>,
@@ -64,7 +64,7 @@ impl<T> Default for SingleFlight<T> {
 }
 
 impl<T> SingleFlight<T> {
-    /// 创建单飞合并器实例。
+    /// 创建请求合并器实例
     #[must_use]
     pub fn new() -> Self {
         Self {
@@ -73,7 +73,7 @@ impl<T> SingleFlight<T> {
         }
     }
 
-    /// 被合并掉的调用次数（可观测性 / 测试用）。
+    /// 获取被合并拦截的请求总数
     #[must_use]
     pub fn coalesced(&self) -> u64 {
         self.hits.load(Ordering::Relaxed)
@@ -81,7 +81,7 @@ impl<T> SingleFlight<T> {
 }
 
 impl<T: Clone + Send + Sync + 'static> SingleFlight<T> {
-    /// 执行异步任务，并发同键请求共享 leader 执行结果。
+    /// 执行异步任务并对相同键去重合并
     pub async fn run<F, Fut>(&self, key: impl Into<String>, work: F) -> Result<T>
     where
         F: FnOnce() -> Fut,
@@ -92,7 +92,7 @@ impl<T: Clone + Send + Sync + 'static> SingleFlight<T> {
         let (flight, leader, follower_rx) = match self.inflight.entry(key.clone()) {
             Entry::Occupied(occupied) => {
                 let flight = occupied.get().clone();
-                // 互斥检查已完成状态避免丢失唤醒。
+                // 已完成则直接返回结果
                 let done = flight.done.lock();
                 if let Some(result) = done.as_ref() {
                     return result.clone();
@@ -120,7 +120,7 @@ impl<T: Clone + Send + Sync + 'static> SingleFlight<T> {
             };
         }
 
-        // 创建 Leader 保护守卫。
+        // 注册执行守卫
         let mut guard = LeaderGuard {
             owner: self,
             key: key.clone(),
@@ -135,7 +135,7 @@ impl<T: Clone + Send + Sync + 'static> SingleFlight<T> {
         *flight.done.lock() = Some(result.clone());
         let waiters = std::mem::take(&mut *flight.waiters.lock());
         for waiter in waiters {
-            // 异步广播执行结果至所有等待者。
+            // 广播执行结果至所有等待者
             let _ = waiter.send(result.clone()).await;
         }
         result

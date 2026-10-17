@@ -1,4 +1,4 @@
-//! 会话与认证端点：验证码发送、短信登录、设备注册及用户信息。
+//! 会话与认证端点：验证码发送、短信登录、设备注册及二次校验。
 
 use lyra_proto::consts::{APPID, CLIENTVER, GITVERSION, RSA_PUBLIC, T1_IV, T1_KEY, T2_IV, T2_KEY, T2_MIDDLE, UA_LOGIN};
 use lyra_proto::{
@@ -12,26 +12,26 @@ use crate::error::{Error, Result};
 use crate::spec::RequestSpec;
 use crate::spec::{CAPTCHA_BASE, LOGIN_GATEWAY, USER_SERVICE, VERIFY_BASE, now_millis};
 
-/// 登录结果。
+/// 登录结果
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct LoginResult {
-    /// 用户 ID。
+    /// 用户 ID
     pub userid: i64,
-    /// 令牌。
+    /// 登录令牌
     pub token: String,
-    /// 会员类型（概念版恒为 0，判定会员请用 `/v1/get_union_vip`）。
+    /// 会员类型（概念版恒为 0，实际状态需查 union_vip）
     pub vip_type: i64,
-    /// 会员令牌。
+    /// 会员令牌
     pub vip_token: String,
-    /// 昵称，若上游返回。
+    /// 用户昵称
     pub nickname: String,
 }
 
-/// 发送短信登录验证码（基于 v8 协议加密号码与密钥）。
+/// 发送短信登录验证码（基于 v8 协议加密号码与密钥）
 pub async fn send_mobile_code(api: &Api, mobile: &str) -> Result<Value> {
     let date_time = now_millis();
     let encrypted = aes_encrypt_derived(&serde_json::json!({ "mobile": mobile }).to_string())?;
-    // pk 与登录同构：RSA 无填充包裹 `{clienttime_ms,key}`，输出大写 hex。
+    // pk 与登录同构：RSA 无填充加密 {clienttime_ms,key} 并转为大写十六进制
     let pk_plain = serde_json::json!({ "clienttime_ms": date_time, "key": encrypted.key }).to_string();
     let spec = RequestSpec::post("/v8/send_mobile_code")
         .base(CAPTCHA_BASE)
@@ -43,14 +43,13 @@ pub async fn send_mobile_code(api: &Api, mobile: &str) -> Result<Value> {
             "mobile": mask_mobile(mobile),
             "params": encrypted.hex,
         }))
-        // 与同一台 login 服务上已验证可用的登录请求用同一个 UA：默认 UA 里的版本号（11083）与
-        // query 的 clientver（11440）错位，是发码侧风控能看到的异常信号。
+        // 使用与登录一致的 UA，避免客户端版本错位触发发码风控
         .header("User-Agent", UA_LOGIN)
         .timeout(std::time::Duration::from_secs(20));
     api.call_auth(spec).await
 }
 
-/// 使用手机号与短信验证码执行登录。
+/// 使用手机号与短信验证码执行登录
 pub async fn login_cellphone(api: &Api, mobile: &str, code: &str) -> Result<LoginResult> {
     let session = api.session();
     let date_time = now_millis();
@@ -102,7 +101,7 @@ pub async fn login_cellphone(api: &Api, mobile: &str, code: &str) -> Result<Logi
     parse_login(&value, &encrypted.key)
 }
 
-/// 解析登录响应体并解密敏感安全参数。
+/// 解析登录响应体并解密敏感安全参数
 pub fn parse_login(value: &Value, temp_key: &str) -> Result<LoginResult> {
     let data = codec::pick(value, &["data"]).cloned().unwrap_or(Value::Null);
     let mut result = LoginResult {
@@ -149,7 +148,7 @@ fn finish(result: LoginResult) -> Result<LoginResult> {
     Ok(result)
 }
 
-/// 手机号格式脱敏，保留前两位与末尾位。
+/// 手机号掩码脱敏，保留前两位与末尾一位
 #[must_use]
 pub fn mask_mobile(mobile: &str) -> String {
     let chars: Vec<char> = mobile.chars().collect();
@@ -161,7 +160,7 @@ pub fn mask_mobile(mobile: &str) -> String {
     format!("{head}*****{tail}")
 }
 
-/// 向风控服务注册设备身份并获取 dfid 凭据。
+/// 向风控服务注册设备身份并获取 dfid 凭据
 pub async fn register_dev(api: &Api, extra: Option<Value>) -> Result<String> {
     let session = api.session();
     let mut device_map = serde_json::json!({
@@ -179,7 +178,7 @@ pub async fn register_dev(api: &Api, extra: Option<Value>) -> Result<String> {
         "manufacturer": "Xiaomi",
         "uuid": session.device.guid,
     });
-    // 补齐上游必填的 9 组传感器默认字段。
+    // 补齐上游必填的 9 组传感器默认字段
     if let Some(map) = device_map.as_object_mut() {
         for sensor in [
             "accelerometer",
@@ -211,7 +210,7 @@ pub async fn register_dev(api: &Api, extra: Option<Value>) -> Result<String> {
     .to_string();
     let p = lyra_proto::rsa_pkcs1_encrypt_hex(portrait.as_bytes(), RSA_PUBLIC)?;
 
-    // Base64 密文请求体必须与请求参数一同参与签名计算。
+    // Base64 密文请求体须与查询参数共同参与签名
     let spec = RequestSpec::post("/risk/v2/r_register_dev")
         .base(USER_SERVICE)
         .param("part", 1)
@@ -228,20 +227,20 @@ pub async fn register_dev(api: &Api, extra: Option<Value>) -> Result<String> {
             body: response.text(),
         });
     }
-    // 上游只在成功时加密，报错时返回明文 JSON。
+    // 上游仅在成功时加密，报错时返回明文 JSON
     let text = codec::decode_session_body(&response.body, &encrypted.key);
     let value: Value =
         serde_json::from_str(&text).map_err(|_| Error::Decode(format!("register_dev 响应不是合法 JSON: {text}")))?;
     codec::check_business(&value)?;
     let dfid = codec::pick_str_paths(&value, &[&["data", "dfid"], &["dfid"]]);
     if dfid.is_empty() {
-        // 上游偶发返回空数组，需返回可重试的空数据错误。
+        // 上游偶发返回空数据，包装为可重试错误
         return Err(Error::EmptyData(format!("register_dev 未返回 dfid: {text}")));
     }
     Ok(dfid)
 }
 
-/// 提交人机验证或二次校验验证码。
+/// 提交人机验证或二次校验验证码
 pub async fn verify_user_info(api: &Api, sid: &str, edt: &str, verifycode: &str, v_type: i64) -> Result<Value> {
     let session = api.session();
     let encrypted = if v_type == 32 {
@@ -273,7 +272,6 @@ pub async fn verify_user_info(api: &Api, sid: &str, edt: &str, verifycode: &str,
         .timeout(std::time::Duration::from_secs(30));
     api.call_auth(spec).await
 }
-
 #[cfg(test)]
 mod tests {
     #![allow(clippy::unwrap_used)]
@@ -284,7 +282,7 @@ mod tests {
     use crate::client::Api;
     use crate::spec::Session;
 
-    /// 构造具备已注册设备身份但尚未登录的测试会话。
+    // 构造具备设备身份但未登录的测试会话
     fn session() -> Session {
         Session::new(crate::testing::device("DfidValue"))
     }
@@ -298,7 +296,7 @@ mod tests {
 
     #[tokio::test]
     async fn register_dev_reports_the_upstream_error_instead_of_a_crypto_error() {
-        // 验证上游参数非法返回明文 JSON 时正常透传业务错误码。
+        // 上游返回明文 JSON 错误时透传业务错误码
         let mock = Arc::new(MockTransport::new());
         mock.on(
             "/risk/v2/r_register_dev",
@@ -314,7 +312,7 @@ mod tests {
 
     #[tokio::test]
     async fn register_dev_flags_empty_data_as_retryable() {
-        // 验证空数据应答被标记为可重试错误。
+        // 空数据响应标记为可重试错误
         let mock = Arc::new(MockTransport::new());
         mock.on(
             "/risk/v2/r_register_dev",
@@ -327,7 +325,7 @@ mod tests {
 
     #[tokio::test]
     async fn register_dev_signs_the_base64_body() {
-        // 验证请求体 Base64 密文正确参与安卓签名。
+        // 验证 Base64 请求体参与安卓签名
         let mock = Arc::new(MockTransport::new());
         mock.on(
             "/risk/v2/r_register_dev",
@@ -391,7 +389,7 @@ mod tests {
         let mock = Arc::new(MockTransport::new());
         mock.on_json("/v7/login_by_verifycode", &serde_json::json!({"status": 1, "data": {}}));
         let api = Api::new(mock.clone(), session(), 8);
-        // 验证必传参数已成功组装并发送。
+        // 验证必传参数完整组装发送
         let _ = login_cellphone(&api, "13800138000", "123456").await;
         let request = mock.last_request().unwrap();
         let body: Value = serde_json::from_slice(request.body.as_deref().unwrap()).unwrap();
@@ -400,17 +398,17 @@ mod tests {
         assert_eq!(body["gitversion"], GITVERSION);
         assert_eq!(body["dev"], "ABCDEFGHIJ");
         assert_eq!(body["dfid"], "DfidValue");
-        // 校验 pk 为 256 位大写十六进制。
+        // 校验 pk 为 256 位大写十六进制
         let pk = body["pk"].as_str().unwrap();
         assert_eq!(pk.len(), 256);
         assert!(pk.chars().all(|c| c.is_ascii_hexdigit() && !c.is_ascii_lowercase()));
-        // 校验 t1 与 t2 符合 AES 十六进制密文格式。
+        // 校验 t1 与 t2 为合法的十六进制密文
         assert_eq!(body["t1"].as_str().unwrap().len(), 32);
         assert!(body["t2"].as_str().unwrap().len() > 32);
         assert!(body["params"].as_str().unwrap().len() > 32);
         assert_eq!(request.get_header("User-Agent"), Some(UA_LOGIN));
         assert_eq!(request.get_header("support-calm"), Some("1"));
-        // 登录服务不接受未签名参数：带上扰动 query 会被直接判失败（实测 20006）。
+        // 登录服务校验严格，不可携带扰动参数
         assert!(
             !request.query.iter().any(|(k, _)| k == "_lyra_t"),
             "{:?}",
@@ -446,7 +444,7 @@ mod tests {
         );
         assert!(body["pk"].as_str().unwrap().len() >= 128, "pk 应为 RSA 密文 hex");
         assert_ne!(body["mobile"], "13800138000", "外层 mobile 必须打码");
-        // params 是本次临时密钥加密的完整号码，长度必须是 AES 块的整数倍。
+        // params 为加密后的手机号，长度应为 AES 块整数倍
         let params = body["params"].as_str().unwrap();
         assert!(!params.is_empty() && params.len().is_multiple_of(32), "{params}");
         assert!(params.bytes().all(|b| b.is_ascii_hexdigit()), "{params}");

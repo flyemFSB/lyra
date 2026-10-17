@@ -8,9 +8,7 @@ ignore = []
 
 [licenses]
 version = 2
-# 0BSD：enum-iterator / enum-iterator-derive（由 gpui-kit → gpui-component 引入）。
-# 它是 OSI 认可的「BSD 零条款」许可，限制比 MIT 更宽松，与已允许的 Unlicense / CC0-1.0 同类。
-# 不加这一条的话 `cargo deny check licenses` 会在此失败 —— 门禁就永远是红的。
+# 允许 0BSD 协议（gpui-component 依赖项）
 allow = [
   "MIT", "Apache-2.0", "Apache-2.0 WITH LLVM-exception", "BSD-2-Clause",
   "BSD-3-Clause", "ISC", "Unicode-3.0", "Zlib", "MPL-2.0", "CC0-1.0",
@@ -20,10 +18,7 @@ confidence-threshold = 0.9
 
 [bans]
 multiple-versions = "allow"
-# 方案 §3.2：只允许 rustls+ring 作为 TLS 后端，禁止 OpenSSL / native-tls。
-# 注意：schannel **不能**列为禁用项 —— 它由 rustls-native-certs 在 Windows 上引入，
-# 仅用于枚举系统受信任根证书，本身不参与 TLS 握手（xtask audit 用
-# cargo tree -i schannel 钉死这个来源）。列进禁用名单会让 cargo deny check 永远失败。
+# 仅允许 rustls+ring 作为 TLS 后端，禁止 OpenSSL 与 native-tls（schannel 仅用于系统根证书枚举）
 deny = [
   { name = "native-tls" },
   { name = "openssl" },

@@ -1,4 +1,4 @@
-//! 歌单歌曲增删操作端点，支持批量加歌与删歌。
+//! 歌单歌曲增删端点。
 
 use crate::cache::Freshness;
 use crate::client::Api;
@@ -7,7 +7,7 @@ use crate::model::Song;
 use crate::spec::RequestSpec;
 use crate::spec::{ensure_logged_in, now_secs};
 
-/// 向指定歌单添加一批歌曲。
+/// 向指定歌单添加歌曲
 pub async fn add_songs(api: &Api, listid: &str, songs: &[Song]) -> Result<()> {
     let session = api.session();
     ensure_logged_in(&session)?;
@@ -54,7 +54,7 @@ pub async fn add_songs(api: &Api, listid: &str, songs: &[Song]) -> Result<()> {
     Ok(())
 }
 
-/// 根据 fileid 列表从指定歌单删除歌曲。
+/// 从指定歌单删除指定文件 ID 歌曲
 pub async fn delete_songs(api: &Api, listid: &str, fileids: &[i64]) -> Result<()> {
     let session = api.session();
     ensure_logged_in(&session)?;

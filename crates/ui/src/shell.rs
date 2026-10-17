@@ -1,4 +1,4 @@
-//! 应用主外壳：导航、内容承载、播放模式调度与全功能队列抽屉。
+//! 应用主外壳：导航、内容承载、播放模式调度与播放队列抽屉
 
 use std::sync::Arc;
 use std::sync::mpsc::Receiver;
@@ -28,19 +28,18 @@ use crate::views::radio::RadioView;
 use crate::views::search::SearchView;
 use crate::views::settings::SettingsView;
 
-/// 自动续播时是否还应继续向后跳过不可播曲目。
+/// 检查连续自动跳过次数是否未超限
 fn should_skip_unplayable(skips: usize) -> bool {
     skips < MAX_AUTO_SKIPS
 }
 
-/// 轻提示默认展示时长。
+/// 轻提示默认展示时长
 const TOAST_TTL: Duration = Duration::from_secs(4);
 
-/// 自动续播时允许连续跳过的曲目数：队列里总有不可播的歌（版权/会员限制），
-/// 跳几首就停，既不会停在死处，也不会整队列空转。
+/// 自动续播允许连续跳过的曲目上限（避免死循环）
 const MAX_AUTO_SKIPS: usize = 5;
 
-/// 缓存的子视图实体集合。
+/// 缓存的子视图实体集合
 struct Views {
     player_bar: Entity<PlayerBar>,
     playlists: Entity<PlaylistsView>,
@@ -52,7 +51,7 @@ struct Views {
     lyrics: Entity<LyricsView>,
 }
 
-/// 主应用外壳状态结构。
+/// 应用主外壳状态
 pub(crate) struct AppShell {
     backend: Backend,
     pub(crate) nav: Nav,
@@ -63,21 +62,21 @@ pub(crate) struct AppShell {
     views: Option<Views>,
     toast: Option<SharedString>,
     toast_deadline: Option<Instant>,
-    /// 是否展开右侧浮动播放队列抽屉。
+    /// 是否展开右侧播放队列抽屉
     show_queue: bool,
-    /// 歌词请求序号：只有最新一次请求的响应才允许落地。
+    /// 歌词请求序列号（用于丢弃过期响应）
     lyrics_seq: u64,
-    /// 本次连续自动跳过的曲目数（手动切歌/开启新一轮播放时归零）。
+    /// 连续自动跳过的曲目计数
     auto_skips: usize,
     _drain: Task<()>,
 }
 
 impl AppShell {
-    /// 创建主外壳状态。
+    /// 创建主外壳状态
     pub(crate) fn new(backend: Backend, receiver: Receiver<Msg>, cx: &mut Context<Self>) -> Self {
         let logged_in = backend.app().is_logged_in();
         let has_engine = backend.has_engine();
-        // 播放模式是持久化设置，开机沿用上次选择，而不是固定回列表循环。
+        // 恢复持久化的播放模式设置
         let mode = backend.app().play_mode();
         let player = cx.new(|_| PlayerModel::new(has_engine, mode));
         let drain = cx.spawn(async move |this, cx| {
@@ -109,7 +108,7 @@ impl AppShell {
         }
     }
 
-    /// 初始化并挂载各子视图。
+    /// 初始化并挂载各子视图
     pub(crate) fn install(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.views.is_some() {
             return;
@@ -141,7 +140,7 @@ impl AppShell {
         playlists.update(cx, PlaylistsView::ensure);
     }
 
-    /// 分发处理后台异步事件。
+    /// 分发处理后台异步事件
     fn apply(&mut self, msg: Msg, cx: &mut Context<Self>) {
         let (playlists, daily, radio, search, settings, login, lyrics) = {
             let Some(views) = self.views.as_ref() else {
@@ -175,7 +174,7 @@ impl AppShell {
             Msg::StationClasses(result) => radio.update(cx, |view, cx| view.on_classes(result, cx)),
             Msg::StationSongs(seq, result) => radio.update(cx, |view, cx| view.on_songs(seq, result, cx)),
             Msg::Lyrics(seq, result) => {
-                // 快速切歌时丢弃旧请求的歌词，避免上一首覆盖当前曲目。
+                // 忽略过期请求的歌词响应
                 if seq == self.lyrics_seq {
                     lyrics.update(cx, |view, cx| view.set_lines(result, cx));
                 }
@@ -191,11 +190,11 @@ impl AppShell {
                 Err(error) => self.set_toast(format!("移除失败: {error}"), cx),
             },
             Msg::AudioEnded => {
-                // 一首完整放完，说明播放链正常，之前的跳过计数不再累计。
+                // 正常播放结束，重置连续跳过计数
                 self.auto_skips = 0;
                 self.play_next(cx);
             }
-            // 播放失败时弹出轻提示，并跳过队列里播不了的那几首。
+            // 播放失败处理：提示并尝试跳过
             Msg::AudioFailed { hash, message } => self.on_play_failed(&hash, &message, cx),
             Msg::EngineFailed(message) => self.on_engine_failed(&message, cx),
             Msg::Noop => {}
@@ -205,7 +204,7 @@ impl AppShell {
         }
     }
 
-    /// 切换导航页面并记录前进后退历史栈。
+    /// 切换导航页面并记录历史栈
     pub(crate) fn set_nav(&mut self, nav: Nav, cx: &mut Context<Self>) {
         if self.nav != nav {
             self.history.truncate(self.history_idx + 1);
@@ -217,7 +216,7 @@ impl AppShell {
         }
     }
 
-    /// 后退至历史上一页。
+    /// 后退至历史上一页
     pub(crate) fn go_back(&mut self, cx: &mut Context<Self>) {
         if self.history_idx > 0 {
             self.history_idx -= 1;
@@ -227,7 +226,7 @@ impl AppShell {
         }
     }
 
-    /// 前进至历史下一页。
+    /// 前进至历史下一页
     pub(crate) fn go_forward(&mut self, cx: &mut Context<Self>) {
         if self.history_idx + 1 < self.history.len() {
             self.history_idx += 1;
@@ -237,13 +236,13 @@ impl AppShell {
         }
     }
 
-    /// 开关右侧播放队列抽屉。
+    /// 切换播放队列抽屉展开状态
     pub(crate) fn toggle_queue(&mut self, cx: &mut Context<Self>) {
         self.show_queue = !self.show_queue;
         cx.notify();
     }
 
-    /// 页面激活时触发数据加载。
+    /// 激活视图时触发数据加载
     fn ensure_loaded(&mut self, cx: &mut Context<Self>) {
         let Some(views) = self.views.as_ref() else {
             return;
@@ -257,7 +256,7 @@ impl AppShell {
         }
     }
 
-    /// 设置播放队列并播放指定索引歌曲。
+    /// 设置播放队列并播放指定索引歌曲
     pub(crate) fn play_queue(&mut self, songs: Arc<Vec<Song>>, index: usize, cx: &mut Context<Self>) {
         if index >= songs.len() {
             return;
@@ -271,7 +270,7 @@ impl AppShell {
         self.load_lyrics(cx);
     }
 
-    /// 触发播放当前选中的歌曲。
+    /// 播放当前选中歌曲
     fn play_index(&mut self, cx: &mut Context<Self>) {
         let Some(song) = self.player.read(cx).current_song().cloned() else {
             return;
@@ -293,9 +292,9 @@ impl AppShell {
         });
     }
 
-    /// 处理一次取址失败：过期响应丢弃，当前曲目则提示并向后跳过。
+    /// 处理取址失败（忽略过期响应，提示并尝试跳过）
     fn on_play_failed(&mut self, hash: &str, message: &str, cx: &mut Context<Self>) {
-        // 用户已经切走了，这条失败属于上一首：既不误报，也不误跳。
+        // 忽略非当前曲目的失败响应
         let is_current = self
             .player
             .read(cx)
@@ -308,15 +307,13 @@ impl AppShell {
         self.skip_unplayable(cx);
     }
 
-    /// 处理音频引擎的失败事件（地址拿到了，但拉流或解码失败）。
+    /// 处理音频引擎拉流或解码失败事件
     fn on_engine_failed(&mut self, message: &str, cx: &mut Context<Self>) {
         self.set_toast(format!("播放失败: {message}"), cx);
         self.skip_unplayable(cx);
     }
 
-    /// 当前曲目不可播时向后换一首，避免整段播放停在这一首。
-    ///
-    /// 走的是「下一首」（受播放模式制约）：单曲循环下会重试同一首，用 [`MAX_AUTO_SKIPS`] 兜住上限。
+    /// 当前曲目不可播时尝试跳过至下一首
     fn skip_unplayable(&mut self, cx: &mut Context<Self>) {
         if !should_skip_unplayable(self.auto_skips) {
             tracing::warn!(skips = self.auto_skips, "连续跳过过多，停止自动跳过");
@@ -326,7 +323,7 @@ impl AppShell {
         self.play_next(cx);
     }
 
-    /// 播放下一首歌曲（依据播放循环模式：列表/单曲/随机）。
+    /// 播放下一首歌曲（遵循当前播放模式）
     pub(crate) fn play_next(&mut self, cx: &mut Context<Self>) {
         let next_idx = self.player.read(cx).next_index();
         if let Some(idx) = next_idx {
@@ -339,7 +336,7 @@ impl AppShell {
         }
     }
 
-    /// 播放上一首歌曲（依据播放循环模式：列表/单曲/随机）。
+    /// 播放上一首歌曲（遵循当前播放模式）
     pub(crate) fn play_prev(&mut self, cx: &mut Context<Self>) {
         self.auto_skips = 0;
         let prev_idx = self.player.read(cx).prev_index();
@@ -353,7 +350,7 @@ impl AppShell {
         }
     }
 
-    /// 请求加载当前播放歌曲的歌词。
+    /// 异步加载当前歌曲歌词
     fn load_lyrics(&mut self, cx: &mut Context<Self>) {
         let Some(song) = self.player.read(cx).current_song().cloned() else {
             return;
@@ -365,7 +362,7 @@ impl AppShell {
             .spawn(async move { Msg::Lyrics(seq, app.lyrics(&song).await.map_err(|error| error.to_string())) });
     }
 
-    /// 从歌单中移除指定歌曲。
+    /// 从歌单中移除指定歌曲
     fn remove_track(&mut self, listid: &str, fileid: i64) {
         let app = self.backend.app();
         let listid = listid.to_owned();
@@ -374,7 +371,7 @@ impl AppShell {
         });
     }
 
-    /// 处理登录成功事件。
+    /// 处理登录成功事件
     fn on_logged_in(&mut self, cx: &mut Context<Self>) {
         self.logged_in = true;
         self.set_toast("登录成功".to_owned(), cx);
@@ -388,11 +385,11 @@ impl AppShell {
         cx.notify();
     }
 
-    /// 处理退出登录事件。
+    /// 处理退出登录事件
     fn on_logged_out(&mut self, cx: &mut Context<Self>) {
         self.logged_in = false;
         self.nav = Nav::Login;
-        // 清空上一账号的内容，避免换账号后仍显示旧歌单与旧 listid。
+        // 清除旧账号视图状态
         if let Some(views) = self.views.as_ref() {
             views.playlists.update(cx, PlaylistsView::reset);
             views.daily.update(cx, DailyView::reset);
@@ -403,14 +400,14 @@ impl AppShell {
         self.set_toast("已登出".to_owned(), cx);
     }
 
-    /// 展示全局轻提示。
+    /// 展示全局轻提示
     fn set_toast(&mut self, text: String, cx: &mut Context<Self>) {
         self.toast = Some(SharedString::from(text));
         self.toast_deadline = Some(Instant::now() + TOAST_TTL);
         cx.notify();
     }
 
-    /// 检查并清除已过期的轻提示。
+    /// 清除已过期的轻提示
     fn expire_toast(&mut self, cx: &mut Context<Self>) {
         if self.toast_deadline.is_some_and(|deadline| Instant::now() >= deadline) {
             self.toast = None;
@@ -419,7 +416,7 @@ impl AppShell {
         }
     }
 
-    /// 渲染主内容区顶栏（前进/后退、药丸搜索胶囊与实用工具）。
+    /// 渲染主内容区顶栏
     fn top_header(&self, cx: &Context<Self>) -> impl IntoElement {
         let is_search = self.nav == Nav::Search;
         let can_go_back = self.history_idx > 0;
@@ -457,7 +454,7 @@ impl AppShell {
                             .on_click(cx.listener(|shell, _event, _window, cx| shell.go_forward(cx))),
                     ),
             )
-            // 胶囊搜索框（点击直接跳转至搜索视图）
+            // 胶囊搜索框
             .child(
                 div()
                     .id("top_search_capsule")
@@ -488,7 +485,7 @@ impl AppShell {
                     ),
             )
             .child(div().flex_1())
-            // 右侧工具区：清爽无冗余占位
+            // 右侧工具区
             .child(
                 h_flex()
                     .gap(px(8.0))
@@ -504,11 +501,11 @@ impl AppShell {
             )
     }
 
-    /// 渲染左侧导航侧边栏（用户信息、2x2 快捷按键、曲库导航与底部工具，无任何硬编码 mock 数据）。
+    /// 渲染左侧导航侧边栏
     fn sidebar(&self, cx: &Context<Self>) -> impl IntoElement {
         let mut column = v_flex().id("sidebar").w(px(216.0)).h_full().p_2().gap(px(10.0));
 
-        // 1. 用户头像与身份 Capsule
+        // 用户身份卡片
         let username = self
             .backend
             .app()
@@ -593,7 +590,7 @@ impl AppShell {
             );
         column = column.child(user_capsule);
 
-        // 2. 快捷导航栏 (发现、电台、搜索)
+        // 快捷导航栏
         let quick_items = [
             (Nav::Daily, IconName::House, "发现"),
             (Nav::Radio, IconName::Radio, "电台"),
@@ -630,7 +627,7 @@ impl AppShell {
         }
         column = column.child(quick_row);
 
-        // 3. 歌单胶囊切换器与侧边栏歌单列表（自建歌单与收藏歌单直接集成在左侧栏）
+        // 歌单胶囊切换器与侧边栏歌单列表
         let (tab, playlists, selected, loading_playlists) = if let Some(views) = self.views.as_ref() {
             let p = views.playlists.read(cx);
             (p.tab, p.playlists.clone(), p.selected, p.loading_playlists)
@@ -809,7 +806,7 @@ impl AppShell {
         column
     }
 
-    /// 渲染浮动胶囊轻提示。
+    /// 渲染浮动轻提示
     fn toast_element(&self, _cx: &App) -> Option<AnyElement> {
         self.toast.clone().map(|text| {
             div()
@@ -843,7 +840,7 @@ impl AppShell {
         })
     }
 
-    /// 渲染右侧滑出式纯白播放队列抽屉面板。
+    /// 渲染右侧播放队列抽屉
     fn queue_drawer(&self, cx: &Context<Self>) -> Option<AnyElement> {
         if !self.show_queue {
             return None;
@@ -868,7 +865,7 @@ impl AppShell {
             .flex_col()
             .shadow_lg();
 
-        // 头部标题与控制按钮
+        // 队列标题与控制按钮
         let header = h_flex()
             .w_full()
             .pb_2()
@@ -1008,7 +1005,7 @@ impl Render for AppShell {
         let Some(views) = self.views.as_ref() else {
             return notice("初始化中…", cx);
         };
-        // 全屏沉浸式歌词写真模式（仿透明彩胶与右侧滚动歌词，独占全屏视口，隐藏侧边栏与顶栏）
+        // 全屏沉浸式歌词视图模式
         if self.nav == Nav::Lyrics {
             return v_flex()
                 .size_full()
@@ -1040,7 +1037,7 @@ impl Render for AppShell {
             Nav::Login => views.login.clone().into_any_element(),
         };
 
-        // 彻底修复黑边：根容器严格使用 size_full() 填满窗口物理/逻辑视口，不进行错误的缩放除法
+        // 根容器填满窗口视口
         v_flex()
             .size_full()
             .bg(CANVAS_BG)
@@ -1079,7 +1076,7 @@ impl Render for AppShell {
 mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used, clippy::pedantic)]
 
-    // 不能 `use super::*`：外壳模块 glob 引入了 `gpui_kit::*`，会把 Rust 自带的 `#[test]` 发现成 GPUI 的同名宏。
+    // 避免与 gpui_kit::* 宏冲突
     use super::{MAX_AUTO_SKIPS, should_skip_unplayable};
 
     #[test]

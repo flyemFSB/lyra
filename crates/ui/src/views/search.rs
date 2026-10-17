@@ -1,4 +1,4 @@
-//! 歌曲搜索与结果列表视图组件：拟态玻璃、快捷热搜词胶囊与动态声波高亮。
+//! 歌曲搜索与结果列表视图。
 
 use std::rc::Rc;
 use std::sync::Arc;
@@ -21,7 +21,7 @@ use crate::theme::{
 use crate::views::player::PlayerModel;
 use crate::views::tracks::track_row;
 
-/// 快捷热搜词列表。
+/// 快捷热门搜索词
 const HOT_TAGS: &[&str] = &[
     "周杰伦",
     "陈奕迅",
@@ -33,7 +33,7 @@ const HOT_TAGS: &[&str] = &[
     "欧美流行",
 ];
 
-/// 歌曲搜索视图结构。
+/// 搜索视图
 pub(crate) struct SearchView {
     backend: Backend,
     shell: WeakEntity<AppShell>,
@@ -43,16 +43,16 @@ pub(crate) struct SearchView {
     sizes: Rc<Vec<Size<Pixels>>>,
     scroll_handle: VirtualListScrollHandle,
     loading: bool,
-    /// 是否已触发过搜索请求。
+    /// 是否已触发过搜索
     searched: bool,
     error: Option<SharedString>,
-    /// 请求序号：只有最新一次搜索的响应才允许落地。
+    /// 请求序号（用于丢弃过期响应）
     request_seq: u64,
     _subs: Vec<Subscription>,
 }
 
 impl SearchView {
-    /// 创建搜索视图实例并监听播放器与输入事件。
+    /// 创建搜索视图并监听输入与播放器事件
     pub(crate) fn new(
         backend: Backend,
         shell: WeakEntity<AppShell>,
@@ -86,7 +86,7 @@ impl SearchView {
         }
     }
 
-    /// 清空搜索结果（登出时调用），并让在途响应失效。
+    /// 重置视图状态并废弃在途请求
     pub(crate) fn reset(&mut self, cx: &mut Context<Self>) {
         self.songs = Arc::new(Vec::new());
         self.sizes = row_sizes(0);
@@ -98,13 +98,13 @@ impl SearchView {
         cx.notify();
     }
 
-    /// 提交当前搜索框中的关键字。
+    /// 提交当前输入关键词
     pub(crate) fn submit(&mut self, cx: &mut Context<Self>) {
         let keyword = self.input.read(cx).value().to_string();
         self.execute_search(keyword, cx);
     }
 
-    /// 按指定关键词执行检索。
+    /// 按指定关键词执行检索
     pub(crate) fn search_keyword(&mut self, keyword: &str, window: &mut Window, cx: &mut Context<Self>) {
         self.input.update(cx, |input, input_cx| {
             input.set_value(keyword.to_owned(), window, input_cx);
@@ -112,7 +112,7 @@ impl SearchView {
         self.execute_search(keyword.to_owned(), cx);
     }
 
-    /// 核心搜索请求派发逻辑。
+    /// 发起搜索请求
     fn execute_search(&mut self, keyword: String, cx: &mut Context<Self>) {
         if !is_searchable(&keyword) {
             return;
@@ -129,7 +129,7 @@ impl SearchView {
             .spawn(async move { Msg::Search(seq, app.search(&keyword, 1).await.map_err(|error| error.to_string())) });
     }
 
-    /// 响应处理歌曲搜索结果；过期响应直接丢弃，避免旧关键词的结果盖住新的。
+    /// 处理搜索响应结果（丢弃过期请求）
     pub(crate) fn on_search(&mut self, seq: u64, result: Result<Vec<Song>, String>, cx: &mut Context<Self>) {
         if seq != self.request_seq {
             return;
@@ -151,7 +151,7 @@ impl SearchView {
         cx.notify();
     }
 
-    /// 渲染单行歌曲组件。
+    /// 渲染单首曲目行
     fn row(&self, index: usize, cx: &App) -> AnyElement {
         let (is_current, is_playing) = {
             let model = self.player.read(cx);
@@ -175,7 +175,7 @@ impl SearchView {
     }
 }
 
-/// 校验搜索关键字是否有效（非空且非全空格）。
+/// 检查关键词是否有效（非空且非全空白）
 fn is_searchable(keyword: &str) -> bool {
     !keyword.trim().is_empty()
 }
@@ -219,7 +219,7 @@ impl Render for SearchView {
                         )
                     }),
             )
-            // 搜索输入栏与快捷清空、回车操作
+            // 搜索输入栏
             .child(
                 h_flex()
                     .w_full()
@@ -264,7 +264,7 @@ impl Render for SearchView {
                     ),
             );
 
-        // 快捷热搜词推荐胶囊行
+        // 热门搜索词标签栏
         let mut hot_row = h_flex().gap(px(8.0)).items_center().flex_wrap();
         hot_row = hot_row.child(
             div()

@@ -1,11 +1,11 @@
-//! 命令行接口实现。
+//! 命令行接口实现
 
 use std::path::PathBuf;
 
 use crate::error::{Error, Result};
 use crate::service::Kugou;
 
-/// 解析默认数据目录：环境变量优先，未设置则使用本地应用数据路径。
+/// 解析默认数据目录（环境变量优先，缺省时使用本地应用数据路径）
 #[must_use]
 pub fn default_data_dir() -> PathBuf {
     if let Ok(dir) = std::env::var("LYRA_DATA_DIR") {
@@ -17,7 +17,7 @@ pub fn default_data_dir() -> PathBuf {
     PathBuf::from(".lyra-data")
 }
 
-/// 命令行使用帮助文本。
+/// 命令行使用帮助文本
 #[must_use]
 pub const fn help() -> &'static str {
     "lyra — 酷狗概念版桌面客户端（CLI 模式）
@@ -47,14 +47,14 @@ pub const fn help() -> &'static str {
 "
 }
 
-/// 解析并分发执行命令行子命令。
+/// 解析并分发执行命令行子命令
 pub async fn run(args: &[String]) -> Result<()> {
     let Some(command) = args.first().map(String::as_str) else {
         println!("{}", help());
         return Ok(());
     };
     let rest = &args[1..];
-    // help 与未知命令不开数据库与钥匙串：存储不可用时也要看得到帮助。
+    // 查看帮助无需初始化存储，确保错误时仍可正常显示帮助
     if matches!(command, "help" | "--help" | "-h") {
         println!("{}", help());
         return Ok(());
@@ -245,20 +245,20 @@ pub async fn run(args: &[String]) -> Result<()> {
     Ok(())
 }
 
-/// 获取指定位置的必填命令行参数。
+/// 获取指定位置的必填命令行参数
 fn required<'a>(args: &'a [String], index: usize, name: &str) -> Result<&'a str> {
     args.get(index)
         .map(String::as_str)
         .ok_or_else(|| Error::Invalid(format!("缺少参数 {name}")))
 }
 
-/// 解析简要歌曲参数。
+/// 解析简要歌曲参数
 fn song_stub(args: &[String]) -> Result<lyra_api::model::Song> {
     let hash = required(args, 0, "hash")?.to_lowercase();
     if hash.len() != 32 || !hash.bytes().all(|b| b.is_ascii_hexdigit()) {
         return Err(Error::Invalid(format!("hash 应为 32 位 hex，得到 {hash}")));
     }
-    // 专辑 ID 位在音质之前，两者均为可选参数。
+    // 专辑 ID 参数位于音质之前
     let album_id = args.get(1).cloned().unwrap_or_default();
     if !album_id.is_empty() && !album_id.bytes().all(|b| b.is_ascii_digit()) {
         return Err(Error::Invalid(format!(
@@ -272,7 +272,7 @@ fn song_stub(args: &[String]) -> Result<lyra_api::model::Song> {
     })
 }
 
-/// 解析可选数字参数：缺省时用 `default`，给了就必须能解析，避免静默回落掩盖手误。
+/// 解析可选数字参数（缺省时使用默认值，给出时严格校验）
 fn optional_number<T: std::str::FromStr>(args: &[String], index: usize, name: &str, default: T) -> Result<T> {
     args.get(index).map_or(Ok(default), |value| {
         value
@@ -281,7 +281,7 @@ fn optional_number<T: std::str::FromStr>(args: &[String], index: usize, name: &s
     })
 }
 
-/// 格式化打印歌曲列表。
+/// 格式化打印歌曲列表
 fn print_songs(songs: &[lyra_api::model::Song]) {
     for (index, song) in songs.iter().enumerate() {
         println!(
@@ -296,7 +296,7 @@ fn print_songs(songs: &[lyra_api::model::Song]) {
     println!("共 {} 首", songs.len());
 }
 
-/// 裁剪字符串至指定字符宽度。
+/// 裁剪字符串至指定字符宽度
 fn clip(text: &str, width: usize) -> String {
     let count = text.chars().count();
     if count <= width {
@@ -306,7 +306,7 @@ fn clip(text: &str, width: usize) -> String {
     format!("{head}…")
 }
 
-/// 脱敏敏感令牌字符串（保留前后各 3 个字符）。
+/// 敏感令牌掩码脱敏（保留前后各 3 个字符）
 fn mask(token: &str) -> String {
     let count = token.chars().count();
     if count <= 6 {
@@ -325,7 +325,7 @@ mod tests {
 
     #[test]
     fn default_data_dir_is_never_empty() {
-        // 验证默认数据目录路径非空。
+        // 验证默认数据目录非空
         assert!(!default_data_dir().as_os_str().is_empty());
     }
 

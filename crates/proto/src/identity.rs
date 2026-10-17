@@ -1,4 +1,4 @@
-//! 设备身份标识生成与转换（guid、mid、dev、webgl、dfid）。
+//! 设备标识生成与转换（GUID、MID、WebGL、DFID）。
 
 use num_bigint::BigUint;
 use serde::{Deserialize, Serialize};
@@ -6,21 +6,21 @@ use serde::{Deserialize, Serialize};
 use crate::cipher::{md5_hex, random_string};
 use crate::rng::{JsRng, OsRng};
 
-/// 根据 GUID 的 MD5 十六进制值计算大整数十进制 MID 字符串。
+/// 根据 GUID 的 MD5 计算十进制大数 MID
 #[must_use]
 pub fn mid_from_guid(guid: &str) -> String {
     let digest = md5_hex(guid.as_bytes());
     BigUint::parse_bytes(digest.as_bytes(), 16).map_or_else(|| "0".to_owned(), |v| v.to_str_radix(10))
 }
 
-/// 生成 GUID 单段十六进制随机串。
+/// 生成 GUID 单段十六进制随机串
 fn guid_segment(rng: &mut impl JsRng) -> String {
     #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
     let v = (65536.0 * (1.0 + rng.next_f64())) as i64;
     format!("{v:x}").chars().skip(1).collect()
 }
 
-/// 生成 8-4-4-4-12 格式的随机 UUID 字符串。
+/// 生成随机 UUID 字符串
 #[must_use]
 pub fn random_uuid(rng: &mut impl JsRng) -> String {
     format!(
@@ -36,7 +36,7 @@ pub fn random_uuid(rng: &mut impl JsRng) -> String {
     )
 }
 
-/// 模拟生成 WebGL 指纹（64 位随机无符号整数字符串）。
+/// 模拟生成 WebGL 指纹（64 位十进制整数）
 #[must_use]
 pub fn random_webgl(rng: &mut impl JsRng) -> String {
     #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
@@ -46,32 +46,32 @@ pub fn random_webgl(rng: &mut impl JsRng) -> String {
     ((hi << 32) | lo).to_string()
 }
 
-/// 设备身份，首次生成后持久化。
+/// 设备标识集合（首次生成后持久化）
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Device {
-    /// `md5(getGuid())`，32 位小写 hex。注册接口的 `uuid` / `imei` 都用它。
+    /// GUID 哈希（32 位十六进制，兼作 uuid 与 imei）
     pub guid: String,
-    /// `calculateMid(guid)` 的十进制串。
+    /// 十进制 MID 字符串
     pub mid: String,
-    /// 固定为 `02:00:00:00:00:00`。
+    /// MAC 地址（固定为 02:00:00:00:00:00）
     pub mac: String,
-    /// 10 位大写字母数字。
+    /// 10 位设备标识码
     pub dev: String,
-    /// WebGL 指纹（十进制 uint64 串）。
+    /// WebGL 指纹
     pub webgl: String,
-    /// `register_dev` 返回；未注册时为 `-`。
+    /// 设备指纹 DFID（未注册时为 "-"）
     pub dfid: String,
 }
 
 impl Device {
-    /// 生成一份新的设备身份（仅首启调用一次）。
+    /// 生成新设备标识（仅首次启动调用）
     #[must_use]
     pub fn generate() -> Self {
         let mut rng = OsRng;
         Self::generate_with(&mut rng)
     }
 
-    /// 生成一份新的设备身份，随机源可注入以便测试。
+    /// 生成新设备标识（支持注入随机源）
     #[must_use]
     pub fn generate_with(rng: &mut impl JsRng) -> Self {
         let guid = md5_hex(random_uuid(rng).as_bytes());
@@ -86,7 +86,7 @@ impl Device {
         }
     }
 
-    /// 获取 DFID，未注册时返回 -。
+    /// 获取 DFID（未注册时返回 "-"）
     #[must_use]
     pub fn dfid_or_dash(&self) -> &str {
         if self.dfid.is_empty() { "-" } else { &self.dfid }

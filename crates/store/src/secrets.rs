@@ -5,22 +5,22 @@ use std::sync::Mutex;
 
 use crate::error::{Error, Result};
 
-/// 系统密钥环服务名。
+/// 系统密钥环服务名
 const KEYRING_SERVICE: &str = "lyra.kugou";
 
-/// 键值式凭据存储：`user` 为键，`secret` 为值。
+/// 敏感凭据存取接口
 pub trait Secrets: Send + Sync + 'static {
-    /// 写入或覆盖指定用户的凭据。
+    /// 写入或更新凭据
     fn set(&self, user: &str, secret: &str) -> Result<()>;
 
-    /// 读取指定用户的凭据，不存在时返回 None。
+    /// 获取凭据（不存在返回 None）
     fn get(&self, user: &str) -> Result<Option<String>>;
 
-    /// 删除指定用户的凭据，条目不存在亦视为成功。
+    /// 删除凭据
     fn delete(&self, user: &str) -> Result<()>;
 }
 
-/// 生产实现：Windows 凭据管理器。
+/// 系统密钥环存储实现（Windows 凭据管理器）
 pub struct KeyringSecrets;
 
 impl Secrets for KeyringSecrets {
@@ -44,24 +44,24 @@ impl Secrets for KeyringSecrets {
     }
 }
 
-/// 打开一个凭据条目。
+/// 获取指定用户的凭据条目
 fn entry(user: &str) -> Result<keyring::Entry> {
     keyring::Entry::new(KEYRING_SERVICE, user).map_err(|e| secret_err(&e))
 }
 
-/// 凭据错误统一转换为 Error::Secret（防止令牌内容流入错误日志）。
+/// 转换凭据错误，防止敏感信息泄漏到日志
 fn secret_err(e: &keyring::Error) -> Error {
     Error::Secret(e.to_string())
 }
 
-/// 测试与无头环境使用的进程内内存凭据存储。
+/// 内存凭据存储实现（用于测试）
 #[derive(Default)]
 pub struct MemorySecrets {
     map: Mutex<HashMap<String, String>>,
 }
 
 impl MemorySecrets {
-    /// 新建一个空的进程内凭据库。
+    /// 创建内存凭据存储
     #[must_use]
     pub fn new() -> Self {
         Self::default()
@@ -87,7 +87,7 @@ impl Secrets for MemorySecrets {
     }
 }
 
-/// 互斥锁中毒异常转换。
+/// 互斥锁中毒错误转换
 fn poisoned() -> Error {
     Error::Secret("内存凭据锁已中毒".to_owned())
 }
