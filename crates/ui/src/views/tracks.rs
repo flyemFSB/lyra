@@ -37,6 +37,9 @@ pub(crate) fn track_row(
     let like_backend = backend.clone();
     let like_song = song.clone();
 
+    let title = song.display_title();
+    let singer = song.display_singer();
+
     let mut row = h_flex()
         .id(("track", index))
         .role(Role::Button)
@@ -92,13 +95,14 @@ pub(crate) fn track_row(
                         .border_1()
                         .border_color(ACCENT_GREEN_BORDER)
                 })
-                .child(cover_box(&song.name, 36.0, cx)),
+                .child(cover_box(title, 36.0, cx)),
         )
+        // 主标题：歌名；副标题：歌手名
         .child(
             v_flex()
                 .flex_1()
                 .min_w(px(0.0))
-                .gap(px(2.0))
+                .gap(px(3.0))
                 .child(
                     h_flex()
                         .gap(px(6.0))
@@ -117,16 +121,20 @@ pub(crate) fn track_row(
                                     TEXT_PRIMARY
                                 })
                                 .truncate()
-                                .child(SharedString::from(song.name.as_str())),
+                                .child(SharedString::from(title.to_owned())),
                         )
                         .child(badge("SQ", ACCENT_GREEN_LIGHT, ACCENT_GREEN)),
                 )
                 .child(
                     div()
                         .text_xs()
-                        .text_color(TEXT_MUTED)
+                        .text_color(if is_current {
+                            ACCENT_GREEN_HOVER
+                        } else {
+                            TEXT_MUTED
+                        })
                         .truncate()
-                        .child(SharedString::from(song.singer.as_str())),
+                        .child(SharedString::from(singer.to_owned())),
                 ),
         )
         .child(

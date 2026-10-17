@@ -1082,14 +1082,14 @@ impl AppShell {
                                         })
                                         .text_color(if is_current { ACCENT_GREEN_HOVER } else { TEXT_PRIMARY })
                                         .truncate()
-                                        .child(SharedString::from(song.name.clone())),
+                                        .child(SharedString::from(song.display_title().to_owned())),
                                 )
                                 .child(
                                     div()
                                         .text_xs()
                                         .text_color(TEXT_MUTED)
                                         .truncate()
-                                        .child(SharedString::from(song.singer.clone())),
+                                        .child(SharedString::from(song.display_singer().to_owned())),
                                 ),
                         )
                         .child(

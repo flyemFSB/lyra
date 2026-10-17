@@ -142,15 +142,15 @@ impl PlayerModel {
         }
     }
 
-    /// 获取当前曲目元数据（哈希、标题、歌手）
+    /// 获取当前曲目元数据（哈希、主标题歌名、副标题歌手名）
     pub(crate) fn current_labels(&self) -> (Option<String>, SharedString, SharedString) {
         self.current_song().map_or_else(
             || (None, SharedString::new_static("未在播放"), SharedString::new_static("")),
             |song| {
                 (
                     Some(song.hash.clone()),
-                    SharedString::from(song.name.as_str()),
-                    SharedString::from(song.singer.as_str()),
+                    SharedString::from(song.display_title().to_owned()),
+                    SharedString::from(song.display_singer().to_owned()),
                 )
             },
         )

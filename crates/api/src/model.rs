@@ -52,7 +52,8 @@ impl Song {
             ],
         )
         .to_lowercase();
-        let name = codec::pick_str(value, &["name", "songname", "song_name", "filename", "audio_name"]);
+        // 优先提取纯歌名（songname / song_name），若无则降级提取复合字段（name / filename / audio_name）
+        let mut name = codec::pick_str(value, &["songname", "song_name", "name", "filename", "audio_name"]);
         if hash.is_empty() && name.is_empty() {
             return None;
         }
@@ -94,19 +95,33 @@ impl Song {
                 &["trans_param", "cdn_pic"],
             ],
         );
+        let mut singer = codec::pick_str(
+            value,
+            &[
+                "singername",
+                "singer_name",
+                "singer",
+                "author_name",
+                "author",
+                "all_audios_singername",
+            ],
+        );
+
+        // 如果歌曲名称包含“歌手 - 歌名”格式（常见于 Kugou 歌单 filename / audio_name），将其分离为纯歌名与歌手名
+        if let Some((artist_part, title_part)) = name.split_once(" - ") {
+            let artist_part = artist_part.trim();
+            let title_part = title_part.trim();
+            if !artist_part.is_empty() && !title_part.is_empty() {
+                if singer.is_empty() {
+                    singer = artist_part.to_owned();
+                }
+                name = title_part.to_owned();
+            }
+        }
+
         Some(Self {
             name,
-            singer: codec::pick_str(
-                value,
-                &[
-                    "singername",
-                    "singer_name",
-                    "singer",
-                    "author_name",
-                    "author",
-                    "all_audios_singername",
-                ],
-            ),
+            singer,
             hash,
             album_id,
             album_audio_id,
@@ -124,6 +139,34 @@ impl Song {
     #[must_use]
     pub fn list_from(values: &[Value]) -> Vec<Self> {
         values.iter().filter_map(Self::from_value).collect()
+    }
+
+    /// 获取展示用的主标题（纯歌名）
+    #[must_use]
+    pub fn display_title(&self) -> &str {
+        if let Some((_, title)) = self.name.split_once(" - ") {
+            let title = title.trim();
+            if !title.is_empty() {
+                return title;
+            }
+        }
+        let trimmed = self.name.trim();
+        if trimmed.is_empty() { "未知歌曲" } else { trimmed }
+    }
+
+    /// 获取展示用的副标题（歌手名）
+    #[must_use]
+    pub fn display_singer(&self) -> &str {
+        if !self.singer.trim().is_empty() {
+            return self.singer.trim();
+        }
+        if let Some((artist, _)) = self.name.split_once(" - ") {
+            let artist = artist.trim();
+            if !artist.is_empty() {
+                return artist;
+            }
+        }
+        "未知歌手"
     }
 
     /// 获取指定分辨率的封面 URL
@@ -698,6 +741,37 @@ mod tests {
         assert_eq!(song.singer, "y");
         assert_eq!(song.hash, "ab");
         assert_eq!(song.duration_ms, 0);
+    }
+
+    #[test]
+    fn separates_compound_song_name_into_title_and_singer() {
+        let value = json!({"name": "周杰伦 - 晴天", "hash": "AB"});
+        let song = Song::from_value(&value).unwrap();
+        assert_eq!(song.name, "晴天");
+        assert_eq!(song.singer, "周杰伦");
+        assert_eq!(song.display_title(), "晴天");
+        assert_eq!(song.display_singer(), "周杰伦");
+
+        let with_singer = json!({"name": "周杰伦 - 晴天", "singername": "周杰伦", "hash": "AB"});
+        let song2 = Song::from_value(&with_singer).unwrap();
+        assert_eq!(song2.name, "晴天");
+        assert_eq!(song2.singer, "周杰伦");
+
+        let legacy = Song {
+            name: "周杰伦 - 晴天".to_owned(),
+            singer: String::new(),
+            ..Song::default()
+        };
+        assert_eq!(legacy.display_title(), "晴天");
+        assert_eq!(legacy.display_singer(), "周杰伦");
+
+        let unknown = Song {
+            name: "七里香".to_owned(),
+            singer: String::new(),
+            ..Song::default()
+        };
+        assert_eq!(unknown.display_title(), "七里香");
+        assert_eq!(unknown.display_singer(), "未知歌手");
     }
 
     #[test]

@@ -147,7 +147,7 @@ impl Render for DailyView {
         let greeting = get_greeting();
         let first_song = self.songs.first().cloned();
         let (first_song_name, first_song_singer) = match &first_song {
-            Some(s) => (s.name.clone(), s.singer.clone()),
+            Some(s) => (s.display_title().to_owned(), s.display_singer().to_owned()),
             None => ("暂无推荐曲目".to_owned(), "猜你喜欢".to_owned()),
         };
 
@@ -300,8 +300,8 @@ impl Render for DailyView {
             let Some(song) = self.songs.get(song_idx) else {
                 continue;
             };
-            let song_title = song.name.clone();
-            let song_singer = song.singer.clone();
+            let song_title = song.display_title().to_owned();
+            let song_singer = song.display_singer().to_owned();
             let shell = self.shell.clone();
             let songs = self.songs.clone();
 
