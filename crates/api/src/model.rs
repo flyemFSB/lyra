@@ -70,9 +70,9 @@ impl Song {
         ));
         let album_id = scalar_of(codec::pick(value, &["album_id", "albumid"]))
             .or_else_nonempty(|| scalar_of(codec::pick_path(value, &["trans_param", "album_id"])));
+        // 优先提取 album_audio_id 或 mixsongid，规避 audio_id 命名空间冲突
         let album_audio_id = codec::pick_str(
             value,
-        // 优先提取 album_audio_id 或 mixsongid，规避 audio_id 命名空间冲突
             &[
                 "album_audio_id",
                 "album_audioid",
@@ -165,28 +165,28 @@ fn scalar_of(value: Option<&Value>) -> String {
         .unwrap_or_default()
 }
 
-/// 云歌单条目。
+/// 歌单摘要模型
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Playlist {
-    /// `listid`。「我喜欢」固定为 `2`。
+    /// 歌单 ID（我喜欢固定为 2）
     pub listid: String,
-    /// 名称。
+    /// 歌单名称
     pub name: String,
-    /// 歌曲数。
+    /// 歌曲总数
     pub count: u64,
-    /// `0` = 自建 / 我喜欢，`1` = 收藏。
+    /// 歌单类型（0 自建/喜欢，1 收藏）
     pub kind: i64,
-    /// 跨设备稳定 ID，取歌单详情用它。
+    /// 全局收藏集 ID（获取详情用）
     pub global_collection_id: String,
-    /// 封面。
+    /// 封面 URL
     pub cover: String,
 }
 
 impl Playlist {
-    /// 「我喜欢」歌单固定标识。
+    /// 「我喜欢」歌单固定 ID
     pub const LIKED_LISTID: &'static str = "2";
 
-    /// 归一化。
+    /// 从上游 JSON 解析歌单信息
     #[must_use]
     pub fn from_value(value: &Value) -> Option<Self> {
         let listid = codec::pick_str(value, &["listid", "list_id", "id"]);
@@ -281,37 +281,47 @@ impl StationClass {
     }
 }
 
-/// 播放地址。
+/// 音频播放地址模型
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SongUrl {
-    /// 音频基地址（上游还会给 `url[]` 的备用节点）。
+    /// 音频主地址
     pub url: String,
-    /// 备用地址。
+    /// 备用地址列表
     pub backup_urls: Vec<String>,
-    /// 扩展名，如 `flac` / `ogg` / `mp3`。
+    /// 文件扩展名（小写）
     pub ext: String,
-    /// 实际音质。
+    /// 实际音质
     pub quality: String,
-    /// 文件大小（字节）。
+    /// 文件大小（字节）
     pub size: u64,
-    /// 时长（毫秒）。
+    /// 音频时长（毫秒）
     pub duration_ms: u64,
-    /// 音频 hash（可能与请求的 hash 不同，例如 ogg 变体）。
+    /// 音频哈希标识
     pub hash: String,
+    /// 试听片段时长（毫秒，0 表示完整曲）
+    pub preview_ms: u64,
 }
 
 impl SongUrl {
-    /// blob 缓存键：优先用上游给的音频 hash（内容寻址，不同音质/变体天然不同），
-    /// 上游没给时才回退到请求时的歌曲 hash。播放链路与 CLI 必须共用这一条规则。
+    /// 计算 Blob 缓存键（优先使用音频哈希，试听片段追加 preview 后缀）
     #[must_use]
-    pub fn blob_key<'a>(&'a self, requested: &'a str) -> &'a str {
-        if self.hash.is_empty() { requested } else { &self.hash }
+    pub fn blob_key(&self, requested: &str) -> String {
+        let base = if self.hash.is_empty() {
+            requested
+        } else {
+            self.hash.as_str()
+        };
+        if self.preview_ms == 0 {
+            base.to_owned()
+        } else {
+            format!("{base}_preview")
+        }
     }
 
-    /// 解析上游播放地址对象，提取主地址与备选节点列表。
+    /// 从上游响应中解析主播放地址与备用列表
     #[must_use]
     pub fn from_value(value: &Value) -> Option<Self> {
-        // 兼容对象数组与纯字符串数组两种上游播放地址返回结构。
+        // 兼容对象数组与纯字符串数组两种上游播放地址返回结构
         let mut urls: Vec<String> = Vec::new();
         let mut node_meta: Option<&Value> = None;
         for item in codec::find_array(value, &["url", "urls", "play_url"])
@@ -356,10 +366,11 @@ impl SongUrl {
             size: codec::pick_u64(meta, &["filesize", "size"]),
             duration_ms,
             hash: codec::pick_str(meta, &["hash"]).to_lowercase(),
+            preview_ms: 0,
         })
     }
 
-    /// 扩展名兜底：从 URL 猜。
+    /// 获取扩展名或从 URL 猜测
     #[must_use]
     pub fn ext_or_guess(&self) -> String {
         if !self.ext.is_empty() {
@@ -374,113 +385,121 @@ impl SongUrl {
     }
 }
 
-/// 单行歌词。
+/// 逐行歌词条目
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct LyricLine {
-    /// 起始时间（毫秒）。
+    /// 起始时间戳（毫秒）
     pub time_ms: u64,
-    /// 文本。
+    /// 歌词文本
     pub text: String,
 }
 
-/// 某个音质的权益判定（`/v2/get_res_privilege/lite`）。
+/// 音质权益判定结果
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct QualityRight {
-    /// 音质标识。
+    /// 音质标识
     pub quality: String,
-    /// 上游是否提供该音质。
+    /// 上游是否提供该音质
     pub exists: bool,
-    /// 上游 level。
+    /// 上游音质等级
     pub level: i64,
-    /// 码率。
+    /// 码率（bps）
     pub bitrate: u64,
-    /// 扩展名。
+    /// 扩展名
     pub extname: String,
-    /// 该音质的音频 hash（128/320 是 ogg 变体）。
+    /// 该音质的音频哈希
     pub hash: String,
-    /// 文件大小。
+    /// 文件大小（字节）
     pub size: u64,
-    /// 上游 privilege。
+    /// 上游权限码
     pub privilege: i64,
-    /// 上游 status。
+    /// 上游状态码
     pub status: i64,
-    /// 是否需要会员 / 付费。
+    /// 是否需要 VIP
     pub need_vip: bool,
-    /// 是否可免 VIP 获取。
+    /// 概念版无版权或已下架标记
+    pub no_copyright: bool,
+    /// 是否可直接获取
     pub obtainable: bool,
-    /// 概念版「免费听」命中。
+    /// 概念版免费听活动命中
     pub free_listen: bool,
-    /// 需要的会员类型：`concept` 或 `suvip`。
+    /// 要求的 VIP 类型（如 concept 或 suvip）
     pub require_vip_type: String,
 }
 
-/// 一首歌的音质矩阵。
+/// 歌曲完整音质权益矩阵
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct SongRights {
-    /// 音频 hash。
+    /// 音频哈希标识
     pub hash: String,
-    /// 歌名。
+    /// 歌曲名称
     pub name: String,
-    /// 歌手。
+    /// 歌手列表
     pub singer: String,
-    /// 专辑名。
+    /// 专辑名称
     pub albumname: String,
-    /// 是否整首免费。
+    /// 是否整首歌曲免费
     pub free_song: bool,
-    /// 取播放地址时要带上的 `auth`（上游给的资源级票据，免费歌曲为空）。
+    /// 资源级认证票据（auth）
     pub auth: String,
-    /// 各音质判定。
+    /// 各音质权益详情
     pub qualities: Vec<QualityRight>,
-    /// 可获取的音质。
+    /// 可获取的音质列表
     pub free_qualities: Vec<String>,
-    /// 需要 VIP 的音质。
+    /// 需要 VIP 的音质列表
     pub vip_qualities: Vec<String>,
-    /// 需要超级 VIP 的音质。
+    /// 需要超级 VIP 的音质列表
     pub super_vip_qualities: Vec<String>,
-    /// 上游缺失的音质。
+    /// 上游未提供的音质列表
     pub missing_qualities: Vec<String>,
-    /// 最佳可获取音质。
+    /// 最佳可用音质
     pub best_free_quality: String,
 }
 
 impl SongRights {
-    /// 取某个音质的判定。
+    /// 查询指定音质的判定信息
     #[must_use]
     pub fn quality(&self, quality: &str) -> Option<&QualityRight> {
         self.qualities.iter().find(|q| q.quality == quality)
     }
+
+    /// 检查歌曲是否被判为无版权或已下架
+    #[must_use]
+    pub fn is_no_copyright(&self) -> bool {
+        self.qualities.iter().any(|q| q.no_copyright)
+    }
 }
 
-/// 会员条目（`/v1/get_union_vip` 的 `busi_vip[]`）。
+/// VIP 权益条目
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct VipEntry {
-    /// 业务类型。概念版为 `concept`。
+    /// 业务类型（如 concept）
     pub busi_type: String,
-    /// 产品类型。畅听 VIP 为 `svip`。
+    /// 产品类型（如 svip）
     pub product_type: String,
-    /// 生效时间（毫秒）。
+    /// 生效时间戳（毫秒）
     pub begin_ms: i64,
-    /// 到期时间（毫秒）。
+    /// 到期时间戳（毫秒）
     pub end_ms: i64,
 }
 
 impl VipEntry {
-    /// 在给定时刻是否有效。
+    /// 检查指定时间戳是否处于会员有效期内
     #[must_use]
     pub fn is_active_at(&self, now_ms: i64) -> bool {
         now_ms >= self.begin_ms && now_ms < self.end_ms
     }
 }
 
-/// 概念版 VIP 权益状态，以 busi_vip 列表判决。
+/// VIP 权益状态汇总
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct VipStatus {
-    /// 全部会员条目。
+    /// 全部会员条目列表
     pub entries: Vec<VipEntry>,
 }
 
 impl VipStatus {
-    /// 归一化。
+    /// 从上游响应解析 VIP 状态
     #[must_use]
     pub fn from_value(value: &Value) -> Self {
         let entries = codec::find_array(value, &["busi_vip", "vip_list", "list"])
@@ -588,6 +607,9 @@ mod tests {
         );
         url.hash.clear();
         assert_eq!(url.blob_key("requested"), "requested", "缺失时必须回退到请求 hash");
+        // 试听片段与完整曲内容不同，不能共用缓存键。
+        url.preview_ms = 60_000;
+        assert_eq!(url.blob_key("requested"), "requested_preview");
     }
 
     #[test]
@@ -636,6 +658,21 @@ mod tests {
         assert_eq!(Song::from_value(&value).unwrap().album_id, "42");
         let nested = json!({"hash": "a", "trans_param": {"album_id": "77"}});
         assert_eq!(Song::from_value(&nested).unwrap().album_id, "77");
+    }
+
+    #[test]
+    fn song_rights_surface_the_no_copyright_flag() {
+        let rights = SongRights {
+            qualities: vec![QualityRight {
+                quality: "128".to_owned(),
+                exists: true,
+                no_copyright: true,
+                ..QualityRight::default()
+            }],
+            ..SongRights::default()
+        };
+        assert!(rights.is_no_copyright());
+        assert!(!SongRights::default().is_no_copyright());
     }
 
     #[test]

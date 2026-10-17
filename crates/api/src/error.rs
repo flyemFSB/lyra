@@ -37,44 +37,50 @@ impl Code {
     }
 }
 
-/// 传输与端点错误枚举。
+/// 传输与端点错误
 #[derive(Debug, Clone, Error)]
 pub enum Error {
-    /// 传输层失败（DNS / TLS / 超时 / 连接中断）。
+    /// 传输层失败（网络、超时或连接中断）
     #[error("transport failed: {0}")]
     Transport(String),
-    /// HTTP 状态码非 2xx。
+    /// HTTP 状态码非 2xx
     #[error("http {status}: {body}")]
     Http {
-        /// HTTP 状态码。
+        /// HTTP 状态码
         status: u16,
-        /// 响应体（截断后）。
+        /// 响应体摘要
         body: String,
     },
-    /// 上游返回了业务错误码。
+    /// 上游返回业务错误码
     #[error("upstream error_code={code} msg={message}")]
     Upstream {
-        /// 上游错误码。
+        /// 上游错误码
         code: i64,
-        /// 上游错误描述。
+        /// 上游错误描述
         message: String,
     },
-    /// 需要行为验证，但重试一次后仍然失败。
+    /// 二次验证重试后仍失败
     #[error("upstream still requires verification after retry (ssa-code={0})")]
     NeedsVerify(String),
-    /// 上游状态成功但关键字段为空，通常需短时间后重试。
+    /// 响应成功但关键数据为空
     #[error("empty data: {0}")]
     EmptyData(String),
-    /// 未登录但该端点需要登录态。
+    /// 概念版无版权或歌曲已下架
+    #[error("no copyright in the concept edition: {0}")]
+    NoCopyright(String),
+    /// 需会员或单独购买且无试听片段
+    #[error("entitlement required: {0}")]
+    NotEntitled(String),
+    /// 缺少登录态
     #[error("login required")]
     NotLoggedIn,
-    /// 响应体不是合法 JSON / 结构不符。
+    /// 响应反序列化失败
     #[error("decode failed: {0}")]
     Decode(String),
-    /// 协议原语失败。
+    /// 协议处理失败
     #[error("protocol: {0}")]
     Protocol(String),
-    /// 文件系统失败。
+    /// I/O 错误
     #[error("io: {0}")]
     Io(String),
 }

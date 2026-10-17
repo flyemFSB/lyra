@@ -207,31 +207,38 @@ pub async fn privilege(api: &Api, items: &[RightRequest], qualities: Option<&str
         .collect())
 }
 
-/// 查询单首歌曲的音质权益判定。
+/// 查询单曲音质权益详情
 pub async fn privilege_for_song(api: &Api, song: &Song, qualities: Option<&str>) -> Result<SongRights> {
     let mut rights = privilege(api, &[RightRequest::from_song(song)], qualities).await?;
     Ok(rights.pop().unwrap_or_default())
 }
 
-/// 将上游返回的原始权益数据组装为归一化判定模型。
+/// 组装音质权益判定结果
 fn build_quality_vip(hash: &str, _album_id: i64, resource: &Value, qualities: &[String]) -> SongRights {
     let relate_goods = codec::find_array(resource, &["relate_goods", "relategoods"])
         .cloned()
         .unwrap_or_default();
 
+    // 概念版下架或无版权标记：资源级 privilege=5 或响应提示 Deny
+    // 注意：不能依 status=0 判定，VIP 音源条目的 status 亦为 0
+    let denied_resource = codec::pick_i64(resource, &["privilege"]) == 5
+        || codec::pick_str(resource, &["_msg"]).to_lowercase().contains("deny");
+
     let list: Vec<QualityRight> = qualities
         .iter()
         .map(|quality| {
             let relate = pick_relate(&relate_goods, quality);
-            // 检查上游是否包含对应音质。
             let exists = relate.is_some();
-            // 判定是否属于会员/付费音质。
-            let need_vip = relate.is_some_and(|item| codec::pick_i64(item, &["privilege"]) != 0);
-            // 概念版在标准音质下享有免费畅听权益。
-            let free_listen = quality == "128" && need_vip;
+            // 上游 privilege：0 免费，5 无版权/下架，8/10 付费或会员
+            let privilege = relate.map_or(-1, |item| codec::pick_i64(item, &["privilege"]));
+            let need_vip = exists && privilege != 0;
             let status = relate.map_or(0, |item| codec::pick_i64(item, &["status"]));
-            let obtainable = free_listen || (exists && !need_vip && status != 0);
-            // 标准音质优先选用概念版专享 OGG 变体。
+            // 下架或无版权音源无法通过免费听权益获取
+            let no_copyright = exists && denied_resource;
+            // 概念版 128 标准音质支持免费畅听（无版权除外）
+            let free_listen = quality == "128" && need_vip && !no_copyright;
+            let obtainable = exists && !no_copyright && (free_listen || (!need_vip && status != 0));
+            // 标准音质优先选用概念版专享 OGG 变体
             let (ogg_hash, ogg_size) = ogg_of(Quality::parse(quality), resource);
             let size = if exists {
                 if ogg_size > 0 {
@@ -271,12 +278,13 @@ fn build_quality_vip(hash: &str, _album_id: i64, resource: &Value, qualities: &[
                 extname,
                 hash: if exists { resolved_hash } else { String::new() },
                 size,
-                privilege: relate.map_or(-1, |item| codec::pick_i64(item, &["privilege"])),
+                privilege,
                 status,
                 need_vip,
+                no_copyright,
                 obtainable,
                 free_listen,
-                require_vip_type: if exists && !obtainable && need_vip {
+                require_vip_type: if exists && !obtainable && need_vip && !no_copyright {
                     Quality::parse(quality).required_vip().to_owned()
                 } else {
                     String::new()
@@ -292,7 +300,7 @@ fn build_quality_vip(hash: &str, _album_id: i64, resource: &Value, qualities: &[
         .collect();
     let vip_qualities: Vec<String> = list
         .iter()
-        .filter(|q| q.exists && q.need_vip && !q.obtainable)
+        .filter(|q| q.exists && q.need_vip && !q.obtainable && !q.no_copyright)
         .map(|q| q.quality.clone())
         .collect();
     let super_vip_qualities: Vec<String> = list
@@ -427,6 +435,94 @@ mod tests {
                 {"quality": "viper_atmos", "privilege": 10, "status": 1, "info": {"bitrate": 2000}}
             ]
         }]})
+    }
+
+    // 模拟上游无版权/下架音源响应
+    fn no_copyright_response() -> serde_json::Value {
+        serde_json::json!({"status": 1, "data": [{
+            "hash": "ABC", "name": "阴天", "singername": "汪苏泷", "privilege": 5, "status": 0,
+            "_msg": "Deny: the current behavior of the audio is forbidden.",
+            "trans_param": {"cpy_grade": 75, "cpy_map": "2"},
+            "relate_goods": [
+                {"level": 2, "quality": "128", "privilege": 5, "status": 0},
+                {"level": 5, "quality": "flac", "privilege": 5, "status": 0}
+            ]
+        }]})
+    }
+
+    #[tokio::test]
+    async fn no_copyright_resources_are_never_offered_as_free_listen() {
+        let mock = Arc::new(MockTransport::new());
+        mock.on_json("/v2/get_res_privilege/lite", &no_copyright_response());
+        let api = api(mock.clone());
+        let rights = privilege(
+            &api,
+            &[RightRequest {
+                hash: "ABC".to_owned(),
+                album_id: 0,
+            }],
+            None,
+        )
+        .await
+        .unwrap();
+        let rights = &rights[0];
+
+        assert!(rights.is_no_copyright(), "privilege=5 / status=0 必须标成无版权");
+        let q128 = rights.quality("128").unwrap();
+        assert!(q128.exists);
+        assert!(!q128.free_listen, "无版权音源不是「免费听」，请求它必然拿不到地址");
+        assert!(!q128.obtainable);
+        assert_eq!(q128.require_vip_type, "", "这不是会员问题，不能提示开会员");
+        assert!(rights.free_qualities.is_empty());
+        assert!(rights.vip_qualities.is_empty(), "无版权音源不该列入「需要 VIP」");
+        assert!(rights.best_free_quality.is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_resource_level_deny_message_also_means_no_copyright() {
+        // 上游响应包含 Deny 时同样视为无版权
+        let mut response = no_copyright_response();
+        response["data"][0]["privilege"] = serde_json::json!(10);
+        let mock = Arc::new(MockTransport::new());
+        mock.on_json("/v2/get_res_privilege/lite", &response);
+        let api = api(mock.clone());
+        let rights = privilege(
+            &api,
+            &[RightRequest {
+                hash: "ABC".to_owned(),
+                album_id: 0,
+            }],
+            None,
+        )
+        .await
+        .unwrap();
+        assert!(rights[0].is_no_copyright());
+        assert!(!rights[0].quality("128").unwrap().free_listen);
+    }
+
+    #[tokio::test]
+    async fn vip_resources_keep_their_free_standard_quality() {
+        // VIP 音源的 relate_goods.status 正常为 0，不能误判为无版权
+        let mut response = rights_response();
+        for entry in response["data"][0]["relate_goods"].as_array_mut().unwrap() {
+            entry["status"] = serde_json::json!(0);
+        }
+        let mock = Arc::new(MockTransport::new());
+        mock.on_json("/v2/get_res_privilege/lite", &response);
+        let api = api(mock.clone());
+        let rights = privilege(
+            &api,
+            &[RightRequest {
+                hash: "ABC".to_owned(),
+                album_id: 0,
+            }],
+            None,
+        )
+        .await
+        .unwrap();
+        let q128 = rights[0].quality("128").unwrap();
+        assert!(!rights[0].is_no_copyright());
+        assert!(q128.free_listen && q128.obtainable, "VIP 曲的 128 免费听必须保留");
     }
 
     #[tokio::test]
