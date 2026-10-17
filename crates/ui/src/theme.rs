@@ -92,8 +92,18 @@ pub(crate) fn title(text: impl Into<SharedString>, _cx: &App) -> impl IntoElemen
         .child(text.into())
 }
 
-/// 构造居中状态提示组件（支持自定义图标）
+/// 构造居中状态提示组件（支持自定义图标与旋转动效）
 pub(crate) fn notice_with_icon(icon: IconName, text: impl Into<SharedString>, _cx: &App) -> AnyElement {
+    let is_spinning = matches!(icon, IconName::RefreshCw | IconName::Loader);
+    let icon_element = Icon::new(icon)
+        .size(px(26.0))
+        .text_color(if is_spinning { ACCENT_GREEN } else { TEXT_MUTED });
+    let icon_element = if is_spinning {
+        crate::motion::rotating_icon(icon_element, "notice_spinner")
+    } else {
+        icon_element.into_any_element()
+    };
+
     div()
         .size_full()
         .flex()
@@ -109,7 +119,7 @@ pub(crate) fn notice_with_icon(icon: IconName, text: impl Into<SharedString>, _c
                 .bg(SURFACE_HOVER)
                 .border_1()
                 .border_color(CARD_BORDER)
-                .child(Icon::new(icon).size(px(26.0)).text_color(TEXT_MUTED)),
+                .child(icon_element),
         )
         .child(div().text_sm().font_weight(FontWeight::MEDIUM).child(text.into()))
         .into_any_element()

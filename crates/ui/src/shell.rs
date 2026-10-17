@@ -64,6 +64,17 @@ pub(crate) struct AppShell {
     toast_deadline: Option<Instant>,
     /// 是否展开右侧播放队列抽屉
     show_queue: bool,
+    /// 歌词大屏正在收起退出过渡
+    closing_lyrics: bool,
+    /// 歌词收起动效序号
+    closing_lyrics_seq: u64,
+    _lyrics_close_task: Option<Task<()>>,
+    /// 导航切换序号
+    pub(crate) nav_seq: u64,
+    /// 轻提示变更序号（驱动浮动提示下落动效）
+    toast_seq: u64,
+    /// 播放队列抽屉切换序号（驱动抽屉滑入动效）
+    queue_seq: u64,
     /// 歌词请求序列号（用于丢弃过期响应）
     lyrics_seq: u64,
     /// 连续自动跳过的曲目计数
@@ -102,6 +113,12 @@ impl AppShell {
             toast: None,
             toast_deadline: None,
             show_queue: false,
+            closing_lyrics: false,
+            closing_lyrics_seq: 1,
+            _lyrics_close_task: None,
+            nav_seq: 1,
+            toast_seq: 1,
+            queue_seq: 1,
             lyrics_seq: 0,
             auto_skips: 0,
             _drain: drain,
@@ -206,11 +223,14 @@ impl AppShell {
 
     /// 切换导航页面并记录历史栈
     pub(crate) fn set_nav(&mut self, nav: Nav, cx: &mut Context<Self>) {
+        self.closing_lyrics = false;
+        self._lyrics_close_task = None;
         if self.nav != nav {
             self.history.truncate(self.history_idx + 1);
             self.history.push(nav);
             self.history_idx = self.history.len() - 1;
             self.nav = nav;
+            self.nav_seq += 1;
             self.ensure_loaded(cx);
             cx.notify();
         }
@@ -218,12 +238,52 @@ impl AppShell {
 
     /// 后退至历史上一页
     pub(crate) fn go_back(&mut self, cx: &mut Context<Self>) {
+        if self.nav == Nav::Lyrics {
+            if !self.closing_lyrics {
+                self.close_lyrics(cx);
+            }
+            return;
+        }
         if self.history_idx > 0 {
             self.history_idx -= 1;
             self.nav = self.history[self.history_idx];
+            self.nav_seq += 1;
             self.ensure_loaded(cx);
             cx.notify();
         }
+    }
+
+    /// 关闭歌词大屏（伴随平滑向下滑出退出动效）
+    pub(crate) fn close_lyrics(&mut self, cx: &mut Context<Self>) {
+        if self.nav != Nav::Lyrics || self.closing_lyrics {
+            return;
+        }
+        self.closing_lyrics = true;
+        self.closing_lyrics_seq += 1;
+        cx.notify();
+
+        let task = cx.spawn(async move |this, cx| {
+            cx.background_executor()
+                .timer(crate::motion::LYRICS_TRANSITION_DURATION)
+                .await;
+            this.update(cx, |shell, cx| {
+                shell.closing_lyrics = false;
+                shell._lyrics_close_task = None;
+                while shell.history_idx > 0 && shell.history[shell.history_idx] == Nav::Lyrics {
+                    shell.history_idx -= 1;
+                }
+                if shell.history[shell.history_idx] == Nav::Lyrics {
+                    shell.nav = Nav::Playlists;
+                } else {
+                    shell.nav = shell.history[shell.history_idx];
+                }
+                shell.nav_seq += 1;
+                shell.ensure_loaded(cx);
+                cx.notify();
+            })
+            .ok();
+        });
+        self._lyrics_close_task = Some(task);
     }
 
     /// 前进至历史下一页
@@ -231,6 +291,7 @@ impl AppShell {
         if self.history_idx + 1 < self.history.len() {
             self.history_idx += 1;
             self.nav = self.history[self.history_idx];
+            self.nav_seq += 1;
             self.ensure_loaded(cx);
             cx.notify();
         }
@@ -239,6 +300,9 @@ impl AppShell {
     /// 切换播放队列抽屉展开状态
     pub(crate) fn toggle_queue(&mut self, cx: &mut Context<Self>) {
         self.show_queue = !self.show_queue;
+        if self.show_queue {
+            self.queue_seq += 1;
+        }
         cx.notify();
     }
 
@@ -387,6 +451,7 @@ impl AppShell {
             views.settings.update(cx, |view, _cx| view.ensure());
         }
         self.nav = Nav::Playlists;
+        self.nav_seq += 1;
         cx.notify();
     }
 
@@ -394,6 +459,7 @@ impl AppShell {
     fn on_logged_out(&mut self, cx: &mut Context<Self>) {
         self.logged_in = false;
         self.nav = Nav::Login;
+        self.nav_seq += 1;
         // 清除旧账号视图状态
         if let Some(views) = self.views.as_ref() {
             views.playlists.update(cx, PlaylistsView::reset);
@@ -407,6 +473,7 @@ impl AppShell {
 
     /// 展示全局轻提示
     fn set_toast(&mut self, text: String, cx: &mut Context<Self>) {
+        self.toast_seq += 1;
         self.toast = Some(SharedString::from(text));
         self.toast_deadline = Some(Instant::now() + TOAST_TTL);
         cx.notify();
@@ -633,80 +700,109 @@ impl AppShell {
         column = column.child(quick_row);
 
         // 歌单胶囊切换器与侧边栏歌单列表
-        let (tab, playlists, selected, loading_playlists) = if let Some(views) = self.views.as_ref() {
+        let (tab, tab_seq, playlists, selected, loading_playlists) = if let Some(views) = self.views.as_ref() {
             let p = views.playlists.read(cx);
-            (p.tab, p.playlists.clone(), p.selected, p.loading_playlists)
+            (p.tab, p.tab_seq, p.playlists.clone(), p.selected, p.loading_playlists)
         } else {
-            (PlaylistTab::Created, Arc::new(Vec::new()), None, false)
+            (PlaylistTab::Created, 1, Arc::new(Vec::new()), None, false)
         };
 
-        let tab_capsule = h_flex()
+        let pill_base = div()
+            .id("capsule_slider_pill")
+            .absolute()
+            .top(px(3.0))
+            .w(px(97.0))
+            .h(px(26.0))
+            .rounded(px(999.0))
+            .bg(CARD_BG)
+            .shadow_sm();
+
+        let pill: AnyElement = if tab_seq <= 1 {
+            let left_pos = if tab == PlaylistTab::Created { px(3.0) } else { px(100.0) };
+            pill_base.left(left_pos).into_any_element()
+        } else {
+            let (from_x, to_x) = if tab == PlaylistTab::Collected {
+                (3.0, 100.0)
+            } else {
+                (100.0, 3.0)
+            };
+            crate::motion::capsule_pill_sliding(pill_base, ("capsule_pill_anim", tab_seq), from_x, to_x)
+                .into_any_element()
+        };
+
+        let is_created = tab == PlaylistTab::Created;
+        let is_collected = tab == PlaylistTab::Collected;
+
+        let tab_capsule = div()
+            .relative()
             .w_full()
+            .h(px(32.0))
             .p(px(3.0))
             .bg(hex_rgb(0xe5e9ef))
             .rounded(px(999.0))
-            .gap(px(2.0))
+            .child(pill)
             .child(
-                div()
-                    .id("sidebar_tab_created")
-                    .role(Role::Button)
-                    .cursor_pointer()
-                    .flex_1()
-                    .h(px(26.0))
-                    .rounded(px(999.0))
-                    .flex()
-                    .items_center()
-                    .justify_center()
-                    .text_xs()
-                    .when(tab == PlaylistTab::Created, |s| {
-                        s.bg(CARD_BG)
-                            .text_color(TEXT_PRIMARY)
-                            .font_weight(FontWeight::BOLD)
-                            .shadow_sm()
-                    })
-                    .when(tab != PlaylistTab::Created, |s| {
-                        s.text_color(TEXT_MUTED).hover(|h| h.text_color(TEXT_PRIMARY))
-                    })
-                    .on_click(cx.listener(|shell, _event, _window, cx| {
-                        if let Some(views) = shell.views.as_ref() {
-                            views
-                                .playlists
-                                .update(cx, |p, cx| p.switch_tab(PlaylistTab::Created, cx));
-                        }
-                        shell.set_nav(Nav::Playlists, cx);
-                    }))
-                    .child("自建歌单"),
-            )
-            .child(
-                div()
-                    .id("sidebar_tab_collected")
-                    .role(Role::Button)
-                    .cursor_pointer()
-                    .flex_1()
-                    .h(px(26.0))
-                    .rounded(px(999.0))
-                    .flex()
-                    .items_center()
-                    .justify_center()
-                    .text_xs()
-                    .when(tab == PlaylistTab::Collected, |s| {
-                        s.bg(CARD_BG)
-                            .text_color(TEXT_PRIMARY)
-                            .font_weight(FontWeight::BOLD)
-                            .shadow_sm()
-                    })
-                    .when(tab != PlaylistTab::Collected, |s| {
-                        s.text_color(TEXT_MUTED).hover(|h| h.text_color(TEXT_PRIMARY))
-                    })
-                    .on_click(cx.listener(|shell, _event, _window, cx| {
-                        if let Some(views) = shell.views.as_ref() {
-                            views
-                                .playlists
-                                .update(cx, |p, cx| p.switch_tab(PlaylistTab::Collected, cx));
-                        }
-                        shell.set_nav(Nav::Playlists, cx);
-                    }))
-                    .child("收藏歌单"),
+                h_flex()
+                    .relative()
+                    .size_full()
+                    .child(
+                        div()
+                            .id("sidebar_tab_created")
+                            .role(Role::Button)
+                            .cursor_pointer()
+                            .flex_1()
+                            .h_full()
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .text_xs()
+                            .when(is_created, |s| {
+                                s.text_color(TEXT_PRIMARY).font_weight(FontWeight::BOLD)
+                            })
+                            .when(!is_created, |s| {
+                                s.text_color(TEXT_MUTED)
+                                    .font_weight(FontWeight::MEDIUM)
+                                    .hover(|h| h.text_color(TEXT_PRIMARY))
+                            })
+                            .on_click(cx.listener(|shell, _event, _window, cx| {
+                                if let Some(views) = shell.views.as_ref() {
+                                    views
+                                        .playlists
+                                        .update(cx, |p, cx| p.switch_tab(PlaylistTab::Created, cx));
+                                }
+                                shell.set_nav(Nav::Playlists, cx);
+                            }))
+                            .child("自建歌单"),
+                    )
+                    .child(
+                        div()
+                            .id("sidebar_tab_collected")
+                            .role(Role::Button)
+                            .cursor_pointer()
+                            .flex_1()
+                            .h_full()
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .text_xs()
+                            .when(is_collected, |s| {
+                                s.text_color(TEXT_PRIMARY).font_weight(FontWeight::BOLD)
+                            })
+                            .when(!is_collected, |s| {
+                                s.text_color(TEXT_MUTED)
+                                    .font_weight(FontWeight::MEDIUM)
+                                    .hover(|h| h.text_color(TEXT_PRIMARY))
+                            })
+                            .on_click(cx.listener(|shell, _event, _window, cx| {
+                                if let Some(views) = shell.views.as_ref() {
+                                    views
+                                        .playlists
+                                        .update(cx, |p, cx| p.switch_tab(PlaylistTab::Collected, cx));
+                                }
+                                shell.set_nav(Nav::Playlists, cx);
+                            }))
+                            .child("收藏歌单"),
+                    ),
             );
         column = column.child(tab_capsule);
 
@@ -813,35 +909,39 @@ impl AppShell {
 
     /// 渲染浮动轻提示
     fn toast_element(&self, _cx: &App) -> Option<AnyElement> {
+        let toast_id = ("toast_entrance", self.toast_seq);
         self.toast.clone().map(|text| {
-            div()
-                .absolute()
-                .top(px(16.0))
-                .left_0()
-                .right_0()
-                .flex()
-                .justify_center()
-                .child(
-                    h_flex()
-                        .gap(px(8.0))
-                        .items_center()
-                        .px_5()
-                        .py_2()
-                        .rounded(px(999.0))
-                        .bg(CARD_BG)
-                        .border_1()
-                        .border_color(CARD_BORDER)
-                        .shadow_lg()
-                        .child(Icon::new(IconName::Sparkles).size(px(16.0)).text_color(ACCENT_GREEN))
-                        .child(
-                            div()
-                                .text_sm()
-                                .font_weight(FontWeight::MEDIUM)
-                                .text_color(TEXT_PRIMARY)
-                                .child(text),
-                        ),
-                )
-                .into_any_element()
+            crate::motion::toast_entrance(
+                div()
+                    .absolute()
+                    .top(px(16.0))
+                    .left_0()
+                    .right_0()
+                    .flex()
+                    .justify_center()
+                    .child(
+                        h_flex()
+                            .gap(px(8.0))
+                            .items_center()
+                            .px_5()
+                            .py_2()
+                            .rounded(px(999.0))
+                            .bg(CARD_BG)
+                            .border_1()
+                            .border_color(CARD_BORDER)
+                            .shadow_lg()
+                            .child(Icon::new(IconName::Sparkles).size(px(16.0)).text_color(ACCENT_GREEN))
+                            .child(
+                                div()
+                                    .text_sm()
+                                    .font_weight(FontWeight::MEDIUM)
+                                    .text_color(TEXT_PRIMARY)
+                                    .child(text),
+                            ),
+                    ),
+                toast_id,
+            )
+            .into_any_element()
         })
     }
 
@@ -954,12 +1054,14 @@ impl AppShell {
                                 .items_center()
                                 .justify_center()
                                 .when(is_current, |this| {
-                                    let icon = if is_playing {
-                                        IconName::AudioLines
+                                    if is_playing {
+                                        this.child(crate::motion::pulsating_icon(
+                                            Icon::new(IconName::AudioLines).size(px(14.0)).text_color(ACCENT_GREEN),
+                                            ("q_track_wave", idx),
+                                        ))
                                     } else {
-                                        IconName::Music
-                                    };
-                                    this.child(Icon::new(icon).size(px(14.0)).text_color(ACCENT_GREEN))
+                                        this.child(Icon::new(IconName::Music).size(px(14.0)).text_color(ACCENT_GREEN))
+                                    }
                                 })
                                 .when(!is_current, |this| {
                                     this.child(div().text_xs().text_color(TEXT_FAINT).child(format!("{:02}", idx + 1)))
@@ -1001,7 +1103,7 @@ impl AppShell {
             panel = panel.child(list);
         }
 
-        Some(panel.into_any_element())
+        Some(crate::motion::drawer_entrance(panel, ("queue_drawer_panel", self.queue_seq)).into_any_element())
     }
 }
 
@@ -1010,8 +1112,12 @@ impl Render for AppShell {
         let Some(views) = self.views.as_ref() else {
             return notice("初始化中…", cx);
         };
-        // 全屏沉浸式歌词视图模式
-        if self.nav == Nav::Lyrics {
+        // 全屏沉浸式歌词视图模式（非退出过渡期）
+        if self.nav == Nav::Lyrics && !self.closing_lyrics {
+            let lyrics_card = crate::motion::lyrics_open_entrance(
+                main_card().size_full().overflow_hidden().child(views.lyrics.clone()),
+                ("lyrics_fullscreen_card", self.nav_seq),
+            );
             return v_flex()
                 .size_full()
                 .bg(CANVAS_BG)
@@ -1024,7 +1130,7 @@ impl Render for AppShell {
                         .flex_1()
                         .min_h(px(0.0))
                         .w_full()
-                        .child(main_card().size_full().overflow_hidden().child(views.lyrics.clone()))
+                        .child(lyrics_card)
                         .children(self.queue_drawer(cx))
                         .children(self.toast_element(cx)),
                 )
@@ -1032,7 +1138,21 @@ impl Render for AppShell {
                 .into_any_element();
         }
 
-        let body = match self.nav {
+        let effective_nav = if self.nav == Nav::Lyrics {
+            let mut idx = self.history_idx;
+            while idx > 0 && self.history[idx] == Nav::Lyrics {
+                idx -= 1;
+            }
+            if self.history[idx] == Nav::Lyrics {
+                Nav::Playlists
+            } else {
+                self.history[idx]
+            }
+        } else {
+            self.nav
+        };
+
+        let body = match effective_nav {
             Nav::Playlists => views.playlists.clone().into_any_element(),
             Nav::Daily => views.daily.clone().into_any_element(),
             Nav::Radio => views.radio.clone().into_any_element(),
@@ -1040,6 +1160,16 @@ impl Render for AppShell {
             Nav::Lyrics => views.lyrics.clone().into_any_element(),
             Nav::Settings => views.settings.clone().into_any_element(),
             Nav::Login => views.login.clone().into_any_element(),
+        };
+
+        let lyrics_exit_overlay = if self.closing_lyrics {
+            let exiting_card = crate::motion::lyrics_close_exit(
+                main_card().size_full().overflow_hidden().child(views.lyrics.clone()),
+                ("lyrics_fullscreen_exit", self.closing_lyrics_seq),
+            );
+            Some(div().absolute().inset_0().child(exiting_card))
+        } else {
+            None
         };
 
         // 根容器填满窗口视口
@@ -1069,6 +1199,7 @@ impl Render for AppShell {
                             .child(self.top_header(cx))
                             .child(div().flex_1().min_h(px(0.0)).child(body)),
                     )
+                    .children(lyrics_exit_overlay)
                     .children(self.queue_drawer(cx))
                     .children(self.toast_element(cx)),
             )

@@ -435,7 +435,7 @@ impl Render for PlayerBar {
                             .on_click(move |_event, _window, cx| {
                                 shell_lyrics_cover.update(cx, |shell, cx| {
                                     if shell.nav == Nav::Lyrics {
-                                        shell.go_back(cx);
+                                        shell.close_lyrics(cx);
                                     } else {
                                         shell.set_nav(Nav::Lyrics, cx);
                                     }

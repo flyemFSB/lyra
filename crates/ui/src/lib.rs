@@ -4,6 +4,7 @@
 
 mod bridge;
 mod format;
+mod motion;
 mod shell;
 mod theme;
 mod views;

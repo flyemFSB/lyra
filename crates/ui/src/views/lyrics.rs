@@ -294,15 +294,27 @@ impl LyricsView {
                     .flex()
                     .items_center()
                     .justify_center()
-                    // 外圈辉光
-                    .child(
-                        div()
+                    // 外圈辉光（播放中自然呼吸微光）
+                    .child({
+                        let glow = div()
                             .absolute()
                             .size(px(380.0))
                             .rounded_full()
                             .bg(hsla(202.0 / 360.0, 0.95, 0.88, 0.45))
-                            .shadow_xl(),
-                    )
+                            .shadow_xl();
+                        if is_playing {
+                            glow.with_animation(
+                                "vinyl_glow",
+                                Animation::new(Duration::from_millis(2400))
+                                    .repeat()
+                                    .with_easing(pulsating_between(0.25, 0.65)),
+                                |this, alpha| this.opacity(alpha),
+                            )
+                            .into_any_element()
+                        } else {
+                            glow.into_any_element()
+                        }
+                    })
                     // 彩胶外环
                     .child(
                         div()
@@ -370,14 +382,23 @@ impl LyricsView {
                                     .bg(hex_rgb(0x475569)),
                             ),
                     )
-                    // 唱臂与唱针组件
+                    // 唱臂与唱针组件（播放/暂停平滑切入与复位）
                     .child(
                         div()
                             .absolute()
-                            .top(if is_playing { px(12.0) } else { px(8.0) })
-                            .right(if is_playing { px(24.0) } else { px(16.0) })
                             .w(px(90.0))
                             .h(px(220.0))
+                            .with_animation(
+                                if is_playing { "tonearm_playing" } else { "tonearm_paused" },
+                                Animation::new(Duration::from_millis(360))
+                                    .with_easing(gpui_kit::base::animation::ease_out_cubic),
+                                move |this, delta| {
+                                    let (start_top, target_top) = if is_playing { (8.0, 12.0) } else { (12.0, 8.0) };
+                                    let (start_right, target_right) = if is_playing { (16.0, 24.0) } else { (24.0, 16.0) };
+                                    this.top(px(start_top + (target_top - start_top) * delta))
+                                        .right(px(start_right + (target_right - start_right) * delta))
+                                },
+                            )
                             .child(
                                 div()
                                     .absolute()
@@ -525,7 +546,7 @@ impl Render for LyricsView {
                             .icon(IconName::ChevronLeft)
                             .tooltip("返回主界面")
                             .on_click(move |_event, _window, cx| {
-                                shell_exit.update(cx, AppShell::go_back).ok();
+                                shell_exit.update(cx, |shell, cx| shell.close_lyrics(cx)).ok();
                             }),
                     ),
             )

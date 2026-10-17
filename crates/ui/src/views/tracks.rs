@@ -67,12 +67,14 @@ pub(crate) fn track_row(
                 .items_center()
                 .justify_center()
                 .when(is_current, |this| {
-                    let icon = if is_playing {
-                        IconName::AudioLines
+                    if is_playing {
+                        this.child(crate::motion::pulsating_icon(
+                            Icon::new(IconName::AudioLines).size(px(16.0)).text_color(ACCENT_GREEN),
+                            ("track_wave", index),
+                        ))
                     } else {
-                        IconName::Music
-                    };
-                    this.child(Icon::new(icon).size(px(16.0)).text_color(ACCENT_GREEN))
+                        this.child(Icon::new(IconName::Music).size(px(16.0)).text_color(ACCENT_GREEN))
+                    }
                 })
                 .when(!is_current, |this| {
                     this.child(

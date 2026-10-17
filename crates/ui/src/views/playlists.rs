@@ -47,6 +47,8 @@ pub(crate) struct PlaylistsView {
     next_page: Option<u32>,
     /// 是否为追加分页数据
     appending: bool,
+    /// 标签页切换序号（驱动过渡动效）
+    pub(crate) tab_seq: u64,
     _sub: Subscription,
 }
 
@@ -80,6 +82,7 @@ impl PlaylistsView {
             request_seq: 0,
             next_page: None,
             appending: false,
+            tab_seq: 1,
             _sub: sub,
         }
     }
@@ -89,6 +92,7 @@ impl PlaylistsView {
         self.playlists = Arc::new(Vec::new());
         self.selected = None;
         self.tab = PlaylistTab::Created;
+        self.tab_seq = 1;
         self.scroll_handle = VirtualListScrollHandle::new();
         self.songs = Arc::new(Vec::new());
         self.sizes = row_sizes(0);
@@ -150,6 +154,7 @@ impl PlaylistsView {
             return;
         }
         self.tab = tab;
+        self.tab_seq += 1;
         let first_in_tab = self
             .playlists
             .iter()
@@ -371,6 +376,6 @@ impl PlaylistsView {
 
 impl Render for PlaylistsView {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        div().size_full().child(self.track_area(cx))
+        self.track_area(cx)
     }
 }
