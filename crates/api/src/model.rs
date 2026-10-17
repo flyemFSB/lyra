@@ -56,13 +56,23 @@ impl Song {
         if hash.is_empty() && name.is_empty() {
             return None;
         }
-        let duration = codec::pick_i64(value, &["timelen", "duration", "timelen_ms", "duration_ms"]);
-        let album_id = codec::pick_str(value, &["album_id", "albumid"])
-            .or_else_nonempty(|| codec::pick_str(value, &["trans_param", "album_id"]));
+        // 上游时长单位不统一（秒/毫秒），按量级归一化为毫秒
+        let duration_ms = normalise_duration(codec::pick_i64(
+            value,
+            &[
+                "timelen",
+                "timelen_ms",
+                "Duration",
+                "duration",
+                "timelength",
+                "duration_ms",
+            ],
+        ));
+        let album_id = scalar_of(codec::pick(value, &["album_id", "albumid"]))
+            .or_else_nonempty(|| scalar_of(codec::pick_path(value, &["trans_param", "album_id"])));
         let album_audio_id = codec::pick_str(
             value,
-            // `mixsongid`/`add_mixsongid`/`emixsongid` 与 `album_audio_id` 同义（上游文档明确「MixSongID 均可」），
-            // 而 `audio_id` 是另一个 id 空间，见字段文档。
+        // 优先提取 album_audio_id 或 mixsongid，规避 audio_id 命名空间冲突
             &[
                 "album_audio_id",
                 "album_audioid",
@@ -101,7 +111,7 @@ impl Song {
             album_id,
             album_audio_id,
             album_name: codec::pick_str(value, &["albumname", "album_name", "album"]),
-            duration_ms: u64::try_from(duration.max(0)).unwrap_or(0),
+            duration_ms,
             fileid: codec::pick_i64(value, &["fileid", "file_id"]),
             mixsongid: codec::pick_i64(value, &["mixsongid", "mix_song_id"]),
             privilege: codec::pick_i64(value, &["privilege", "pay_type"]),
@@ -134,6 +144,25 @@ impl OrElseNonEmpty for String {
     fn or_else_nonempty(self, fallback: impl FnOnce() -> String) -> String {
         if self.is_empty() { fallback() } else { self }
     }
+}
+
+/// 时长归一化为毫秒
+fn normalise_duration(value: i64) -> u64 {
+    if value <= 0 {
+        0
+    } else if value < 1_000 {
+        u64::try_from(value).unwrap_or(0) * 1_000
+    } else {
+        u64::try_from(value).unwrap_or(0)
+    }
+}
+
+/// 仅提取标量字段文本，对象与数组均视为空
+fn scalar_of(value: Option<&Value>) -> String {
+    value
+        .filter(|v| !v.is_object() && !v.is_array())
+        .map(codec::as_str)
+        .unwrap_or_default()
 }
 
 /// 云歌单条目。
@@ -559,6 +588,54 @@ mod tests {
         );
         url.hash.clear();
         assert_eq!(url.blob_key("requested"), "requested", "缺失时必须回退到请求 hash");
+    }
+
+    #[test]
+    fn durations_are_normalised_from_seconds_and_milliseconds() {
+        // 歌单/详情的 `timelen` 是毫秒。
+        assert_eq!(
+            Song::from_value(&json!({"hash": "a", "timelen": 225_000}))
+                .unwrap()
+                .duration_ms,
+            225_000
+        );
+        // 搜索的 `Duration` 是秒：曾经被当成毫秒，四分钟的歌成了 0.2 秒。
+        assert_eq!(
+            Song::from_value(&json!({"hash": "a", "Duration": 225}))
+                .unwrap()
+                .duration_ms,
+            225_000
+        );
+        // 个别端点把 timelen 写成秒。
+        assert_eq!(
+            Song::from_value(&json!({"hash": "a", "timelen": 225}))
+                .unwrap()
+                .duration_ms,
+            225_000
+        );
+        // 同一个字段名也可能下发毫秒（实测两种都存在）。
+        assert_eq!(
+            Song::from_value(&json!({"hash": "a", "Duration": 226_000}))
+                .unwrap()
+                .duration_ms,
+            226_000
+        );
+        assert_eq!(Song::from_value(&json!({"hash": "a"})).unwrap().duration_ms, 0);
+        assert_eq!(
+            Song::from_value(&json!({"hash": "a", "timelen": 0}))
+                .unwrap()
+                .duration_ms,
+            0
+        );
+    }
+
+    #[test]
+    fn album_id_never_becomes_a_serialised_object() {
+        // 上游个别响应把整个 trans_param 当成 album_id 下发：必须视为缺失并回退到真路径。
+        let value = json!({"hash": "a", "album_id": {"language": "国语"}, "trans_param": {"album_id": 42}});
+        assert_eq!(Song::from_value(&value).unwrap().album_id, "42");
+        let nested = json!({"hash": "a", "trans_param": {"album_id": "77"}});
+        assert_eq!(Song::from_value(&nested).unwrap().album_id, "77");
     }
 
     #[test]
