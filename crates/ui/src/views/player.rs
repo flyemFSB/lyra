@@ -625,13 +625,13 @@ impl Render for PlayerBar {
                                     .child(Slider::new(&self.volume).w_full()),
                             ),
                     )
-                    // 播放队列弹窗开关
+                    // 播放队列开关
                     .child(
                         Button::new("queue_drawer_toggle")
                             .ghost()
                             .small()
                             .icon(IconName::ListMusic)
-                            .tooltip(format!("播放队列 ({} 首)", queue_len))
+                            .tooltip(format!("播放队列 ({queue_len} 首)"))
                             .on_click(move |_event, _window, cx| {
                                 shell_queue.update(cx, AppShell::toggle_queue).ok();
                             }),

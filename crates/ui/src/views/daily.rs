@@ -19,12 +19,11 @@ use crate::theme::{
 use crate::views::player::PlayerModel;
 use crate::views::tracks::track_row;
 
-/// 获取当下时段问候语（UTC+8）。
+/// 获取当前时段问候语（UTC+8）
 fn get_greeting() -> &'static str {
     let secs = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or(0);
+        .map_or(0, |d| d.as_secs());
     let hour = ((secs + 8 * 3600) % 86400) / 3600;
     if (5..12).contains(&hour) {
         "早上好"
@@ -257,16 +256,12 @@ impl Render for DailyView {
                                 if !songs_for_play.is_empty() {
                                     shell_play
                                         .update(cx, |shell, cx| {
-                                            shell.play_queue(songs_for_play.clone(), 0, cx)
+                                            shell.play_queue(songs_for_play.clone(), 0, cx);
                                         })
                                         .ok();
                                 }
                             })
-                            .child(
-                                Icon::new(IconName::Play)
-                                    .size(px(16.0))
-                                    .text_color(hex_rgb(0xffffff)),
-                            ),
+                            .child(Icon::new(IconName::Play).size(px(16.0)).text_color(hex_rgb(0xffffff))),
                     ),
             )
             .child(

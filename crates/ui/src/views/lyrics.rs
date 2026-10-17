@@ -411,7 +411,7 @@ impl Render for LyricsView {
                             .icon(IconName::ChevronLeft)
                             .tooltip("返回主界面")
                             .on_click(move |_event, _window, cx| {
-                                shell_exit.update(cx, |shell, cx| shell.go_back(cx)).ok();
+                                shell_exit.update(cx, AppShell::go_back).ok();
                             }),
                     ),
             )

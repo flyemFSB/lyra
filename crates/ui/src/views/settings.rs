@@ -417,12 +417,21 @@ impl Render for SettingsView {
                                 h_flex()
                                     .gap(px(8.0))
                                     .items_center()
-                                    .child(Icon::new(IconName::SlidersHorizontal).size(px(16.0)).text_color(ACCENT_GREEN))
-                                    .child(div().text_sm().font_weight(FontWeight::BOLD).text_color(TEXT_PRIMARY).child("音质偏好")),
+                                    .child(
+                                        Icon::new(IconName::SlidersHorizontal)
+                                            .size(px(16.0))
+                                            .text_color(ACCENT_GREEN),
+                                    )
+                                    .child(
+                                        div()
+                                            .text_sm()
+                                            .font_weight(FontWeight::BOLD)
+                                            .text_color(TEXT_PRIMARY)
+                                            .child("音质偏好"),
+                                    ),
                             )
                             .child(quality_row),
                     )
-                    // 存储卡片
                     .child(
                         v_flex()
                             .p_4()
@@ -437,7 +446,13 @@ impl Render for SettingsView {
                                     .gap(px(8.0))
                                     .items_center()
                                     .child(Icon::new(IconName::HardDrive).size(px(16.0)).text_color(ACCENT_GREEN))
-                                    .child(div().text_sm().font_weight(FontWeight::BOLD).text_color(TEXT_PRIMARY).child("本地缓存与存储")),
+                                    .child(
+                                        div()
+                                            .text_sm()
+                                            .font_weight(FontWeight::BOLD)
+                                            .text_color(TEXT_PRIMARY)
+                                            .child("本地缓存与存储"),
+                                    ),
                             )
                             .child(cache_row)
                             .child(
@@ -461,7 +476,13 @@ impl Render for SettingsView {
                                     .gap(px(8.0))
                                     .items_center()
                                     .child(Icon::new(IconName::User).size(px(16.0)).text_color(ACCENT_GREEN))
-                                    .child(div().text_sm().font_weight(FontWeight::BOLD).text_color(TEXT_PRIMARY).child("账户与维护")),
+                                    .child(
+                                        div()
+                                            .text_sm()
+                                            .font_weight(FontWeight::BOLD)
+                                            .text_color(TEXT_PRIMARY)
+                                            .child("账户与维护"),
+                                    ),
                             )
                             .child(account_row),
                     ),

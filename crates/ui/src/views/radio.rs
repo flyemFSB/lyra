@@ -296,7 +296,7 @@ impl RadioView {
             .overflow_x_scrollbar();
 
         for (index, station) in stations.iter().enumerate() {
-            let active = self.station_name.as_ref().map(|s| s.as_ref()) == Some(&station.name);
+            let active = self.station_name.as_deref() == Some(station.name.as_str());
             let name = station.name.clone();
             let heat_str = if station.heat > 10_000 {
                 format!("{:.1}万", station.heat as f64 / 10_000.0)

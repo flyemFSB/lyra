@@ -135,8 +135,7 @@ impl PlaylistsView {
                         .iter()
                         .enumerate()
                         .find(|(_, list)| list.is_liked() || list.kind != 1)
-                        .map(|(idx, _)| idx)
-                        .unwrap_or(0);
+                        .map_or(0, |(idx, _)| idx);
                     self.select(first, cx);
                 }
             }
