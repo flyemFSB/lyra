@@ -1,29 +1,41 @@
-//! 个人歌单与歌曲列表视图组件。
+//! 个人歌单与歌曲列表视图组件：分栏 One Island 结构与高响应度联动。
 
 use std::rc::Rc;
 use std::sync::Arc;
 
-use gpui_kit::component::ActiveTheme as _;
-use gpui_kit::component::button::Button;
-use gpui_kit::component::{Sizable as _, h_flex, v_flex, v_virtual_list};
-use gpui_kit::prelude::FluentBuilder as _;
+use gpui_kit::assets::IconName;
+use gpui_kit::component::button::{Button, ButtonVariants};
+use gpui_kit::component::scroll::ScrollableElement as _;
+use gpui_kit::component::{Sizable as _, VirtualListScrollHandle, h_flex, v_flex, v_virtual_list};
 use gpui_kit::*;
 use lyra_api::model::{Page, Playlist, Song};
 
 use crate::bridge::{Backend, Msg};
 use crate::shell::AppShell;
-use crate::theme::{notice, row_sizes, title};
+use crate::theme::{CARD_BORDER, TEXT_MUTED, cover_box, notice_with_icon, row_sizes, title};
+use crate::views::player::PlayerModel;
 use crate::views::tracks::track_row;
+
+/// 歌单分类 Tab：自建歌单（包含我喜欢）与收藏歌单。
+#[derive(Clone, Copy, PartialEq, Eq, Default)]
+pub(crate) enum PlaylistTab {
+    #[default]
+    Created,
+    Collected,
+}
 
 /// 我的歌单视图结构。
 pub(crate) struct PlaylistsView {
     backend: Backend,
     shell: WeakEntity<AppShell>,
-    playlists: Arc<Vec<Playlist>>,
-    selected: Option<usize>,
+    player: Entity<PlayerModel>,
+    pub(crate) tab: PlaylistTab,
+    pub(crate) playlists: Arc<Vec<Playlist>>,
+    pub(crate) selected: Option<usize>,
+    pub(crate) scroll_handle: VirtualListScrollHandle,
     songs: Arc<Vec<Song>>,
     sizes: Rc<Vec<Size<Pixels>>>,
-    loading_playlists: bool,
+    pub(crate) loading_playlists: bool,
     loading_tracks: bool,
     loaded: bool,
     error: Option<SharedString>,
@@ -35,16 +47,28 @@ pub(crate) struct PlaylistsView {
     next_page: Option<u32>,
     /// 本次响应是「追加下一页」还是「替换整个列表」。
     appending: bool,
+    _sub: Subscription,
 }
 
 impl PlaylistsView {
-    /// 创建歌单视图实例。
-    pub(crate) fn new(backend: Backend, shell: WeakEntity<AppShell>, _cx: &mut Context<Self>) -> Self {
+    /// 创建歌单视图实例并订阅播放状态变化。
+    pub(crate) fn new(
+        backend: Backend,
+        shell: WeakEntity<AppShell>,
+        player: Entity<PlayerModel>,
+        cx: &mut Context<Self>,
+    ) -> Self {
+        let sub = cx.observe(&player, |_this, _player, cx| {
+            cx.notify();
+        });
         Self {
             backend,
             shell,
+            player,
+            tab: PlaylistTab::Created,
             playlists: Arc::new(Vec::new()),
             selected: None,
+            scroll_handle: VirtualListScrollHandle::new(),
             songs: Arc::new(Vec::new()),
             sizes: row_sizes(0),
             loading_playlists: false,
@@ -56,6 +80,7 @@ impl PlaylistsView {
             request_seq: 0,
             next_page: None,
             appending: false,
+            _sub: sub,
         }
     }
 
@@ -63,6 +88,8 @@ impl PlaylistsView {
     pub(crate) fn reset(&mut self, cx: &mut Context<Self>) {
         self.playlists = Arc::new(Vec::new());
         self.selected = None;
+        self.tab = PlaylistTab::Created;
+        self.scroll_handle = VirtualListScrollHandle::new();
         self.songs = Arc::new(Vec::new());
         self.sizes = row_sizes(0);
         self.loading_playlists = false;
@@ -97,16 +124,20 @@ impl PlaylistsView {
     /// 响应处理歌单列表数据。
     pub(crate) fn on_playlists(&mut self, result: Result<Vec<Playlist>, String>, cx: &mut Context<Self>) {
         self.loading_playlists = false;
+        self.loaded = true;
         match result {
-            Ok(playlists) => {
-                self.playlists = Arc::new(playlists);
-                self.loaded = true;
+            Ok(lists) => {
+                self.playlists = Arc::new(lists);
                 self.error = None;
-                if self.selected.is_some_and(|index| index >= self.playlists.len()) {
-                    self.selected = None;
-                }
                 if self.selected.is_none() && !self.playlists.is_empty() {
-                    self.select(0, cx);
+                    let first = self
+                        .playlists
+                        .iter()
+                        .enumerate()
+                        .find(|(_, list)| list.is_liked() || list.kind != 1)
+                        .map(|(idx, _)| idx)
+                        .unwrap_or(0);
+                    self.select(first, cx);
                 }
             }
             Err(error) => self.error = Some(error.into()),
@@ -114,34 +145,56 @@ impl PlaylistsView {
         cx.notify();
     }
 
-    /// 选中指定索引歌单并加载其曲目。
-    fn select(&mut self, index: usize, cx: &mut Context<Self>) {
-        let Some(list) = self.playlists.get(index).cloned() else {
+    /// 切换自建歌单与收藏歌单分类。
+    pub(crate) fn switch_tab(&mut self, tab: PlaylistTab, cx: &mut Context<Self>) {
+        if self.tab == tab {
+            return;
+        }
+        self.tab = tab;
+        // 查找当前 Tab 下的第一个歌单并选中
+        let first_in_tab = self
+            .playlists
+            .iter()
+            .enumerate()
+            .find(|(_, list)| match self.tab {
+                PlaylistTab::Created => list.is_liked() || list.kind != 1,
+                PlaylistTab::Collected => !list.is_liked() && list.kind == 1,
+            })
+            .map(|(idx, _)| idx);
+
+        if let Some(idx) = first_in_tab {
+            self.select(idx, cx);
+        }
+        cx.notify();
+    }
+
+    /// 选中指定歌单并请求曲目列表。
+    pub(crate) fn select(&mut self, index: usize, cx: &mut Context<Self>) {
+        let Some(list) = self.playlists.get(index) else {
             return;
         };
         self.selected = Some(index);
         self.heading = SharedString::from(list.name.as_str());
-        self.listid = Some(list.listid);
+        self.listid = Some(list.listid.clone());
         self.loading_tracks = true;
-        self.songs = Arc::new(Vec::new());
-        self.sizes = row_sizes(0);
-        self.next_page = None;
+        self.error = None;
         self.appending = false;
+        self.scroll_handle = VirtualListScrollHandle::new();
         self.request_seq += 1;
         let seq = self.request_seq;
         cx.notify();
+
         let app = self.backend.app();
-        let global_id = list.global_collection_id;
+        let global_id = list.global_collection_id.clone();
         self.backend
             .spawn(async move { Msg::Tracks(seq, app.tracks(&global_id, 1).await.map_err(|error| error.to_string())) });
     }
 
-    /// 响应处理歌曲分页列表数据（丢弃过期请求序号的异步应答）。
+    /// 响应处理歌曲列表分页数据。
     pub(crate) fn on_tracks(&mut self, seq: u64, result: Result<Page<Song>, String>, cx: &mut Context<Self>) {
         if seq != self.request_seq {
             return;
         }
-        // 读取并复位追加标记，区分追加分页与重置列表。
         let appending = std::mem::take(&mut self.appending);
         self.loading_tracks = false;
         match result {
@@ -155,7 +208,6 @@ impl PlaylistsView {
             }
             Err(error) => {
                 if appending {
-                    // 追加失败不该把已经加载出来的列表换成错误页。
                     self.backend.send(Msg::Toast(format!("加载更多失败: {error}")));
                 } else {
                     self.next_page = None;
@@ -166,9 +218,15 @@ impl PlaylistsView {
         cx.notify();
     }
 
-    /// 追加加载下一页歌曲。
+    /// 加载下一页歌曲。
     fn load_more(&mut self, cx: &mut Context<Self>) {
-        let (Some(index), Some(page)) = (self.selected, self.next_page) else {
+        if self.loading_tracks || self.appending {
+            return;
+        }
+        let Some(page) = self.next_page else {
+            return;
+        };
+        let Some(index) = self.selected else {
             return;
         };
         let Some(list) = self.playlists.get(index) else {
@@ -202,86 +260,85 @@ impl PlaylistsView {
                 .get(index)
                 .map(|song| (SharedString::from(listid.as_str()), song.fileid))
         });
-        track_row(index, &self.songs, &self.shell, &self.backend, removable, cx)
-    }
 
-    /// 渲染左侧歌单目录列表。
-    fn playlist_column(&self, cx: &Context<Self>) -> impl IntoElement {
-        let theme = cx.theme();
-        let mut column = v_flex()
-            .id("playlist-column")
-            .w(px(220.0))
-            .h_full()
-            .p_2()
-            .gap(px(2.0))
-            .overflow_y_scroll();
-        if self.loading_playlists && self.playlists.is_empty() {
-            column = column.child(
-                div()
-                    .p_3()
-                    .text_sm()
-                    .text_color(theme.muted_foreground)
-                    .child("加载中…"),
-            );
-        }
-        for (index, list) in self.playlists.iter().enumerate() {
-            let active = self.selected == Some(index);
-            let label = SharedString::from(format!("{}（{}）", list.name, list.count));
-            column = column.child(
-                div()
-                    .id(("playlist", index))
-                    .role(Role::Button)
-                    .w_full()
-                    .px_3()
-                    .py_2()
-                    .rounded(px(6.0))
-                    .cursor_pointer()
-                    .when(active, |this| this.bg(theme.list_active).text_color(theme.foreground))
-                    .when(!active, |this| {
-                        this.text_color(theme.muted_foreground)
-                            .hover(|style| style.bg(theme.list_hover))
-                    })
-                    .on_click(cx.listener(move |view, _event, _window, cx| view.select(index, cx)))
-                    .child(div().text_sm().truncate().child(label)),
-            );
-        }
-        column
+        let (is_current, is_playing) = {
+            let model = self.player.read(cx);
+            let cur_hash = model.current_song().map(|s| &s.hash);
+            let this_hash = self.songs.get(index).map(|s| &s.hash);
+            (
+                cur_hash.is_some() && cur_hash == this_hash,
+                model.snapshot.state == lyra_audio::State::Playing,
+            )
+        };
+
+        track_row(
+            index,
+            &self.songs,
+            &self.shell,
+            &self.backend,
+            removable,
+            is_current,
+            is_playing,
+            cx,
+        )
     }
 
     /// 渲染右侧歌曲列表区。
     fn track_area(&self, cx: &Context<Self>) -> AnyElement {
-        let theme = cx.theme();
-        let header = h_flex()
+        let mut header = h_flex()
             .w_full()
-            .px_4()
-            .py_3()
-            .gap(px(12.0))
+            .px_5()
+            .py_4()
+            .gap(px(14.0))
+            .items_center()
             .border_b_1()
-            .border_color(theme.border)
-            .child(title(self.heading.clone(), cx))
+            .border_color(CARD_BORDER)
+            .child(cover_box(self.heading.as_ref(), 48.0, cx))
             .child(
-                div()
-                    .text_xs()
-                    .text_color(theme.muted_foreground)
-                    .child(SharedString::from(format!("{} 首", self.songs.len()))),
-            );
-        let header = if self.next_page.is_some() {
-            header.child(div().flex_1()).child(
-                Button::new("load_more")
+                v_flex().gap(px(2.0)).child(title(self.heading.clone(), cx)).child(
+                    div()
+                        .text_xs()
+                        .text_color(TEXT_MUTED)
+                        .child(SharedString::from(format!("共 {} 首曲目", self.songs.len()))),
+                ),
+            )
+            .child(div().flex_1());
+
+        if !self.songs.is_empty() {
+            let songs = self.songs.clone();
+            let shell = self.shell.clone();
+            header = header.child(
+                Button::new("play_all")
+                    .primary()
                     .small()
+                    .icon(IconName::Play)
+                    .label("播放全部")
+                    .tooltip("从头播放此歌单")
+                    .on_click(move |_event, _window, cx| {
+                        shell
+                            .update(cx, |shell, cx| shell.play_queue(songs.clone(), 0, cx))
+                            .ok();
+                    }),
+            );
+        }
+
+        if self.next_page.is_some() {
+            header = header.child(
+                Button::new("load_more")
+                    .ghost()
+                    .small()
+                    .icon(IconName::RefreshCw)
                     .label(if self.appending { "加载中…" } else { "加载更多" })
                     .on_click(cx.listener(|view, _event, _window, cx| view.load_more(cx))),
-            )
-        } else {
-            header
-        };
+            );
+        }
 
         let body = if self.loading_tracks {
-            notice("加载中…", cx)
+            notice_with_icon(IconName::RefreshCw, "正在加载曲目…", cx)
         } else if let Some(error) = &self.error {
-            notice(error.clone(), cx)
+            notice_with_icon(IconName::CircleAlert, error.clone(), cx)
         } else if self.songs.is_empty() {
-            notice("这里还没有曲目", cx)
+            notice_with_icon(IconName::ListMusic, "此歌单暂无曲目", cx)
         } else {
             let this = cx.entity();
             let sizes = self.sizes.clone();
@@ -294,36 +351,28 @@ impl PlaylistsView {
                     range.map(|index| view.row(index, app)).collect::<Vec<_>>()
                 },
             )
+            .track_scroll(&self.scroll_handle)
             .into_any_element()
         };
 
         v_flex()
             .size_full()
             .child(header)
-            .child(div().flex_1().min_h(px(0.0)).child(body))
+            .child(
+                div()
+                    .relative()
+                    .flex_1()
+                    .min_h(px(0.0))
+                    .p_2()
+                    .vertical_scrollbar(&self.scroll_handle)
+                    .child(body),
+            )
             .into_any_element()
     }
 }
 
 impl Render for PlaylistsView {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let column = self.playlist_column(cx);
-        let track_area = self.track_area(cx);
-        let border = cx.theme().border;
-        div()
-            .flex()
-            .flex_row()
-            .size_full()
-            .child(column)
-            .child(div().w(px(1.0)).h_full().bg(border))
-            .child(
-                div()
-                    .flex()
-                    .flex_col()
-                    .flex_1()
-                    .min_w(px(0.0))
-                    .h_full()
-                    .child(track_area),
-            )
+        div().size_full().child(self.track_area(cx))
     }
 }

@@ -6,11 +6,10 @@ use std::sync::Mutex;
 use symphonia::core::audio::{AudioBufferRef, SampleBuffer};
 use symphonia::core::codecs::{CODEC_TYPE_NULL, Decoder as SymphoniaDecoder, DecoderOptions};
 use symphonia::core::errors::Error as SymphoniaError;
-use symphonia::core::formats::{FormatOptions, FormatReader, SeekMode, SeekTo};
+use symphonia::core::formats::{FormatOptions, FormatReader};
 use symphonia::core::io::{MediaSource, MediaSourceStream, MediaSourceStreamOptions};
 use symphonia::core::meta::MetadataOptions;
 use symphonia::core::probe::Hint;
-use symphonia::core::units::Time;
 
 use crate::{Error, ReadSeek};
 
@@ -186,23 +185,6 @@ impl Decoder {
             }
         }
     }
-
-    /// 定位到指定毫秒播放位置。
-    #[allow(clippy::cast_precision_loss)]
-    pub fn seek(&mut self, ms: u64) -> Result<(), Error> {
-        let time = Time::from(ms as f64 / 1000.0);
-        self.format
-            .seek(
-                SeekMode::Accurate,
-                SeekTo::Time {
-                    time,
-                    track_id: Some(self.track_id),
-                },
-            )
-            .map_err(|e| Error::Decode(e.to_string()))?;
-        self.codec.reset();
-        Ok(())
-    }
 }
 
 /// 将解码音频缓冲转换为交织 f32 样本数组，0 帧包返回 None。
@@ -279,22 +261,5 @@ mod tests {
         assert_eq!(decoded.channels, 1);
         assert_eq!(decoded.frames(), 22_050);
         assert_eq!(decoded.duration_ms(), 500);
-    }
-
-    #[test]
-    fn decode_seek_to_middle() {
-        let mut decoder = Decoder::open(sine_wav(0.5)).unwrap();
-        decoder.seek(250).unwrap();
-        let mut frames = 0usize;
-        while let Some(chunk) = decoder.next_chunk().unwrap() {
-            frames += chunk.len() / decoder.channels();
-        }
-        // 验证精确定位后的采样帧数在允许容差范围内
-        let expected = 11_025usize;
-        let tolerance = 44_100 / 10;
-        assert!(
-            frames.abs_diff(expected) <= tolerance,
-            "seek 后帧数 {frames} 偏离 {expected} 过多"
-        );
     }
 }

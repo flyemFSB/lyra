@@ -1,15 +1,17 @@
-//! 短信验证码登录视图组件。
+//! 短信验证码登录视图组件：拟态玻璃卡片与沉浸式登录体验。
 
 use std::time::Duration;
 
-use gpui_kit::component::ActiveTheme as _;
+use gpui_kit::assets::IconName;
 use gpui_kit::component::button::{Button, ButtonVariants};
 use gpui_kit::component::input::{Input, InputEvent, InputState};
-use gpui_kit::component::{Disableable as _, Sizable as _, h_flex, v_flex};
+use gpui_kit::component::{Disableable as _, Icon, Sizable as _, h_flex, v_flex};
 use gpui_kit::*;
 
 use crate::bridge::{Backend, Msg};
-use crate::theme::title;
+use crate::theme::{
+    ACCENT_GREEN, ACCENT_GREEN_HOVER, ACCENT_GREEN_LIGHT, CARD_BORDER, TEXT_MUTED, badge, hex_rgb, main_card, title,
+};
 
 /// 发送验证码倒计时时长（秒）。
 const RESEND_SECONDS: u32 = 60;
@@ -31,8 +33,8 @@ pub(crate) struct LoginView {
 impl LoginView {
     /// 创建登录视图。
     pub(crate) fn new(backend: Backend, window: &mut Window, cx: &mut Context<Self>) -> Self {
-        let mobile = cx.new(|cx| InputState::new(window, cx).placeholder("手机号"));
-        let code = cx.new(|cx| InputState::new(window, cx).placeholder("验证码"));
+        let mobile = cx.new(|cx| InputState::new(window, cx).placeholder("输入 11 位手机号码"));
+        let code = cx.new(|cx| InputState::new(window, cx).placeholder("短信验证码"));
         let mobile_sub = cx.subscribe(&mobile, |this, _state, event: &InputEvent, cx| {
             if matches!(event, InputEvent::PressEnter { .. }) {
                 this.send_code(cx);
@@ -62,12 +64,12 @@ impl LoginView {
         }
         let mobile = self.mobile.read(cx).value().to_string();
         if !lyra_app::is_mobile(&mobile) {
-            self.status = Some(SharedString::new_static("请输入 11 位手机号"));
+            self.status = Some(SharedString::new_static("请输入有效 11 位手机号码"));
             cx.notify();
             return;
         }
         self.sending = true;
-        self.status = Some(SharedString::new_static("正在下发验证码…"));
+        self.status = Some(SharedString::new_static("正在发送短信验证码…"));
         cx.notify();
         let app = self.backend.app();
         self.backend
@@ -82,17 +84,17 @@ impl LoginView {
         let mobile = self.mobile.read(cx).value().to_string();
         let code = self.code.read(cx).value().to_string();
         if !lyra_app::is_mobile(&mobile) {
-            self.status = Some(SharedString::new_static("请输入 11 位手机号"));
+            self.status = Some(SharedString::new_static("请输入有效 11 位手机号码"));
             cx.notify();
             return;
         }
         if code.trim().is_empty() {
-            self.status = Some(SharedString::new_static("请输入验证码"));
+            self.status = Some(SharedString::new_static("请输入短信验证码"));
             cx.notify();
             return;
         }
         self.sending = true;
-        self.status = Some(SharedString::new_static("登录中…"));
+        self.status = Some(SharedString::new_static("正在登录验证…"));
         cx.notify();
         let app = self.backend.app();
         self.backend.spawn(async move {
@@ -110,7 +112,7 @@ impl LoginView {
         self.sending = false;
         match result {
             Ok(count) => {
-                self.status = Some(SharedString::from(format!("验证码已下发（剩余 {count} 次）")));
+                self.status = Some(SharedString::from(format!("验证码已下发（今日剩余 {count} 次）")));
                 self.begin_countdown(cx);
             }
             Err(error) => self.status = Some(SharedString::from(format!("下发失败: {error}"))),
@@ -159,41 +161,86 @@ impl LoginView {
 
 impl Render for LoginView {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let theme = cx.theme();
         let can_send = !self.sending && self.remaining == 0;
         let send_label = if self.remaining > 0 {
-            SharedString::from(format!("{}s 后重发", self.remaining))
+            SharedString::from(format!("{}s", self.remaining))
         } else {
-            SharedString::new_static("发送验证码")
+            SharedString::new_static("获取验证码")
         };
 
-        div()
-            .size_full()
-            .flex()
-            .items_center()
-            .justify_center()
-            .bg(theme.background)
-            .child(
-                v_flex()
-                    .w(px(360.0))
-                    .gap(px(12.0))
-                    .p_6()
-                    .rounded(px(12.0))
-                    .bg(theme.popover)
-                    .border_1()
-                    .border_color(theme.border)
-                    .child(title("登录", cx))
+        div().size_full().flex().items_center().justify_center().p_6().child(
+            main_card()
+                    .w(px(380.0))
+                    .gap(px(16.0))
+                    .p_7()
+                    .shadow_xl()
+                    // 顶部品牌与音乐标识
                     .child(
-                        div()
-                            .text_xs()
-                            .text_color(theme.muted_foreground)
-                            .child("概念版短信登录；验证码延迟时请稍候再试"),
+                        v_flex()
+                            .items_center()
+                            .justify_center()
+                            .gap(px(8.0))
+                            .mb_2()
+                            .child(
+                                div()
+                                    .w(px(52.0))
+                                    .h(px(52.0))
+                                    .rounded(px(14.0))
+                                    .bg(ACCENT_GREEN)
+                                    .shadow_md()
+                                    .flex()
+                                    .items_center()
+                                    .justify_center()
+                                    .child(Icon::new(IconName::Music).size(px(26.0)).text_color(rgb(0xffffff))),
+                            )
+                            .child(
+                                h_flex()
+                                    .gap(px(8.0))
+                                    .items_center()
+                                    .child(title("登录到 Lyra 音乐", cx))
+                                    .child(badge("概念版", ACCENT_GREEN_LIGHT, ACCENT_GREEN_HOVER)),
+                            )
+                            .child(
+                                div()
+                                    .text_xs()
+                                    .text_color(TEXT_MUTED)
+                                    .child("输入手机号即可同步个人歌单与每日推荐"),
+                            ),
                     )
-                    .child(Input::new(&self.mobile).w_full())
+                    // 手机号输入框
                     .child(
                         h_flex()
+                            .px_3()
+                            .py(px(4.0))
+                            .rounded(px(10.0))
+                            .bg(hex_rgb(0xf2f4f7))
+                            .border_1()
+                            .border_color(CARD_BORDER)
                             .gap(px(8.0))
-                            .child(div().flex_1().child(Input::new(&self.code)))
+                            .items_center()
+                            .child(Icon::new(IconName::Smartphone).size(px(16.0)).text_color(ACCENT_GREEN))
+                            .child(div().flex_1().child(Input::new(&self.mobile).w_full())),
+                    )
+                    // 验证码输入框与发送按钮
+                    .child(
+                        h_flex()
+                            .gap(px(10.0))
+                            .items_center()
+                            .child(
+                                h_flex()
+                                    .flex_1()
+                                    .min_w(px(0.0))
+                                    .px_3()
+                                    .py(px(4.0))
+                                    .rounded(px(10.0))
+                                    .bg(hex_rgb(0xf2f4f7))
+                                    .border_1()
+                                    .border_color(CARD_BORDER)
+                                    .gap(px(8.0))
+                                    .items_center()
+                                    .child(Icon::new(IconName::KeyRound).size(px(16.0)).text_color(ACCENT_GREEN))
+                                    .child(div().flex_1().child(Input::new(&self.code))),
+                            )
                             .child(
                                 Button::new("send_code")
                                     .small()
@@ -202,17 +249,30 @@ impl Render for LoginView {
                                     .on_click(cx.listener(|this, _event, _window, cx| this.send_code(cx))),
                             ),
                     )
+                    // 登录主按钮
                     .child(
                         Button::new("login")
                             .primary()
-                            .label("登录")
+                            .icon(IconName::LogIn)
+                            .label("立即安全登录")
                             .on_click(cx.listener(|this, _event, _window, cx| this.submit(cx))),
                     )
+                    // 状态反馈信息
                     .children(
-                        self.status
-                            .clone()
-                            .map(|text| div().text_xs().text_color(theme.muted_foreground).child(text)),
+                        self.status.clone().map(|text| {
+                            h_flex()
+                                .justify_center()
+                                .gap(px(6.0))
+                                .items_center()
+                                .child(Icon::new(IconName::Sparkles).size(px(12.0)).text_color(ACCENT_GREEN))
+                                .child(
+                                    div()
+                                        .text_xs()
+                                        .text_color(TEXT_MUTED)
+                                        .child(text),
+                                )
+                        }),
                     ),
-            )
+        )
     }
 }

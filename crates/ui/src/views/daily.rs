@@ -1,40 +1,78 @@
-//! 每日推荐视图组件。
+//! 每日推荐视图组件：仿照图 2 风格打造的「今日为你推荐」问候卡片、分类专辑与精选曲目流。
 
 use std::rc::Rc;
 use std::sync::Arc;
 
-use gpui_kit::component::ActiveTheme as _;
-use gpui_kit::component::{h_flex, v_flex, v_virtual_list};
+use gpui_kit::assets::IconName;
+use gpui_kit::component::button::{Button, ButtonVariants};
+use gpui_kit::component::scroll::ScrollableElement as _;
+use gpui_kit::component::{Icon, Sizable as _, VirtualListScrollHandle, h_flex, v_flex, v_virtual_list};
 use gpui_kit::*;
 use lyra_api::model::Song;
 
 use crate::bridge::{Backend, Msg};
 use crate::shell::AppShell;
-use crate::theme::{notice, row_sizes, title};
+use crate::theme::{
+    ACCENT_GREEN, ACCENT_GREEN_HOVER, ACCENT_GREEN_LIGHT, CARD_BORDER, TEXT_FAINT, TEXT_MUTED, TEXT_PRIMARY, badge,
+    hex_rgb, notice_with_icon, row_sizes, title,
+};
+use crate::views::player::PlayerModel;
 use crate::views::tracks::track_row;
+
+/// 获取当下时段问候语（UTC+8）。
+fn get_greeting() -> &'static str {
+    let secs = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    let hour = ((secs + 8 * 3600) % 86400) / 3600;
+    if (5..12).contains(&hour) {
+        "早上好"
+    } else if (12..14).contains(&hour) {
+        "中午好"
+    } else if (14..18).contains(&hour) {
+        "下午好"
+    } else {
+        "晚上好"
+    }
+}
 
 /// 每日推荐视图结构。
 pub(crate) struct DailyView {
     backend: Backend,
     shell: WeakEntity<AppShell>,
+    player: Entity<PlayerModel>,
     songs: Arc<Vec<Song>>,
     sizes: Rc<Vec<Size<Pixels>>>,
+    scroll_handle: VirtualListScrollHandle,
     loading: bool,
     loaded: bool,
     error: Option<SharedString>,
+    _sub: Subscription,
 }
 
 impl DailyView {
-    /// 创建每日推荐视图。
-    pub(crate) fn new(backend: Backend, shell: WeakEntity<AppShell>, _cx: &mut Context<Self>) -> Self {
+    /// 创建每日推荐视图并监听播放器状态。
+    pub(crate) fn new(
+        backend: Backend,
+        shell: WeakEntity<AppShell>,
+        player: Entity<PlayerModel>,
+        cx: &mut Context<Self>,
+    ) -> Self {
+        let sub = cx.observe(&player, |_this, _player, cx| {
+            cx.notify();
+        });
         Self {
             backend,
             shell,
+            player,
             songs: Arc::new(Vec::new()),
             sizes: row_sizes(0),
+            scroll_handle: VirtualListScrollHandle::new(),
             loading: false,
             loaded: false,
             error: None,
+            _sub: sub,
         }
     }
 
@@ -42,6 +80,7 @@ impl DailyView {
     pub(crate) fn reset(&mut self, cx: &mut Context<Self>) {
         self.songs = Arc::new(Vec::new());
         self.sizes = row_sizes(0);
+        self.scroll_handle = VirtualListScrollHandle::new();
         self.loading = false;
         self.loaded = false;
         self.error = None;
@@ -82,34 +121,289 @@ impl DailyView {
 
     /// 渲染单行歌曲组件。
     fn row(&self, index: usize, cx: &App) -> AnyElement {
-        track_row(index, &self.songs, &self.shell, &self.backend, None, cx)
+        let (is_current, is_playing) = {
+            let model = self.player.read(cx);
+            let cur_hash = model.current_song().map(|s| &s.hash);
+            let this_hash = self.songs.get(index).map(|s| &s.hash);
+            (
+                cur_hash.is_some() && cur_hash == this_hash,
+                model.snapshot.state == lyra_audio::State::Playing,
+            )
+        };
+        track_row(
+            index,
+            &self.songs,
+            &self.shell,
+            &self.backend,
+            None,
+            is_current,
+            is_playing,
+            cx,
+        )
     }
 }
 
 impl Render for DailyView {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let theme = cx.theme();
-        let header = h_flex()
+        let greeting = get_greeting();
+        let first_song = self.songs.first().cloned();
+        let (first_song_name, first_song_singer) = match &first_song {
+            Some(s) => (s.name.clone(), s.singer.clone()),
+            None => ("暂无推荐曲目".to_owned(), "猜你喜欢".to_owned()),
+        };
+
+        let songs_for_play = self.songs.clone();
+        let shell_play = self.shell.clone();
+
+        // 1. 今日为你推荐 Header
+        let recommend_header = h_flex()
             .w_full()
             .px_4()
-            .py_3()
-            .gap(px(12.0))
-            .border_b_1()
-            .border_color(theme.border)
-            .child(title("每日推荐", cx))
+            .pt_4()
+            .pb_2()
+            .items_center()
+            .justify_between()
             .child(
                 div()
-                    .text_xs()
-                    .text_color(theme.muted_foreground)
-                    .child(SharedString::from(format!("{} 首", self.songs.len()))),
+                    .text_base()
+                    .font_weight(FontWeight::BOLD)
+                    .text_color(TEXT_PRIMARY)
+                    .child("今日为你推荐"),
+            )
+            .child(
+                Button::new("refresh")
+                    .ghost()
+                    .small()
+                    .icon(IconName::RefreshCw)
+                    .label("换一批")
+                    .tooltip("重新生成推荐")
+                    .on_click(cx.listener(|view, _event, _window, cx| view.reload(cx))),
             );
 
-        let body = if self.loading && self.songs.is_empty() {
-            notice("加载中…", cx)
+        // 2. 仿图 2：第一张问候大卡片（天空蓝底、黑胶碟插画、翡翠绿圆形主播放键）
+        let greeting_card = v_flex()
+            .w(px(220.0))
+            .gap(px(6.0))
+            .child(
+                div()
+                    .id("greeting_banner")
+                    .w(px(220.0))
+                    .h(px(135.0))
+                    .rounded(px(14.0))
+                    .bg(hex_rgb(0xdce7fd))
+                    .border_1()
+                    .border_color(hex_rgb(0xc7d8f8))
+                    .p_4()
+                    .relative()
+                    .overflow_hidden()
+                    .flex()
+                    .flex_col()
+                    .justify_between()
+                    // 黑胶大碟插画
+                    .child(
+                        div()
+                            .absolute()
+                            .top(px(14.0))
+                            .right(px(-18.0))
+                            .w(px(84.0))
+                            .h(px(84.0))
+                            .rounded_full()
+                            .bg(hex_rgb(0x1e293b))
+                            .shadow_md()
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .child(
+                                div()
+                                    .w(px(32.0))
+                                    .h(px(32.0))
+                                    .rounded_full()
+                                    .bg(hex_rgb(0x2563eb))
+                                    .border_2()
+                                    .border_color(hex_rgb(0x60a5fa)),
+                            ),
+                    )
+                    .child(
+                        v_flex()
+                            .gap(px(3.0))
+                            .child(
+                                div()
+                                    .text_base()
+                                    .font_weight(FontWeight::BOLD)
+                                    .text_color(hex_rgb(0x0f172a))
+                                    .child(greeting),
+                            )
+                            .child(
+                                div()
+                                    .text_xs()
+                                    .text_color(hex_rgb(0x475569))
+                                    .child("尝试来点儿音乐\n提提神吧~"),
+                            ),
+                    )
+                    // 醒目翡翠绿播放圆钮
+                    .child(
+                        div()
+                            .id("greeting_play_btn")
+                            .role(Role::Button)
+                            .cursor_pointer()
+                            .w(px(32.0))
+                            .h(px(32.0))
+                            .rounded_full()
+                            .bg(ACCENT_GREEN)
+                            .hover(|s| s.bg(ACCENT_GREEN_HOVER))
+                            .shadow_sm()
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .on_click(move |_event, _window, cx| {
+                                if !songs_for_play.is_empty() {
+                                    shell_play
+                                        .update(cx, |shell, cx| {
+                                            shell.play_queue(songs_for_play.clone(), 0, cx)
+                                        })
+                                        .ok();
+                                }
+                            })
+                            .child(
+                                Icon::new(IconName::Play)
+                                    .size(px(16.0))
+                                    .text_color(hex_rgb(0xffffff)),
+                            ),
+                    ),
+            )
+            .child(
+                v_flex()
+                    .gap(px(1.0))
+                    .child(
+                        div()
+                            .text_xs()
+                            .font_weight(FontWeight::BOLD)
+                            .text_color(TEXT_PRIMARY)
+                            .truncate()
+                            .child(first_song_name),
+                    )
+                    .child(
+                        div()
+                            .text_xs()
+                            .text_color(TEXT_MUTED)
+                            .truncate()
+                            .child(first_song_singer),
+                    ),
+            );
+
+        // 3. 特色推荐主题卡片（使用真实推荐歌曲驱动）
+        let card_styles = [
+            ("精选", hex_rgb(0xfde2e4), hex_rgb(0x3b82f6)),
+            ("热歌", hex_rgb(0xd1fae5), ACCENT_GREEN),
+            ("新歌", hex_rgb(0xfee2e2), hex_rgb(0xef4444)),
+            ("雷达", hex_rgb(0xfef3c7), hex_rgb(0xf59e0b)),
+        ];
+
+        let mut cards_row = h_flex().w_full().px_4().gap(px(14.0)).items_start();
+        cards_row = cards_row.child(greeting_card);
+
+        for (idx, &(badge_text, bg_col, badge_col)) in card_styles.iter().enumerate() {
+            let song_idx = idx + 1;
+            let Some(song) = self.songs.get(song_idx) else {
+                continue;
+            };
+            let song_title = song.name.clone();
+            let song_singer = song.singer.clone();
+            let shell = self.shell.clone();
+            let songs = self.songs.clone();
+
+            let card = v_flex()
+                .id(("themed_card", idx))
+                .role(Role::Button)
+                .cursor_pointer()
+                .w(px(120.0))
+                .gap(px(6.0))
+                .on_click(move |_event, _window, cx| {
+                    if !songs.is_empty() {
+                        shell
+                            .update(cx, |shell, cx| shell.play_queue(songs.clone(), song_idx, cx))
+                            .ok();
+                    }
+                })
+                .child(
+                    div()
+                        .w(px(120.0))
+                        .h(px(120.0))
+                        .rounded(px(12.0))
+                        .bg(bg_col)
+                        .border_1()
+                        .border_color(CARD_BORDER)
+                        .relative()
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .child(Icon::new(IconName::Music).size(px(32.0)).text_color(badge_col))
+                        .child(div().absolute().bottom(px(6.0)).left(px(6.0)).child(badge(
+                            badge_text,
+                            badge_col,
+                            hex_rgb(0xffffff),
+                        ))),
+                )
+                .child(
+                    v_flex()
+                        .gap(px(1.0))
+                        .child(
+                            div()
+                                .text_xs()
+                                .font_weight(FontWeight::MEDIUM)
+                                .text_color(TEXT_PRIMARY)
+                                .truncate()
+                                .child(song_title),
+                        )
+                        .child(div().text_xs().text_color(TEXT_FAINT).truncate().child(song_singer)),
+                );
+            cards_row = cards_row.child(card);
+        }
+
+        // 4. 第二区域：推荐歌曲 Header
+        let mut list_header = h_flex()
+            .w_full()
+            .px_4()
+            .pt_4()
+            .pb_2()
+            .items_center()
+            .justify_between()
+            .child(
+                h_flex()
+                    .gap(px(8.0))
+                    .items_center()
+                    .child(title("推荐歌曲", cx))
+                    .child(badge(
+                        format!("{} 首", self.songs.len()),
+                        ACCENT_GREEN_LIGHT,
+                        ACCENT_GREEN_HOVER,
+                    )),
+            );
+
+        if !self.songs.is_empty() {
+            let songs = self.songs.clone();
+            let shell = self.shell.clone();
+            list_header = list_header.child(
+                Button::new("play_all")
+                    .primary()
+                    .small()
+                    .icon(IconName::Play)
+                    .label("全部播放")
+                    .tooltip("播放今日全部推荐")
+                    .on_click(move |_event, _window, cx| {
+                        shell
+                            .update(cx, |shell, cx| shell.play_queue(songs.clone(), 0, cx))
+                            .ok();
+                    }),
+            );
+        }
+
+        let body = if self.loading {
+            notice_with_icon(IconName::RefreshCw, "正在加载每日推荐…", cx)
         } else if let Some(error) = &self.error {
-            notice(error.clone(), cx)
+            notice_with_icon(IconName::CircleAlert, error.clone(), cx)
         } else if self.songs.is_empty() {
-            notice("暂无推荐（登录后可用）", cx)
+            notice_with_icon(IconName::Sparkles, "今日推荐已阅毕", cx)
         } else {
             let this = cx.entity();
             let sizes = self.sizes.clone();
@@ -122,12 +416,23 @@ impl Render for DailyView {
                     range.map(|index| view.row(index, app)).collect::<Vec<_>>()
                 },
             )
+            .track_scroll(&self.scroll_handle)
             .into_any_element()
         };
 
         v_flex()
             .size_full()
-            .child(header)
-            .child(div().flex_1().min_h(px(0.0)).child(body))
+            .child(recommend_header)
+            .child(cards_row)
+            .child(list_header)
+            .child(
+                div()
+                    .relative()
+                    .flex_1()
+                    .min_h(px(0.0))
+                    .px_2()
+                    .vertical_scrollbar(&self.scroll_handle)
+                    .child(body),
+            )
     }
 }

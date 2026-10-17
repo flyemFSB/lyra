@@ -56,8 +56,15 @@ pub(crate) enum Msg {
     TrackRemoved(Result<(), String>),
     /// 当前曲目自然播完。
     AudioEnded,
-    /// 播放失败（含取地址失败）。
-    AudioFailed(String),
+    /// 取播放地址失败（带上发起请求时的歌曲 hash，用于丢弃过期响应）。
+    AudioFailed {
+        /// 发起请求时的歌曲 hash。
+        hash: String,
+        /// 错误描述。
+        message: String,
+    },
+    /// 音频引擎报错（拉流 / 解码失败）。
+    EngineFailed(String),
     /// 完成但无需上报。
     Noop,
     /// 顶部提示。

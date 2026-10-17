@@ -3,3 +3,10 @@ xtask = "run --package xtask --"
 # 不加 --all-features：那会同时打开 gpui-kit 的 tree-sitter-* 与 test-support，
 # 后者会让两套 GPUI 后端进入同一依赖图，cargo 直接解析失败（详见 PLAN「实施记录」）。
 lint = "clippy --workspace --all-targets -- -D warnings"
+
+# 静态链接 MSVC CRT（+crt-static）。默认动态链接会让 lyra.exe 依赖 vcruntime140.dll，
+# 干净系统上没装 VC++ 运行库时，双击启动会弹出 Windows 的
+# 「无法启动此程序，因为计算机中丢失 VCRUNTIME140.dll」错误框。
+# 安装包只分发一个 lyra.exe，不做运行库预检/捆绑，所以这里必须静态链接。
+[target.x86_64-pc-windows-msvc]
+rustflags = ["-C", "target-feature=+crt-static"]

@@ -1,6 +1,6 @@
 //! 重采样层：仅在设备采样率 ≠ 源采样率时启用，运行在解码线程。
 
-use rubato::{FftFixedInOut, Resampler as RubatoResampler};
+use rubato::{FftFixedInOut, Resampler as _};
 
 use crate::Error;
 
@@ -80,12 +80,6 @@ impl Resampler {
         }
 
         Ok(out)
-    }
-
-    /// 重置内部状态，用于定位后清空历史缓冲。
-    pub fn reset(&mut self) {
-        RubatoResampler::reset(&mut self.inner);
-        self.stage.clear();
     }
 }
 

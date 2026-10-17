@@ -43,6 +43,9 @@ pub async fn send_mobile_code(api: &Api, mobile: &str) -> Result<Value> {
             "mobile": mask_mobile(mobile),
             "params": encrypted.hex,
         }))
+        // 与同一台 login 服务上已验证可用的登录请求用同一个 UA：默认 UA 里的版本号（11083）与
+        // query 的 clientver（11440）错位，是发码侧风控能看到的异常信号。
+        .header("User-Agent", UA_LOGIN)
         .timeout(std::time::Duration::from_secs(20));
     api.call_auth(spec).await
 }
@@ -436,6 +439,11 @@ mod tests {
             request.query
         );
         assert!(body["clienttime_ms"].is_number());
+        assert_eq!(
+            request.get_header("User-Agent"),
+            Some(UA_LOGIN),
+            "发码必须用登录模块的 UA"
+        );
         assert!(body["pk"].as_str().unwrap().len() >= 128, "pk 应为 RSA 密文 hex");
         assert_ne!(body["mobile"], "13800138000", "外层 mobile 必须打码");
         // params 是本次临时密钥加密的完整号码，长度必须是 AES 块的整数倍。

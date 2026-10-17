@@ -24,6 +24,19 @@ pub struct Account {
     pub nickname: String,
 }
 
+/// 播放循环模式（需跨启动记住，所以定义在持久化层）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PlayMode {
+    /// 列表循环（默认）。
+    #[default]
+    ListLoop,
+    /// 单曲循环。
+    SingleLoop,
+    /// 随机播放。
+    Shuffle,
+}
+
 /// 用户配置项。
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Settings {
@@ -35,6 +48,9 @@ pub struct Settings {
     pub cache_dir: Option<String>,
     /// 缓存容量上限（字节）。
     pub max_cache_bytes: u64,
+    /// 播放模式；`default` 保证旧配置（无此字段）也能反序列化。
+    #[serde(default)]
+    pub play_mode: PlayMode,
 }
 
 impl Default for Settings {
@@ -44,6 +60,7 @@ impl Default for Settings {
             quality: DEFAULT_QUALITY.to_owned(),
             cache_dir: None,
             max_cache_bytes: DEFAULT_MAX_CACHE_BYTES,
+            play_mode: PlayMode::default(),
         }
     }
 }

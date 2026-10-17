@@ -178,6 +178,8 @@ struct RunCtx {
 /// 一首正在播放的曲目：解码器 + 可选重采样器 + 待推送样本。
 struct Session {
     decoder: Decoder,
+    /// 当前曲目，定位时需要用它重新打开解码器。
+    track: TrackRef,
     resampler: Option<Resampler>,
     src_channels: usize,
     dst_channels: usize,
@@ -204,6 +206,7 @@ impl Session {
         };
         Ok(Self {
             decoder,
+            track: track.clone(),
             resampler,
             src_channels,
             dst_channels: ctx.channels,
@@ -238,6 +241,26 @@ impl Session {
         } else {
             false
         }
+    }
+
+    /// 从流开头顺序解码并丢弃，直到跨过 `ms` 毫秒。
+    ///
+    /// 成本与目标位置成正比：release 下实测 Ogg 定位到 60 秒约 100 ms（约 1.7 ms/秒音频），
+    /// 因此超长音频（一小时以上）的远距离定位会有可见延迟，届时再考虑加索引。
+    ///
+    /// 定位一律走这条路径而不复用 symphonia 的 seek：symphonia 0.5.5 的 Ogg 解复用器
+    /// 在数据源报告 `byte_len() == None`（边下边播时长度未知）时，会在 seek 内部
+    /// `Option::unwrap()` panic；release 构建 panic=abort，表现为整个进程闪退。
+    fn advance_to(&mut self, ms: u64) -> Result<(), Error> {
+        let target = ms.saturating_mul(u64::from(self.decoder.sample_rate())) / 1000;
+        let mut skipped = 0_u64;
+        while skipped < target {
+            let Some(pcm) = self.decoder.next_chunk()? else {
+                break;
+            };
+            skipped += (pcm.len() / self.src_channels) as u64;
+        }
+        Ok(())
     }
 
     /// 当前播放进度（毫秒）：已推送帧数减去仍在 ring 中未播的帧数。
@@ -368,25 +391,31 @@ impl Player {
 
     fn seek(&mut self, ms: u64) {
         let dst_rate = self.ctx.sample_rate;
-        let Some(session) = self.session.as_mut() else {
+        let Some(track) = self.session.as_ref().map(|session| session.track.clone()) else {
             return;
         };
-        if let Err(error) = session.decoder.seek(ms) {
-            let message = format!("定位失败: {error}");
-            self.emit(Event::Failed { message });
+        // 先清空环形缓冲，定位期间不再继续播放旧位置的音频。
+        self.ctx.shared.request_flush();
+        // 重开解码器再顺序丢弃到目标位置（见 `Session::advance_to` 的 panic 说明）。
+        let mut session = match Session::open(&self.ctx, &track) {
+            Ok(session) => session,
+            Err(error) => {
+                self.emit(Event::Failed {
+                    message: format!("定位失败: {error}"),
+                });
+                return;
+            }
+        };
+        if let Err(error) = session.advance_to(ms) {
+            self.emit(Event::Failed {
+                message: format!("定位失败: {error}"),
+            });
             return;
         }
-        if let Some(r) = &mut session.resampler {
-            r.reset();
-        }
-        session.pending.clear();
-        session.pending_off = 0;
         session.pushed_frames = ms.saturating_mul(u64::from(dst_rate)) / 1000;
-        // 发送刷新信号清空环形缓冲中旧位置残留样本
-        self.ctx.shared.request_flush();
-        // 目标定位位置直接更新，避免受异步清空延迟影响
-        let duration = session.duration_ms;
-        self.ctx.shared.set_position(ms, duration);
+        self.session = Some(session);
+        // 目标定位位置直接更新，避免受异步清空延迟影响。
+        self.ctx.shared.set_position(ms, track.duration_ms);
     }
 
     /// 解码一段并推入 ring。ring 满时返回 [`Pump::Full`]，由外层短暂休眠后重试。

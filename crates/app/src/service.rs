@@ -8,7 +8,7 @@ use lyra_api::model::{LyricLine, Page, Playlist, Song, SongRights, SongUrl, Stat
 use lyra_api::transport::Transport;
 use lyra_api::{Api, Session};
 use lyra_audio::{AudioConfig, Engine, Event, TrackRef};
-use lyra_store::{Account as StoreAccount, Settings, Store};
+use lyra_store::{Account as StoreAccount, PlayMode, Settings, Store};
 
 use crate::error::{Error, Result};
 use crate::fetcher::BlobFetcher;
@@ -155,6 +155,13 @@ impl Kugou {
         Ok(self.store.settings()?)
     }
 
+    /// 上次选择的播放模式；读不到配置时回落到列表循环。
+    #[must_use]
+    pub fn play_mode(&self) -> PlayMode {
+        self.settings()
+            .map_or_else(|_| PlayMode::default(), |settings| settings.play_mode)
+    }
+
     /// 保存用户配置并同步音量与缓存上限。
     pub fn set_settings(&self, settings: &Settings) -> Result<()> {
         self.store.set_settings(settings)?;
@@ -170,6 +177,9 @@ impl Kugou {
 
     /// 发送短信验证码并返回剩余可用次数。
     pub async fn send_code(&self, mobile: &str) -> Result<u64> {
+        // 校验与加密必须用同一个值：粘贴的号码常带首尾空格，而 `is_mobile` 只裁自己那份副本，
+        // 于是「带空格的号码」能通过校验、再被原样加密进 params（外层掩码也跟着错位），上游发不出短信。
+        let mobile = mobile.trim();
         if !is_mobile(mobile) {
             return Err(Error::Invalid("请输入 11 位手机号".to_owned()));
         }
@@ -191,6 +201,9 @@ impl Kugou {
 
     /// 短信验证码登录并持久化凭据。
     pub async fn login(&self, mobile: &str, code: &str) -> Result<StoreAccount> {
+        // 同 `send_code`：验证码与手机号都可能在粘贴时带空格，必须裁剪后再加密。
+        let mobile = mobile.trim();
+        let code = code.trim();
         if !is_mobile(mobile) {
             return Err(Error::Invalid("请输入 11 位手机号".to_owned()));
         }

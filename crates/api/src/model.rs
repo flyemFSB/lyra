@@ -16,7 +16,11 @@ pub struct Song {
     pub hash: String,
     /// 专辑 ID。
     pub album_id: String,
-    /// 专辑音频 ID（`album_audio_id`）。
+    /// 专辑音频 ID（`album_audio_id`，上游的 `mixsongid` 同义）。
+    ///
+    /// 取址与歌词接口都靠它定位音频：**绝不能拿 `audio_id` 冒充**。
+    /// 实测（100 首样本）用 `audio_id` 会让上游解析到另一份音频 —— 13 首直接播成别的歌、
+    /// 30 首取不到地址、歌词接口也判 404；缺省时上游按 hash 解析反而是对的。
     pub album_audio_id: String,
     /// 专辑名。
     pub album_name: String,
@@ -59,7 +63,16 @@ impl Song {
             .or_else_nonempty(|| codec::pick_str(value, &["trans_param", "album_id"]));
         let album_audio_id = codec::pick_str(
             value,
-            &["album_audio_id", "audio_id", "emixsongid", "mixsongid", "audioid"],
+            // `mixsongid`/`add_mixsongid`/`emixsongid` 与 `album_audio_id` 同义（上游文档明确「MixSongID 均可」），
+            // 而 `audio_id` 是另一个 id 空间，见字段文档。
+            &[
+                "album_audio_id",
+                "album_audioid",
+                "mixsongid",
+                "mix_song_id",
+                "add_mixsongid",
+                "emixsongid",
+            ],
         );
         let cover = codec::pick_str_paths(
             value,
@@ -531,7 +544,8 @@ mod tests {
         assert_eq!(song.hash, "abc123def", "hash 必须小写");
         assert_eq!(song.duration_ms, 226_000);
         assert_eq!(song.fileid, 777);
-        assert_eq!(song.album_audio_id, "98765");
+        // `audio_id`（98765）不是 album_audio_id：歌单响应里真正的专辑音频 id 是 `mixsongid`。
+        assert_eq!(song.album_audio_id, "424242");
         assert_eq!(song.cover_at(240), "http://imge.kugou.com/stdmusic/240/x.jpg");
     }
 
@@ -548,6 +562,21 @@ mod tests {
         );
         url.hash.clear();
         assert_eq!(url.blob_key("requested"), "requested", "缺失时必须回退到请求 hash");
+    }
+
+    #[test]
+    fn album_audio_id_never_comes_from_audio_id() {
+        // 歌单响应只给 audio_id/mixsongid：必须挑 mixsongid（实测它与上游 album_audio_id 相等）。
+        let from_playlist = json!({"songname": "x", "hash": "AB", "audio_id": 301_293_698, "mixsongid": 39_612_569});
+        assert_eq!(Song::from_value(&from_playlist).unwrap().album_audio_id, "39612569");
+
+        // 只有 audio_id 时宁可为空：上游会按 hash 解析到正确的音频，而 audio_id 会解析到别的音频。
+        let only_audio_id = json!({"songname": "x", "hash": "AB", "audio_id": 301_293_698});
+        assert_eq!(Song::from_value(&only_audio_id).unwrap().album_audio_id, "");
+
+        // 显式 album_audio_id 优先级最高。
+        let explicit = json!({"songname": "x", "hash": "AB", "album_audio_id": 777, "mixsongid": 1});
+        assert_eq!(Song::from_value(&explicit).unwrap().album_audio_id, "777");
     }
 
     #[test]

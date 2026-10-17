@@ -1,6 +1,9 @@
 //! 客户端桌面可执行程序入口：分发图形界面与命令行模式。
 
 #![forbid(unsafe_code)]
+// 发布版必须是 GUI 子系统：控制台子系统的 exe 从资源管理器/快捷方式启动时会额外弹出一个
+// 黑框控制台窗口，用户看到的就是"打开程序先黑屏一下"。debug 保持控制台，方便 `cargo run -- <命令>` 看 CLI 输出。
+#![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 use std::process::ExitCode;
 

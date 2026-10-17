@@ -1,40 +1,44 @@
-//! 应用主外壳：导航、内容承载与全局播放控制。
+//! 应用主外壳：导航、内容承载、播放模式调度与全功能队列抽屉。
 
 use std::sync::Arc;
 use std::sync::mpsc::Receiver;
 use std::time::{Duration, Instant};
 
-use gpui_kit::component::ActiveTheme as _;
-use gpui_kit::component::Sizable as _;
+use gpui_kit::assets::IconName;
 use gpui_kit::component::button::{Button, ButtonVariants};
-use gpui_kit::component::v_flex;
+use gpui_kit::component::scroll::ScrollableElement as _;
+use gpui_kit::component::{Disableable as _, Icon, Sizable as _, h_flex, v_flex};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
-use lyra_api::model::Song;
+use lyra_api::model::{Playlist, Song};
 
 use crate::bridge::{Backend, Msg, Nav};
-use crate::theme::notice;
+use crate::format::format_duration;
+use crate::theme::{
+    ACCENT_GREEN, ACCENT_GREEN_BORDER, ACCENT_GREEN_HOVER, ACCENT_GREEN_LIGHT, CANVAS_BG, CARD_BG, CARD_BORDER,
+    SURFACE_HOVER, TEXT_FAINT, TEXT_MUTED, TEXT_PRIMARY, badge, cover_box, hex_rgb, main_card, notice,
+    notice_with_icon,
+};
 use crate::views::daily::DailyView;
 use crate::views::login::LoginView;
 use crate::views::lyrics::LyricsView;
-use crate::views::player::{PlayerBar, PlayerModel};
-use crate::views::playlists::PlaylistsView;
+use crate::views::player::{PlayModeUi, PlayerBar, PlayerModel};
+use crate::views::playlists::{PlaylistTab, PlaylistsView};
 use crate::views::radio::RadioView;
 use crate::views::search::SearchView;
 use crate::views::settings::SettingsView;
 
-/// 侧边栏导航条目列表。
-const NAV_ITEMS: &[(Nav, &str)] = &[
-    (Nav::Playlists, "歌单"),
-    (Nav::Daily, "每日推荐"),
-    (Nav::Radio, "电台"),
-    (Nav::Search, "搜索"),
-    (Nav::Lyrics, "歌词"),
-    (Nav::Settings, "设置"),
-];
+/// 自动续播时是否还应继续向后跳过不可播曲目。
+fn should_skip_unplayable(skips: usize) -> bool {
+    skips < MAX_AUTO_SKIPS
+}
 
 /// 轻提示默认展示时长。
 const TOAST_TTL: Duration = Duration::from_secs(4);
+
+/// 自动续播时允许连续跳过的曲目数：队列里总有不可播的歌（版权/会员限制），
+/// 跳几首就停，既不会停在死处，也不会整队列空转。
+const MAX_AUTO_SKIPS: usize = 5;
 
 /// 缓存的子视图实体集合。
 struct Views {
@@ -51,14 +55,20 @@ struct Views {
 /// 主应用外壳状态结构。
 pub(crate) struct AppShell {
     backend: Backend,
-    nav: Nav,
+    pub(crate) nav: Nav,
+    history: Vec<Nav>,
+    history_idx: usize,
     logged_in: bool,
     player: Entity<PlayerModel>,
     views: Option<Views>,
     toast: Option<SharedString>,
     toast_deadline: Option<Instant>,
+    /// 是否展开右侧浮动播放队列抽屉。
+    show_queue: bool,
     /// 歌词请求序号：只有最新一次请求的响应才允许落地。
     lyrics_seq: u64,
+    /// 本次连续自动跳过的曲目数（手动切歌/开启新一轮播放时归零）。
+    auto_skips: usize,
     _drain: Task<()>,
 }
 
@@ -67,7 +77,9 @@ impl AppShell {
     pub(crate) fn new(backend: Backend, receiver: Receiver<Msg>, cx: &mut Context<Self>) -> Self {
         let logged_in = backend.app().is_logged_in();
         let has_engine = backend.has_engine();
-        let player = cx.new(|_| PlayerModel::new(has_engine));
+        // 播放模式是持久化设置，开机沿用上次选择，而不是固定回列表循环。
+        let mode = backend.app().play_mode();
+        let player = cx.new(|_| PlayerModel::new(has_engine, mode));
         let drain = cx.spawn(async move |this, cx| {
             loop {
                 cx.background_executor().timer(Duration::from_millis(50)).await;
@@ -79,15 +91,20 @@ impl AppShell {
                 let _ = this.update(cx, AppShell::expire_toast);
             }
         });
+        let initial_nav = if logged_in { Nav::Daily } else { Nav::Login };
         Self {
             backend,
-            nav: if logged_in { Nav::Playlists } else { Nav::Login },
+            nav: initial_nav,
+            history: vec![initial_nav],
+            history_idx: 0,
             logged_in,
             player,
             views: None,
             toast: None,
             toast_deadline: None,
+            show_queue: false,
             lyrics_seq: 0,
+            auto_skips: 0,
             _drain: drain,
         }
     }
@@ -102,17 +119,17 @@ impl AppShell {
         let player = self.player.clone();
 
         let player_bar = cx.new(|cx| PlayerBar::new(backend.clone(), shell.clone(), player.clone(), window, cx));
-        let playlists = cx.new(|cx| PlaylistsView::new(backend.clone(), shell.clone(), cx));
-        let daily = cx.new(|cx| DailyView::new(backend.clone(), shell.clone(), cx));
-        let radio = cx.new(|cx| RadioView::new(backend.clone(), shell.clone(), cx));
-        let search = cx.new(|cx| SearchView::new(backend.clone(), shell.clone(), window, cx));
+        let playlists = cx.new(|cx| PlaylistsView::new(backend.clone(), shell.clone(), player.clone(), cx));
+        let daily = cx.new(|cx| DailyView::new(backend.clone(), shell.clone(), player.clone(), cx));
+        let radio = cx.new(|cx| RadioView::new(backend.clone(), shell.clone(), player.clone(), cx));
+        let search = cx.new(|cx| SearchView::new(backend.clone(), shell.clone(), player.clone(), window, cx));
         let settings = cx.new(|cx| SettingsView::new(backend.clone(), window, cx));
-        let login = cx.new(|cx| LoginView::new(backend, window, cx));
-        let lyrics = cx.new(|cx| LyricsView::new(player, cx));
+        let login = cx.new(|cx| LoginView::new(backend.clone(), window, cx));
+        let lyrics = cx.new(|cx| LyricsView::new(backend, shell.clone(), player, cx));
 
         self.views = Some(Views {
             player_bar,
-            playlists,
+            playlists: playlists.clone(),
             daily,
             radio,
             search,
@@ -121,6 +138,7 @@ impl AppShell {
             lyrics,
         });
         self.ensure_loaded(cx);
+        playlists.update(cx, PlaylistsView::ensure);
     }
 
     /// 分发处理后台异步事件。
@@ -172,9 +190,14 @@ impl AppShell {
                 }
                 Err(error) => self.set_toast(format!("移除失败: {error}"), cx),
             },
-            Msg::AudioEnded => self.play_next(cx),
-            // 播放失败时弹出轻提示通知用户。
-            Msg::AudioFailed(message) => self.set_toast(format!("播放失败: {message}"), cx),
+            Msg::AudioEnded => {
+                // 一首完整放完，说明播放链正常，之前的跳过计数不再累计。
+                self.auto_skips = 0;
+                self.play_next(cx);
+            }
+            // 播放失败时弹出轻提示，并跳过队列里播不了的那几首。
+            Msg::AudioFailed { hash, message } => self.on_play_failed(&hash, &message, cx),
+            Msg::EngineFailed(message) => self.on_engine_failed(&message, cx),
             Msg::Noop => {}
             Msg::Toast(text) => self.set_toast(text, cx),
             Msg::LoggedOut => self.on_logged_out(cx),
@@ -182,10 +205,41 @@ impl AppShell {
         }
     }
 
-    /// 切换导航页面并懒加载数据。
-    fn set_nav(&mut self, nav: Nav, cx: &mut Context<Self>) {
-        self.nav = nav;
-        self.ensure_loaded(cx);
+    /// 切换导航页面并记录前进后退历史栈。
+    pub(crate) fn set_nav(&mut self, nav: Nav, cx: &mut Context<Self>) {
+        if self.nav != nav {
+            self.history.truncate(self.history_idx + 1);
+            self.history.push(nav);
+            self.history_idx = self.history.len() - 1;
+            self.nav = nav;
+            self.ensure_loaded(cx);
+            cx.notify();
+        }
+    }
+
+    /// 后退至历史上一页。
+    pub(crate) fn go_back(&mut self, cx: &mut Context<Self>) {
+        if self.history_idx > 0 {
+            self.history_idx -= 1;
+            self.nav = self.history[self.history_idx];
+            self.ensure_loaded(cx);
+            cx.notify();
+        }
+    }
+
+    /// 前进至历史下一页。
+    pub(crate) fn go_forward(&mut self, cx: &mut Context<Self>) {
+        if self.history_idx + 1 < self.history.len() {
+            self.history_idx += 1;
+            self.nav = self.history[self.history_idx];
+            self.ensure_loaded(cx);
+            cx.notify();
+        }
+    }
+
+    /// 开关右侧播放队列抽屉。
+    pub(crate) fn toggle_queue(&mut self, cx: &mut Context<Self>) {
+        self.show_queue = !self.show_queue;
         cx.notify();
     }
 
@@ -208,6 +262,7 @@ impl AppShell {
         if index >= songs.len() {
             return;
         }
+        self.auto_skips = 0;
         self.player.update(cx, |model, model_cx| {
             model.set_queue(songs, index);
             model_cx.notify();
@@ -225,32 +280,74 @@ impl AppShell {
         let quality = app
             .settings()
             .map_or_else(|_| "flac".to_owned(), |settings| settings.quality);
+        // 响应带上发起时的歌曲 hash：取址是异步的，判失败 / 该不该跳过前必须先确认它还是当前这首。
+        let hash = song.hash.clone();
         self.backend.spawn(async move {
             match app.play(&song, &quality).await {
                 Ok(()) => Msg::Noop,
-                Err(error) => Msg::AudioFailed(error.to_string()),
+                Err(error) => Msg::AudioFailed {
+                    hash,
+                    message: error.to_string(),
+                },
             }
         });
     }
 
-    /// 播放下一首歌曲。
+    /// 处理一次取址失败：过期响应丢弃，当前曲目则提示并向后跳过。
+    fn on_play_failed(&mut self, hash: &str, message: &str, cx: &mut Context<Self>) {
+        // 用户已经切走了，这条失败属于上一首：既不误报，也不误跳。
+        let is_current = self
+            .player
+            .read(cx)
+            .current_song()
+            .is_some_and(|song| song.hash == hash);
+        if !is_current {
+            return;
+        }
+        self.set_toast(format!("播放失败: {message}"), cx);
+        self.skip_unplayable(cx);
+    }
+
+    /// 处理音频引擎的失败事件（地址拿到了，但拉流或解码失败）。
+    fn on_engine_failed(&mut self, message: &str, cx: &mut Context<Self>) {
+        self.set_toast(format!("播放失败: {message}"), cx);
+        self.skip_unplayable(cx);
+    }
+
+    /// 当前曲目不可播时向后换一首，避免整段播放停在这一首。
+    ///
+    /// 走的是「下一首」（受播放模式制约）：单曲循环下会重试同一首，用 [`MAX_AUTO_SKIPS`] 兜住上限。
+    fn skip_unplayable(&mut self, cx: &mut Context<Self>) {
+        if !should_skip_unplayable(self.auto_skips) {
+            tracing::warn!(skips = self.auto_skips, "连续跳过过多，停止自动跳过");
+            return;
+        }
+        self.auto_skips += 1;
+        self.play_next(cx);
+    }
+
+    /// 播放下一首歌曲（依据播放循环模式：列表/单曲/随机）。
     pub(crate) fn play_next(&mut self, cx: &mut Context<Self>) {
-        let has_next = {
-            let model = self.player.read(cx);
-            model.index + 1 < model.queue.len()
-        };
-        if has_next {
-            self.player.update(cx, |model, _cx| model.index += 1);
+        let next_idx = self.player.read(cx).next_index();
+        if let Some(idx) = next_idx {
+            self.player.update(cx, |model, model_cx| {
+                model.index = idx;
+                model_cx.notify();
+            });
             self.play_index(cx);
             self.load_lyrics(cx);
         }
     }
 
-    /// 播放上一首歌曲。
+    /// 播放上一首歌曲（依据播放循环模式：列表/单曲/随机）。
     pub(crate) fn play_prev(&mut self, cx: &mut Context<Self>) {
-        let has_prev = self.player.read(cx).index > 0;
-        if has_prev {
-            self.player.update(cx, |model, _cx| model.index -= 1);
+        self.auto_skips = 0;
+        let prev_idx = self.player.read(cx).prev_index();
+        if let Some(idx) = prev_idx {
+            self.player.update(cx, |model, model_cx| {
+                model.index = idx;
+                model_cx.notify();
+            });
             self.play_index(cx);
             self.load_lyrics(cx);
         }
@@ -322,88 +419,617 @@ impl AppShell {
         }
     }
 
-    /// 渲染左侧导航侧边栏。
-    fn sidebar(&self, cx: &Context<Self>) -> impl IntoElement {
-        let theme = cx.theme();
-        let mut column = v_flex()
-            .id("sidebar")
-            .w(px(200.0))
-            .h_full()
-            .p_2()
-            .gap(px(2.0))
-            .bg(theme.sidebar)
-            .border_r_1()
-            .border_color(theme.sidebar_border);
+    /// 渲染主内容区顶栏（前进/后退、药丸搜索胶囊与实用工具）。
+    fn top_header(&self, cx: &Context<Self>) -> impl IntoElement {
+        let is_search = self.nav == Nav::Search;
+        let can_go_back = self.history_idx > 0;
+        let can_go_forward = self.history_idx + 1 < self.history.len();
 
-        for (index, (nav, label)) in NAV_ITEMS.iter().enumerate() {
-            let nav = *nav;
-            let active = self.nav == nav;
-            column = column.child(
+        h_flex()
+            .w_full()
+            .h(px(46.0))
+            .px_4()
+            .items_center()
+            .gap(px(12.0))
+            .border_b_1()
+            .border_color(CARD_BORDER)
+            // 历史前进后退
+            .child(
+                h_flex()
+                    .gap(px(4.0))
+                    .items_center()
+                    .child(
+                        Button::new("nav_prev")
+                            .ghost()
+                            .small()
+                            .icon(IconName::ChevronLeft)
+                            .tooltip("后退")
+                            .disabled(!can_go_back)
+                            .on_click(cx.listener(|shell, _event, _window, cx| shell.go_back(cx))),
+                    )
+                    .child(
+                        Button::new("nav_next")
+                            .ghost()
+                            .small()
+                            .icon(IconName::ChevronRight)
+                            .tooltip("前进")
+                            .disabled(!can_go_forward)
+                            .on_click(cx.listener(|shell, _event, _window, cx| shell.go_forward(cx))),
+                    ),
+            )
+            // 胶囊搜索框（点击直接跳转至搜索视图）
+            .child(
                 div()
-                    .id(("nav", index))
+                    .id("top_search_capsule")
+                    .role(Role::Button)
+                    .cursor_pointer()
+                    .w(px(220.0))
+                    .h(px(32.0))
+                    .px_3()
+                    .rounded(px(999.0))
+                    .bg(if is_search { ACCENT_GREEN_LIGHT } else { hex_rgb(0xeef1f5) })
+                    .border_1()
+                    .border_color(if is_search { ACCENT_GREEN_BORDER } else { hex_rgb(0xe5e7eb) })
+                    .flex()
+                    .items_center()
+                    .gap(px(8.0))
+                    .on_click(cx.listener(|shell, _event, _window, cx| shell.set_nav(Nav::Search, cx)))
+                    .child(
+                        Icon::new(IconName::Search)
+                            .size(px(14.0))
+                            .text_color(if is_search { ACCENT_GREEN } else { TEXT_FAINT }),
+                    )
+                    .child(
+                        div()
+                            .text_xs()
+                            .font_weight(if is_search { FontWeight::BOLD } else { FontWeight::NORMAL })
+                            .text_color(if is_search { ACCENT_GREEN } else { TEXT_MUTED })
+                            .child("搜索音乐"),
+                    ),
+            )
+            .child(div().flex_1())
+            // 右侧工具区：清爽无冗余占位
+            .child(
+                h_flex()
+                    .gap(px(8.0))
+                    .items_center()
+                    .child(
+                        Button::new("top_refresh")
+                            .ghost()
+                            .small()
+                            .icon(IconName::RefreshCw)
+                            .tooltip("刷新当前数据")
+                            .on_click(cx.listener(|shell, _event, _window, cx| shell.ensure_loaded(cx))),
+                    ),
+            )
+    }
+
+    /// 渲染左侧导航侧边栏（用户信息、2x2 快捷按键、曲库导航与底部工具，无任何硬编码 mock 数据）。
+    fn sidebar(&self, cx: &Context<Self>) -> impl IntoElement {
+        let mut column = v_flex().id("sidebar").w(px(216.0)).h_full().p_2().gap(px(10.0));
+
+        // 1. 用户头像与身份 Capsule
+        let username = self
+            .backend
+            .app()
+            .store()
+            .account()
+            .ok()
+            .flatten()
+            .and_then(|a| if a.nickname.is_empty() { None } else { Some(a.nickname) })
+            .unwrap_or_else(|| {
+                if self.logged_in {
+                    "已登录用户".to_owned()
+                } else {
+                    "点击登录账号".to_owned()
+                }
+            });
+
+        let user_capsule = div()
+            .id("user_capsule")
+            .role(Role::Button)
+            .cursor_pointer()
+            .w_full()
+            .px_2()
+            .py_1()
+            .rounded(px(10.0))
+            .hover(|s| s.bg(SURFACE_HOVER))
+            .on_click(cx.listener(|shell, _event, _window, cx| {
+                if shell.logged_in {
+                    shell.set_nav(Nav::Settings, cx);
+                } else {
+                    shell.set_nav(Nav::Login, cx);
+                }
+            }))
+            .child(
+                h_flex()
+                    .gap(px(8.0))
+                    .items_center()
+                    .child(
+                        div()
+                            .w(px(28.0))
+                            .h(px(28.0))
+                            .rounded_full()
+                            .bg(if self.logged_in {
+                                ACCENT_GREEN_LIGHT
+                            } else {
+                                hex_rgb(0xe5e7eb)
+                            })
+                            .border_1()
+                            .border_color(if self.logged_in {
+                                ACCENT_GREEN_BORDER
+                            } else {
+                                hex_rgb(0xd1d5db)
+                            })
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .child(
+                                Icon::new(IconName::CircleUser)
+                                    .size(px(18.0))
+                                    .text_color(if self.logged_in { ACCENT_GREEN } else { TEXT_MUTED }),
+                            ),
+                    )
+                    .child(
+                        v_flex()
+                            .flex_1()
+                            .min_w(px(0.0))
+                            .gap(px(1.0))
+                            .child(
+                                div()
+                                    .text_xs()
+                                    .font_weight(FontWeight::BOLD)
+                                    .text_color(TEXT_PRIMARY)
+                                    .truncate()
+                                    .child(username),
+                            )
+                            .when(self.logged_in, |this| {
+                                this.child(div().text_xs().text_color(TEXT_FAINT).child("设置"))
+                            }),
+                    )
+                    .when(self.logged_in, |this| {
+                        this.child(Icon::new(IconName::Settings).size(px(14.0)).text_color(TEXT_FAINT))
+                    }),
+            );
+        column = column.child(user_capsule);
+
+        // 2. 快捷导航栏 (发现、电台、搜索)
+        let quick_items = [
+            (Nav::Daily, IconName::House, "发现"),
+            (Nav::Radio, IconName::Radio, "电台"),
+            (Nav::Search, IconName::Search, "搜索"),
+        ];
+
+        let mut quick_row = h_flex().w_full().gap(px(6.0));
+        for (idx, (nav, icon, label)) in quick_items.into_iter().enumerate() {
+            let active = self.nav == nav;
+            let btn = div()
+                .id(("quick_nav", idx))
+                .role(Role::Button)
+                .cursor_pointer()
+                .flex_1()
+                .h(px(32.0))
+                .rounded(px(8.0))
+                .flex()
+                .items_center()
+                .justify_center()
+                .gap(px(4.0))
+                .when(active, |this| {
+                    this.bg(hex_rgb(0x111827)).text_color(hex_rgb(0xffffff)).shadow_sm()
+                })
+                .when(!active, |this| {
+                    this.bg(hex_rgb(0xe5e9ef))
+                        .text_color(hex_rgb(0x4b5563))
+                        .hover(|s| s.bg(hex_rgb(0xd9dfe7)).text_color(hex_rgb(0x111827)))
+                })
+                .on_click(cx.listener(move |shell, _event, _window, cx| shell.set_nav(nav, cx)))
+                .child(Icon::new(icon).size(px(14.0)))
+                .child(div().text_xs().font_weight(FontWeight::MEDIUM).child(label));
+
+            quick_row = quick_row.child(btn);
+        }
+        column = column.child(quick_row);
+
+        // 3. 歌单胶囊切换器与侧边栏歌单列表（自建歌单与收藏歌单直接集成在左侧栏）
+        let (tab, playlists, selected, loading_playlists) = if let Some(views) = self.views.as_ref() {
+            let p = views.playlists.read(cx);
+            (p.tab, p.playlists.clone(), p.selected, p.loading_playlists)
+        } else {
+            (PlaylistTab::Created, Arc::new(Vec::new()), None, false)
+        };
+
+        let tab_capsule = h_flex()
+            .w_full()
+            .p(px(3.0))
+            .bg(hex_rgb(0xe5e9ef))
+            .rounded(px(999.0))
+            .gap(px(2.0))
+            .child(
+                div()
+                    .id("sidebar_tab_created")
+                    .role(Role::Button)
+                    .cursor_pointer()
+                    .flex_1()
+                    .h(px(26.0))
+                    .rounded(px(999.0))
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .text_xs()
+                    .when(tab == PlaylistTab::Created, |s| {
+                        s.bg(CARD_BG)
+                            .text_color(TEXT_PRIMARY)
+                            .font_weight(FontWeight::BOLD)
+                            .shadow_sm()
+                    })
+                    .when(tab != PlaylistTab::Created, |s| {
+                        s.text_color(TEXT_MUTED).hover(|h| h.text_color(TEXT_PRIMARY))
+                    })
+                    .on_click(cx.listener(|shell, _event, _window, cx| {
+                        if let Some(views) = shell.views.as_ref() {
+                            views
+                                .playlists
+                                .update(cx, |p, cx| p.switch_tab(PlaylistTab::Created, cx));
+                        }
+                        shell.set_nav(Nav::Playlists, cx);
+                    }))
+                    .child("自建歌单"),
+            )
+            .child(
+                div()
+                    .id("sidebar_tab_collected")
+                    .role(Role::Button)
+                    .cursor_pointer()
+                    .flex_1()
+                    .h(px(26.0))
+                    .rounded(px(999.0))
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .text_xs()
+                    .when(tab == PlaylistTab::Collected, |s| {
+                        s.bg(CARD_BG)
+                            .text_color(TEXT_PRIMARY)
+                            .font_weight(FontWeight::BOLD)
+                            .shadow_sm()
+                    })
+                    .when(tab != PlaylistTab::Collected, |s| {
+                        s.text_color(TEXT_MUTED).hover(|h| h.text_color(TEXT_PRIMARY))
+                    })
+                    .on_click(cx.listener(|shell, _event, _window, cx| {
+                        if let Some(views) = shell.views.as_ref() {
+                            views
+                                .playlists
+                                .update(cx, |p, cx| p.switch_tab(PlaylistTab::Collected, cx));
+                        }
+                        shell.set_nav(Nav::Playlists, cx);
+                    }))
+                    .child("收藏歌单"),
+            );
+        column = column.child(tab_capsule);
+
+        let mut playlist_list = v_flex().w_full().gap(px(3.0));
+
+        if loading_playlists && playlists.is_empty() {
+            playlist_list = playlist_list.child(notice_with_icon(IconName::RefreshCw, "加载歌单中…", cx));
+        }
+
+        let filtered_playlists: Vec<(usize, &Playlist)> = playlists
+            .iter()
+            .enumerate()
+            .filter(|(_, list)| match tab {
+                PlaylistTab::Created => list.is_liked() || list.kind != 1,
+                PlaylistTab::Collected => !list.is_liked() && list.kind == 1,
+            })
+            .collect();
+
+        if !loading_playlists && filtered_playlists.is_empty() {
+            playlist_list = playlist_list.child(div().py_6().child(notice_with_icon(
+                IconName::ListMusic,
+                if tab == PlaylistTab::Created {
+                    "暂无自建歌单"
+                } else {
+                    "暂无收藏歌单"
+                },
+                cx,
+            )));
+        }
+
+        for (index, list) in filtered_playlists {
+            let active = self.nav == Nav::Playlists && selected == Some(index);
+            let name = list.name.clone();
+            let count_str = format!("{}", list.count);
+            let is_liked = list.is_liked();
+
+            playlist_list = playlist_list.child(
+                div()
+                    .id(("sidebar_playlist", index))
                     .role(Role::Button)
                     .w_full()
-                    .px_3()
-                    .py_2()
-                    .rounded(px(6.0))
-                    .text_sm()
+                    .px_2()
+                    .py(px(5.0))
+                    .rounded(px(8.0))
                     .cursor_pointer()
-                    .when(active, |this| this.bg(theme.list_active).text_color(theme.foreground))
-                    .when(!active, |this| {
-                        this.text_color(theme.muted_foreground)
-                            .hover(|style| style.bg(theme.list_hover))
+                    .flex()
+                    .items_center()
+                    .gap(px(8.0))
+                    .when(active, |this| {
+                        this.bg(ACCENT_GREEN_LIGHT)
+                            .border_1()
+                            .border_color(ACCENT_GREEN_BORDER)
+                            .text_color(ACCENT_GREEN_HOVER)
                     })
-                    .on_click(cx.listener(move |shell, _event, _window, cx| shell.set_nav(nav, cx)))
-                    .child(SharedString::new_static(label)),
+                    .when(!active, |this| {
+                        this.text_color(TEXT_MUTED)
+                            .hover(|style| style.bg(SURFACE_HOVER).text_color(TEXT_PRIMARY))
+                    })
+                    .on_click(cx.listener(move |shell, _event, _window, cx| {
+                        if let Some(views) = shell.views.as_ref() {
+                            views.playlists.update(cx, |p, cx| p.select(index, cx));
+                        }
+                        shell.set_nav(Nav::Playlists, cx);
+                    }))
+                    .child(if is_liked {
+                        div()
+                            .w(px(28.0))
+                            .h(px(28.0))
+                            .rounded(px(6.0))
+                            .bg(hex_rgb(0xfee2e2))
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .child(Icon::new(IconName::Heart).size(px(14.0)).text_color(hex_rgb(0xef4444)))
+                            .into_any_element()
+                    } else {
+                        cover_box(&name, 28.0, cx).into_any_element()
+                    })
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w(px(0.0))
+                            .text_xs()
+                            .font_weight(if active { FontWeight::BOLD } else { FontWeight::NORMAL })
+                            .truncate()
+                            .child(name),
+                    )
+                    .child(badge(count_str, hex_rgb(0xeef1f5), TEXT_MUTED)),
             );
         }
 
-        column = column.child(div().flex_1());
-        if self.logged_in {
-            column = column.child(
-                div()
-                    .px_3()
-                    .py_2()
-                    .text_xs()
-                    .text_color(theme.muted_foreground)
-                    .child("已登录"),
-            );
-        } else {
-            column = column.child(
-                Button::new("go_login")
-                    .small()
-                    .primary()
-                    .label("登录")
-                    .on_click(cx.listener(|shell, _event, _window, cx| shell.set_nav(Nav::Login, cx))),
-            );
-        }
+        let playlist_scroll = div()
+            .id("sidebar-playlists-scroll")
+            .flex_1()
+            .min_h(px(0.0))
+            .w_full()
+            .overflow_y_scrollbar()
+            .child(playlist_list);
+
+        column = column.child(playlist_scroll);
+
         column
     }
 
-    /// 渲染顶部轻提示条。
-    fn toast_element(&self, cx: &App) -> Option<AnyElement> {
-        let theme = cx.theme();
+    /// 渲染浮动胶囊轻提示。
+    fn toast_element(&self, _cx: &App) -> Option<AnyElement> {
         self.toast.clone().map(|text| {
             div()
-                .flex_shrink_0()
-                .w_full()
-                .bg(theme.muted)
-                .text_color(theme.foreground)
-                .text_sm()
-                .px_4()
-                .py_2()
-                .child(text)
+                .absolute()
+                .top(px(16.0))
+                .left_0()
+                .right_0()
+                .flex()
+                .justify_center()
+                .child(
+                    h_flex()
+                        .gap(px(8.0))
+                        .items_center()
+                        .px_5()
+                        .py_2()
+                        .rounded(px(999.0))
+                        .bg(CARD_BG)
+                        .border_1()
+                        .border_color(CARD_BORDER)
+                        .shadow_lg()
+                        .child(Icon::new(IconName::Sparkles).size(px(16.0)).text_color(ACCENT_GREEN))
+                        .child(
+                            div()
+                                .text_sm()
+                                .font_weight(FontWeight::MEDIUM)
+                                .text_color(TEXT_PRIMARY)
+                                .child(text),
+                        ),
+                )
                 .into_any_element()
         })
+    }
+
+    /// 渲染右侧滑出式纯白播放队列抽屉面板。
+    fn queue_drawer(&self, cx: &Context<Self>) -> Option<AnyElement> {
+        if !self.show_queue {
+            return None;
+        }
+
+        let (queue, current_idx, is_playing, mode) = {
+            let model = self.player.read(cx);
+            (
+                model.queue.clone(),
+                model.index,
+                model.snapshot.state == lyra_audio::State::Playing,
+                model.mode,
+            )
+        };
+
+        let mut panel = main_card()
+            .w(px(320.0))
+            .h_full()
+            .p_3()
+            .gap(px(8.0))
+            .flex()
+            .flex_col()
+            .shadow_lg();
+
+        // 头部标题与控制按钮
+        let header = h_flex()
+            .w_full()
+            .pb_2()
+            .border_b_1()
+            .border_color(CARD_BORDER)
+            .items_center()
+            .justify_between()
+            .child(
+                h_flex()
+                    .gap(px(8.0))
+                    .items_center()
+                    .child(Icon::new(IconName::ListMusic).size(px(18.0)).text_color(ACCENT_GREEN))
+                    .child(
+                        div()
+                            .text_sm()
+                            .font_weight(FontWeight::BOLD)
+                            .text_color(TEXT_PRIMARY)
+                            .child("播放队列"),
+                    )
+                    .child(badge(
+                        format!("{} 首", queue.len()),
+                        ACCENT_GREEN_LIGHT,
+                        ACCENT_GREEN_HOVER,
+                    )),
+            )
+            .child(
+                h_flex()
+                    .gap(px(6.0))
+                    .items_center()
+                    .child(badge(mode.label(), hex_rgb(0xf2f4f7), TEXT_MUTED))
+                    .child(
+                        Button::new("close_queue")
+                            .ghost()
+                            .small()
+                            .icon(IconName::X)
+                            .tooltip("收起队列")
+                            .on_click(cx.listener(|shell, _event, _window, cx| shell.toggle_queue(cx))),
+                    ),
+            );
+
+        panel = panel.child(header);
+
+        if queue.is_empty() {
+            panel = panel.child(notice_with_icon(IconName::ListMusic, "队列暂无歌曲", cx));
+        } else {
+            let mut list = v_flex()
+                .id("queue_tracks_scroll")
+                .flex_1()
+                .min_h(px(0.0))
+                .overflow_y_scrollbar()
+                .gap(px(4.0));
+            for (idx, song) in queue.iter().enumerate() {
+                let is_current = idx == current_idx;
+                let play_queue = queue.clone();
+                let shell = cx.entity().downgrade();
+
+                list = list.child(
+                    h_flex()
+                        .id(("q_track", idx))
+                        .role(Role::Button)
+                        .w_full()
+                        .px_2()
+                        .py_2()
+                        .rounded(px(6.0))
+                        .gap(px(8.0))
+                        .items_center()
+                        .cursor_pointer()
+                        .when(is_current, |this| {
+                            this.bg(ACCENT_GREEN_LIGHT).border_1().border_color(ACCENT_GREEN_BORDER)
+                        })
+                        .when(!is_current, |this| this.hover(|s| s.bg(SURFACE_HOVER)))
+                        .on_click(move |_event, _window, cx| {
+                            shell
+                                .update(cx, |shell, cx| shell.play_queue(play_queue.clone(), idx, cx))
+                                .ok();
+                        })
+                        .child(
+                            div()
+                                .w(px(20.0))
+                                .flex()
+                                .items_center()
+                                .justify_center()
+                                .when(is_current, |this| {
+                                    let icon = if is_playing {
+                                        IconName::AudioLines
+                                    } else {
+                                        IconName::Music
+                                    };
+                                    this.child(Icon::new(icon).size(px(14.0)).text_color(ACCENT_GREEN))
+                                })
+                                .when(!is_current, |this| {
+                                    this.child(div().text_xs().text_color(TEXT_FAINT).child(format!("{:02}", idx + 1)))
+                                }),
+                        )
+                        .child(
+                            v_flex()
+                                .flex_1()
+                                .min_w(px(0.0))
+                                .gap(px(1.0))
+                                .child(
+                                    div()
+                                        .text_xs()
+                                        .font_weight(if is_current {
+                                            FontWeight::BOLD
+                                        } else {
+                                            FontWeight::MEDIUM
+                                        })
+                                        .text_color(if is_current { ACCENT_GREEN_HOVER } else { TEXT_PRIMARY })
+                                        .truncate()
+                                        .child(SharedString::from(song.name.clone())),
+                                )
+                                .child(
+                                    div()
+                                        .text_xs()
+                                        .text_color(TEXT_MUTED)
+                                        .truncate()
+                                        .child(SharedString::from(song.singer.clone())),
+                                ),
+                        )
+                        .child(
+                            div()
+                                .text_xs()
+                                .text_color(TEXT_FAINT)
+                                .child(SharedString::from(format_duration(song.duration_ms))),
+                        ),
+                );
+            }
+            panel = panel.child(list);
+        }
+
+        Some(panel.into_any_element())
     }
 }
 
 impl Render for AppShell {
-    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let Some(views) = self.views.as_ref() else {
             return notice("初始化中…", cx);
         };
-        let theme = cx.theme();
+        // 全屏沉浸式歌词写真模式（仿透明彩胶与右侧滚动歌词，独占全屏视口，隐藏侧边栏与顶栏）
+        if self.nav == Nav::Lyrics {
+            return v_flex()
+                .size_full()
+                .bg(CANVAS_BG)
+                .text_color(TEXT_PRIMARY)
+                .p(px(8.0))
+                .gap(px(8.0))
+                .child(
+                    div()
+                        .relative()
+                        .flex_1()
+                        .min_h(px(0.0))
+                        .w_full()
+                        .child(main_card().size_full().overflow_hidden().child(views.lyrics.clone()))
+                        .children(self.queue_drawer(cx))
+                        .children(self.toast_element(cx)),
+                )
+                .child(views.player_bar.clone())
+                .into_any_element();
+        }
+
         let body = match self.nav {
             Nav::Playlists => views.playlists.clone().into_any_element(),
             Nav::Daily => views.daily.clone().into_any_element(),
@@ -414,29 +1040,55 @@ impl Render for AppShell {
             Nav::Login => views.login.clone().into_any_element(),
         };
 
-        // gpui-pre 0.3.9 的 Windows 平台把「布局画布」当成物理像素，而绘制仍按显示器缩放比放大，
-        // 于是画布右下角 1/scale 的区域永远落在窗口之外（播放条正是被这条规则吃掉的）。
-        // 应用侧把根元素按缩放比缩回去，布局画布就与窗口精确对齐。
-        let scale = window.scale_factor();
-        let viewport = window.viewport_size();
-
+        // 彻底修复黑边：根容器严格使用 size_full() 填满窗口物理/逻辑视口，不进行错误的缩放除法
         v_flex()
-            .w(viewport.width / scale)
-            .h(viewport.height / scale)
-            .bg(theme.background)
-            .text_color(theme.foreground)
+            .size_full()
+            .bg(CANVAS_BG)
+            .text_color(TEXT_PRIMARY)
+            .p(px(8.0))
+            .gap(px(8.0))
             .child(
                 div()
+                    .relative()
                     .flex()
                     .flex_row()
                     .flex_1()
                     .min_h(px(0.0))
+                    .gap(px(8.0))
                     .child(self.sidebar(cx))
-                    .child(div().w(px(1.0)).h_full().bg(theme.border))
-                    .child(div().flex().flex_col().flex_1().min_w(px(0.0)).h_full().child(body)),
+                    .child(
+                        main_card()
+                            .flex()
+                            .flex_col()
+                            .flex_1()
+                            .min_w(px(0.0))
+                            .h_full()
+                            .overflow_hidden()
+                            .child(self.top_header(cx))
+                            .child(div().flex_1().min_h(px(0.0)).child(body)),
+                    )
+                    .children(self.queue_drawer(cx))
+                    .children(self.toast_element(cx)),
             )
-            .children(self.toast_element(cx))
             .child(views.player_bar.clone())
             .into_any_element()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #![allow(clippy::unwrap_used, clippy::expect_used, clippy::pedantic)]
+
+    // 不能 `use super::*`：外壳模块 glob 引入了 `gpui_kit::*`，会把 Rust 自带的 `#[test]` 发现成 GPUI 的同名宏。
+    use super::{MAX_AUTO_SKIPS, should_skip_unplayable};
+
+    #[test]
+    fn auto_skip_stops_after_the_cap() {
+        assert!(should_skip_unplayable(0), "第一次失败必须跳到下一首");
+        assert!(should_skip_unplayable(MAX_AUTO_SKIPS - 1));
+        assert!(
+            !should_skip_unplayable(MAX_AUTO_SKIPS),
+            "连续跳过到达上限后应停下，避免整队列空转"
+        );
     }
 }

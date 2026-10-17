@@ -29,7 +29,7 @@ pub fn run() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         let events = Box::new(move |event: lyra_audio::Event| {
             let msg = match event {
                 lyra_audio::Event::Ended => bridge::Msg::AudioEnded,
-                lyra_audio::Event::Failed { message } => bridge::Msg::AudioFailed(message),
+                lyra_audio::Event::Failed { message } => bridge::Msg::EngineFailed(message),
             };
             let _ = events_tx.send(msg);
         });
@@ -41,18 +41,21 @@ pub fn run() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let opened = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
     let opened_in_closure = opened.clone();
 
-    gpui_kit::application().run(move |cx| {
-        gpui_kit::init(cx);
-        let result = gpui_kit::open_window(window_options(), cx, move |window, cx| {
-            let entity = cx.new(|cx| shell::AppShell::new(backend, rx, cx));
-            entity.update(cx, |shell, cx| shell.install(window, cx));
-            entity
+    gpui_kit::application()
+        .with_assets(gpui_kit::assets::AllAssets)
+        .run(move |cx| {
+            gpui_kit::init(cx);
+            gpui_kit::component::Theme::change(gpui_kit::component::ThemeMode::Light, None, cx);
+            let result = gpui_kit::open_window(window_options(), cx, move |window, cx| {
+                let entity = cx.new(|cx| shell::AppShell::new(backend, rx, cx));
+                entity.update(cx, |shell, cx| shell.install(window, cx));
+                entity
+            });
+            match result {
+                Ok(_) => opened_in_closure.store(true, std::sync::atomic::Ordering::SeqCst),
+                Err(error) => tracing::error!(%error, "打开窗口失败"),
+            }
         });
-        match result {
-            Ok(_) => opened_in_closure.store(true, std::sync::atomic::Ordering::SeqCst),
-            Err(error) => tracing::error!(%error, "打开窗口失败"),
-        }
-    });
 
     if opened.load(std::sync::atomic::Ordering::SeqCst) {
         Ok(())
@@ -70,7 +73,7 @@ fn window_options() -> WindowOptions {
         ))),
         window_min_size: Some(size(px(880.0), px(560.0))),
         titlebar: Some(TitlebarOptions {
-            title: Some("lyra · 酷狗概念版".into()),
+            title: Some("Lyra 音乐".into()),
             ..Default::default()
         }),
         // 设置桌面环境应用标识。

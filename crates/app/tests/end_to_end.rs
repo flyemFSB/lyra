@@ -5,7 +5,7 @@
 use std::sync::Arc;
 
 use lyra_api::transport::{MockTransport, Response};
-use lyra_app::Kugou;
+use lyra_app::{Kugou, PlayMode};
 
 /// 构造测试登录响应桩。
 fn login_stub(mock: &MockTransport) {
@@ -204,4 +204,80 @@ async fn device_identity_is_generated_once_and_reused() {
     };
     assert_eq!(second.session().device.mid, mid);
     assert_eq!(second.session().device.guid, guid);
+}
+
+/// 创建已带 dfid 的应用门面：跳过前置的设备注册请求，让 `last_request` 就是待断言的那一次。
+fn registered_app(mock: Arc<MockTransport>) -> (Kugou, tempfile::TempDir) {
+    let dir = tempfile::tempdir().unwrap();
+    let store = lyra_store::open_temp_with_secrets(Box::new(lyra_store::MemorySecrets::new())).unwrap();
+    let device = lyra_proto::Device {
+        dfid: "DfidTest".to_owned(),
+        ..lyra_proto::Device::generate()
+    };
+    store.set_device(&device).unwrap();
+    let app = Kugou::with_transport(mock, store, dir.path()).unwrap();
+    (app, dir)
+}
+
+/// 断言发往 `path` 的请求体中，外层号码掩码按 trim 后的号码计算。
+fn assert_body_mobile(mock: &MockTransport, path: &str) {
+    let request = mock
+        .requests()
+        .into_iter()
+        .rev()
+        .find(|request| request.url.contains(path))
+        .expect("应已发出该请求");
+    let body: serde_json::Value = serde_json::from_slice(request.body.as_deref().unwrap()).unwrap();
+    assert_eq!(body["mobile"], "13*****0", "外层掩码必须按 trim 后的号码计算");
+}
+
+#[tokio::test]
+async fn send_code_trims_pasted_whitespace_before_encrypting_the_number() {
+    let mock = Arc::new(MockTransport::new());
+    mock.on_json(
+        "/v8/send_mobile_code",
+        &serde_json::json!({"status": 1, "data": {"count": 8}}),
+    );
+    let (app, _dir) = registered_app(mock.clone());
+
+    assert_eq!(app.send_code("  13800138000 ").await.unwrap(), 8);
+    assert_body_mobile(&mock, "/v8/send_mobile_code");
+}
+
+#[tokio::test]
+async fn login_trims_pasted_whitespace_before_encrypting_the_credentials() {
+    let mock = Arc::new(MockTransport::new());
+    login_stub(&mock);
+    let (app, _dir) = registered_app(mock.clone());
+
+    app.login(" 13800138000 ", " 123456 ").await.unwrap();
+    assert_body_mobile(&mock, "/v7/login_by_verifycode");
+}
+
+/// 播放模式必须跨启动沿用（旧实现每次开机都回到列表循环）。
+#[tokio::test]
+async fn play_mode_survives_a_restart() {
+    let mock = Arc::new(MockTransport::new());
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("lyra.redb");
+
+    {
+        let store = lyra_store::open_with_secrets(&path, Box::new(lyra_store::MemorySecrets::new())).unwrap();
+        let app = Kugou::with_transport(mock.clone(), store, dir.path()).unwrap();
+        assert_eq!(app.play_mode(), PlayMode::ListLoop, "默认列表循环");
+        app.set_settings(&lyra_store::Settings {
+            play_mode: PlayMode::Shuffle,
+            ..Default::default()
+        })
+        .unwrap();
+    }
+
+    // 重开客户端（同一数据目录）：模式必须是上次选的随机播放。
+    let reopened = Kugou::with_transport(
+        mock,
+        lyra_store::open_with_secrets(&path, Box::new(lyra_store::MemorySecrets::new())).unwrap(),
+        dir.path(),
+    )
+    .unwrap();
+    assert_eq!(reopened.play_mode(), PlayMode::Shuffle);
 }

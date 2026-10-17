@@ -1,16 +1,19 @@
-//! 系统设置与账户管理视图组件。
+//! 系统设置与账户管理视图组件：One Island 模块化卡片与拟态玻璃。
 
-use gpui_kit::component::ActiveTheme as _;
+use gpui_kit::assets::IconName;
 use gpui_kit::component::button::{Button, ButtonVariants};
 use gpui_kit::component::input::{Input, InputState};
-use gpui_kit::component::{Sizable as _, h_flex, v_flex};
+use gpui_kit::component::{Icon, Sizable as _, h_flex, v_flex};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use lyra_api::model::VipStatus;
 
 use crate::bridge::{Backend, Msg};
 use crate::format::{QUALITY_CHOICES, format_bytes, quality_label};
-use crate::theme::{ROW_HEIGHT, title};
+use crate::theme::{
+    ACCENT_GREEN, ACCENT_GREEN_HOVER, ACCENT_GREEN_LIGHT, CARD_BG, CARD_BORDER, TEXT_FAINT, TEXT_MUTED, TEXT_PRIMARY,
+    VIP_GOLD, badge, hex_rgb, title,
+};
 
 /// 缓存容量预设选项。
 const CACHE_PRESETS: &[(&str, u64)] = &[
@@ -51,7 +54,7 @@ impl SettingsView {
             .map_or(DEFAULT_MAX_CACHE_BYTES, |value| value.max_cache_bytes);
         let cache_dir = cx.new(|cx| {
             InputState::new(window, cx)
-                .placeholder("留空使用默认缓存目录")
+                .placeholder("留空使用默认系统音乐缓存目录")
                 .default_value(cache_dir_value)
         });
         Self {
@@ -94,7 +97,7 @@ impl SettingsView {
     pub(crate) fn on_claim(&mut self, result: Result<(), String>, cx: &mut Context<Self>) {
         match result {
             Ok(()) => {
-                self.last_action = Some(SharedString::new_static("已领取每日畅听 VIP"));
+                self.last_action = Some(SharedString::new_static("已成功领取今日概念版畅听 VIP"));
                 self.loaded = false;
                 self.ensure();
             }
@@ -106,7 +109,7 @@ impl SettingsView {
     /// 响应处理设置保存结果。
     pub(crate) fn on_saved(&mut self, result: Result<(), String>, cx: &mut Context<Self>) {
         self.last_action = Some(match result {
-            Ok(()) => SharedString::new_static("设置已保存"),
+            Ok(()) => SharedString::new_static("设置已成功保存"),
             Err(error) => SharedString::from(format!("保存失败: {error}")),
         });
         cx.notify();
@@ -165,7 +168,7 @@ impl SettingsView {
 
     /// 触发领取每日免费畅听 VIP。
     fn claim_vip(&mut self, cx: &mut Context<Self>) {
-        self.last_action = Some(SharedString::new_static("正在领取…"));
+        self.last_action = Some(SharedString::new_static("正在申请领取…"));
         cx.notify();
         let app = self.backend.app();
         self.backend.spawn(async move {
@@ -197,42 +200,17 @@ impl SettingsView {
     /// 生成会员状态展示文案。
     fn vip_label(&self) -> &'static str {
         match &self.vip {
-            Some(vip) if vip.is_concept_active() => "畅听 VIP 有效",
-            Some(_) => "未开通畅听 VIP",
+            Some(vip) if vip.is_concept_active() => "畅听 VIP 权益生效中",
+            Some(_) => "未开通畅听 VIP（点击右侧一键领取）",
             None => "会员状态获取中…",
         }
     }
 }
 
-impl SettingsView {
-    /// 渲染带有左侧标题的设置条目行。
-    fn section(label: &str, body: AnyElement, cx: &App) -> AnyElement {
-        let theme = cx.theme();
-        h_flex()
-            .w_full()
-            .min_h(px(ROW_HEIGHT))
-            .px_4()
-            .py_2()
-            .gap(px(16.0))
-            .border_b_1()
-            .border_color(theme.border)
-            .child(
-                div()
-                    .w(px(140.0))
-                    .flex_shrink_0()
-                    .text_sm()
-                    .child(SharedString::from(label.to_owned())),
-            )
-            .child(div().flex_1().min_w(px(0.0)).child(body))
-            .into_any_element()
-    }
-}
-
 impl Render for SettingsView {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let theme = cx.theme();
-
-        let mut quality_row = h_flex().gap(px(6.0)).flex_wrap();
+        // 1. 音质卡片
+        let mut quality_row = h_flex().gap(px(8.0)).flex_wrap().items_center();
         for (id, label) in QUALITY_CHOICES.iter().copied() {
             let active = self.quality == id;
             quality_row = quality_row.child(
@@ -244,26 +222,87 @@ impl Render for SettingsView {
                     .on_click(cx.listener(move |view, _event, _window, cx| view.set_quality(id, cx))),
             );
         }
-        quality_row = quality_row.child(
-            div()
-                .text_xs()
-                .text_color(theme.muted_foreground)
-                .child(SharedString::from(format!(
-                    "当前: {}",
-                    quality_label(self.quality.as_str())
-                ))),
-        );
+        quality_row = quality_row.child(badge(
+            format!("当前: {}", quality_label(self.quality.as_str())),
+            ACCENT_GREEN_LIGHT,
+            ACCENT_GREEN_HOVER,
+        ));
 
-        let mut preset_row = h_flex().gap(px(6.0)).flex_wrap();
-        preset_row = preset_row.child(
-            div()
-                .text_xs()
-                .text_color(theme.muted_foreground)
-                .child(SharedString::from(format!(
-                    "当前上限: {}",
-                    format_bytes(self.max_cache_bytes)
-                ))),
-        );
+        // 2. VIP 专属卡片
+        let is_vip_active = self
+            .vip
+            .as_ref()
+            .is_some_and(lyra_api::model::VipStatus::is_concept_active);
+        let vip_card = h_flex()
+            .w_full()
+            .p_4()
+            .rounded(px(12.0))
+            .bg(hex_rgb(0xfffbeb))
+            .border_1()
+            .border_color(hex_rgb(0xfde68a))
+            .shadow_sm()
+            .items_center()
+            .gap(px(16.0))
+            .child(
+                div()
+                    .w(px(44.0))
+                    .h(px(44.0))
+                    .rounded_full()
+                    .bg(hex_rgb(0xfef3c7))
+                    .border_1()
+                    .border_color(hex_rgb(0xfcd34d))
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .child(Icon::new(IconName::Crown).size(px(22.0)).text_color(VIP_GOLD)),
+            )
+            .child(
+                v_flex()
+                    .flex_1()
+                    .gap(px(2.0))
+                    .child(
+                        h_flex()
+                            .gap(px(8.0))
+                            .items_center()
+                            .child(
+                                div()
+                                    .text_sm()
+                                    .font_weight(FontWeight::BOLD)
+                                    .text_color(TEXT_PRIMARY)
+                                    .child("酷狗概念版畅听 VIP"),
+                            )
+                            .child(badge(
+                                if is_vip_active { "有效" } else { "未开通" },
+                                if is_vip_active {
+                                    ACCENT_GREEN_LIGHT
+                                } else {
+                                    hex_rgb(0xfee2e2)
+                                },
+                                if is_vip_active {
+                                    ACCENT_GREEN_HOVER
+                                } else {
+                                    hex_rgb(0xef4444)
+                                },
+                            )),
+                    )
+                    .child(
+                        div()
+                            .text_xs()
+                            .text_color(TEXT_MUTED)
+                            .child(SharedString::from(self.vip_label())),
+                    ),
+            )
+            .child(
+                Button::new("claim_vip")
+                    .primary()
+                    .icon(IconName::Sparkles)
+                    .label("一键免费领取 VIP")
+                    .tooltip("每日可领取一次概念版畅听权益")
+                    .on_click(cx.listener(|view, _event, _window, cx| view.claim_vip(cx))),
+            );
+
+        // 3. 存储上限预设
+        let mut preset_row = h_flex().gap(px(8.0)).flex_wrap().items_center();
         for (label, bytes) in CACHE_PRESETS.iter().copied() {
             let active = self.max_cache_bytes == bytes;
             preset_row = preset_row.child(
@@ -275,50 +314,74 @@ impl Render for SettingsView {
                     .on_click(cx.listener(move |view, _event, _window, cx| view.set_cache_limit(bytes, cx))),
             );
         }
+        preset_row = preset_row.child(badge(
+            format!("当前: {}", format_bytes(self.max_cache_bytes)),
+            ACCENT_GREEN_LIGHT,
+            ACCENT_GREEN_HOVER,
+        ));
 
+        // 4. 缓存目录
         let cache_row = h_flex()
-            .gap(px(8.0))
-            .child(div().flex_1().child(Input::new(&self.cache_dir)))
+            .gap(px(10.0))
+            .items_center()
+            .child(
+                h_flex()
+                    .flex_1()
+                    .min_w(px(0.0))
+                    .px_3()
+                    .py(px(4.0))
+                    .rounded(px(10.0))
+                    .bg(hex_rgb(0xf2f4f7))
+                    .border_1()
+                    .border_color(CARD_BORDER)
+                    .gap(px(8.0))
+                    .items_center()
+                    .child(Icon::new(IconName::HardDrive).size(px(16.0)).text_color(ACCENT_GREEN))
+                    .child(div().flex_1().child(Input::new(&self.cache_dir))),
+            )
             .child(
                 Button::new("save_cache_dir")
+                    .primary()
                     .small()
-                    .label("保存")
+                    .icon(IconName::Check)
+                    .label("保存路径")
                     .on_click(cx.listener(|view, _event, _window, cx| view.save_cache_dir(cx))),
             );
 
-        let vip_row = h_flex()
-            .gap(px(12.0))
-            .child(div().text_sm().child(SharedString::from(self.vip_label())))
-            .child(
-                Button::new("claim_vip")
-                    .small()
-                    .label("领取每日畅听 VIP")
-                    .on_click(cx.listener(|view, _event, _window, cx| view.claim_vip(cx))),
-            );
-
+        // 5. 账号管理
         let account_row = h_flex()
-            .gap(px(8.0))
-            .child(
-                Button::new("logout")
-                    .small()
-                    .danger()
-                    .label("登出")
-                    .on_click(cx.listener(|view, _event, _window, _cx| view.logout())),
-            )
+            .gap(px(10.0))
+            .items_center()
             .child(
                 Button::new("clear_cache")
+                    .ghost()
                     .small()
-                    .label("清理接口缓存")
+                    .icon(IconName::RefreshCw)
+                    .label("清理内存接口缓存")
                     .on_click(cx.listener(|view, _event, _window, cx| view.clear_cache(cx))),
+            )
+            .child(
+                Button::new("logout")
+                    .danger()
+                    .small()
+                    .icon(IconName::LogOut)
+                    .label("退出当前登录")
+                    .on_click(cx.listener(|view, _event, _window, _cx| view.logout())),
             );
 
+        // 操作状态反馈
         let status = self.last_action.clone().map(|text| {
-            div()
-                .px_4()
+            h_flex()
+                .w_full()
+                .px_5()
                 .py_2()
-                .text_xs()
-                .text_color(theme.muted_foreground)
-                .child(text)
+                .items_center()
+                .gap(px(6.0))
+                .border_t_1()
+                .border_color(CARD_BORDER)
+                .bg(hex_rgb(0xf9fafb))
+                .child(Icon::new(IconName::Sparkles).size(px(14.0)).text_color(ACCENT_GREEN))
+                .child(div().text_xs().text_color(TEXT_MUTED).child(text))
                 .into_any_element()
         });
 
@@ -327,23 +390,85 @@ impl Render for SettingsView {
             .child(
                 div()
                     .w_full()
-                    .px_4()
-                    .py_3()
+                    .px_5()
+                    .py_4()
                     .border_b_1()
-                    .border_color(theme.border)
+                    .border_color(CARD_BORDER)
                     .child(title("设置", cx)),
             )
             .child(
-                div()
+                v_flex()
                     .id("settings-body")
                     .flex_1()
                     .min_h(px(0.0))
+                    .p_5()
+                    .gap(px(16.0))
                     .overflow_y_scroll()
-                    .child(Self::section("音质", quality_row.into_any_element(), cx))
-                    .child(Self::section("缓存目录", cache_row.into_any_element(), cx))
-                    .child(Self::section("缓存上限", preset_row.into_any_element(), cx))
-                    .child(Self::section("会员", vip_row.into_any_element(), cx))
-                    .child(Self::section("账号与缓存", account_row.into_any_element(), cx)),
+                    // VIP 权益卡片
+                    .child(vip_card)
+                    // 音质卡片
+                    .child(
+                        v_flex()
+                            .p_4()
+                            .rounded(px(12.0))
+                            .bg(CARD_BG)
+                            .border_1()
+                            .border_color(CARD_BORDER)
+                            .shadow_sm()
+                            .gap(px(10.0))
+                            .child(
+                                h_flex()
+                                    .gap(px(8.0))
+                                    .items_center()
+                                    .child(Icon::new(IconName::SlidersHorizontal).size(px(16.0)).text_color(ACCENT_GREEN))
+                                    .child(div().text_sm().font_weight(FontWeight::BOLD).text_color(TEXT_PRIMARY).child("音质偏好")),
+                            )
+                            .child(quality_row),
+                    )
+                    // 存储卡片
+                    .child(
+                        v_flex()
+                            .p_4()
+                            .rounded(px(12.0))
+                            .bg(CARD_BG)
+                            .border_1()
+                            .border_color(CARD_BORDER)
+                            .shadow_sm()
+                            .gap(px(12.0))
+                            .child(
+                                h_flex()
+                                    .gap(px(8.0))
+                                    .items_center()
+                                    .child(Icon::new(IconName::HardDrive).size(px(16.0)).text_color(ACCENT_GREEN))
+                                    .child(div().text_sm().font_weight(FontWeight::BOLD).text_color(TEXT_PRIMARY).child("本地缓存与存储")),
+                            )
+                            .child(cache_row)
+                            .child(
+                                v_flex()
+                                    .gap(px(6.0))
+                                    .child(div().text_xs().text_color(TEXT_FAINT).child("缓存容量上限"))
+                                    .child(preset_row),
+                            ),
+                    )
+                    // 账户与维护卡片
+                    .child(
+                        v_flex()
+                            .p_4()
+                            .rounded(px(12.0))
+                            .bg(CARD_BG)
+                            .border_1()
+                            .border_color(CARD_BORDER)
+                            .shadow_sm()
+                            .gap(px(10.0))
+                            .child(
+                                h_flex()
+                                    .gap(px(8.0))
+                                    .items_center()
+                                    .child(Icon::new(IconName::User).size(px(16.0)).text_color(ACCENT_GREEN))
+                                    .child(div().text_sm().font_weight(FontWeight::BOLD).text_color(TEXT_PRIMARY).child("账户与维护")),
+                            )
+                            .child(account_row),
+                    ),
             )
             .children(status)
     }

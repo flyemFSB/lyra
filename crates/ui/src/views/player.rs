@@ -1,21 +1,62 @@
-//! 底部控制条与跨视图共享播放状态。
+//! 底部控制条与跨视图共享播放状态：简约淡雅白底卡片、翡翠绿圆形主控键与全功能触控交互。
 
 use std::sync::Arc;
 use std::time::Duration;
 
-use gpui_kit::component::ActiveTheme as _;
+use gpui_kit::assets::IconName;
 use gpui_kit::component::button::{Button, ButtonVariants};
 use gpui_kit::component::slider::{Slider, SliderEvent, SliderState, SliderValue};
-use gpui_kit::component::{Sizable, h_flex, v_flex};
+use gpui_kit::component::{Icon, Sizable as _, h_flex, v_flex};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use lyra_api::model::Song;
 use lyra_audio::{Snapshot, State};
 
-use crate::bridge::{Backend, Msg};
+use crate::bridge::{Backend, Msg, Nav};
 use crate::format::{format_duration, progress_percent};
 use crate::shell::AppShell;
-use crate::theme::cover_box;
+use crate::theme::{
+    ACCENT_GREEN, ACCENT_GREEN_HOVER, ACCENT_GREEN_LIGHT, CARD_BG, CARD_BORDER, TEXT_MUTED, TEXT_PRIMARY, badge,
+    cover_box,
+};
+
+/// 播放模式在界面层的展示与循环行为（模式的持久化定义在 `lyra-store`，两边共用同一个枚举）。
+pub(crate) use lyra_app::PlayMode;
+
+pub(crate) trait PlayModeUi {
+    /// 展示文本标签。
+    fn label(self) -> &'static str;
+    /// 对应的 Lucide 矢量图标。
+    fn icon(self) -> IconName;
+    /// 循环切换至下一个模式。
+    fn next(self) -> Self;
+}
+
+impl PlayModeUi for PlayMode {
+    fn label(self) -> &'static str {
+        match self {
+            Self::ListLoop => "列表循环",
+            Self::SingleLoop => "单曲循环",
+            Self::Shuffle => "随机播放",
+        }
+    }
+
+    fn icon(self) -> IconName {
+        match self {
+            Self::ListLoop => IconName::Repeat,
+            Self::SingleLoop => IconName::Repeat1,
+            Self::Shuffle => IconName::Shuffle,
+        }
+    }
+
+    fn next(self) -> Self {
+        match self {
+            Self::ListLoop => Self::SingleLoop,
+            Self::SingleLoop => Self::Shuffle,
+            Self::Shuffle => Self::ListLoop,
+        }
+    }
+}
 
 /// 播放控制与歌词共享的数据模型。
 pub(crate) struct PlayerModel {
@@ -27,11 +68,13 @@ pub(crate) struct PlayerModel {
     pub(crate) queue: Arc<Vec<Song>>,
     /// 当前播放曲目在队列中的下标。
     pub(crate) index: usize,
+    /// 当前播放模式。
+    pub(crate) mode: PlayMode,
 }
 
 impl PlayerModel {
-    /// 创建默认初始状态。
-    pub(crate) fn new(has_engine: bool) -> Self {
+    /// 创建初始状态；`mode` 为上次退出时持久化的播放模式。
+    pub(crate) fn new(has_engine: bool, mode: PlayMode) -> Self {
         Self {
             snapshot: Snapshot {
                 state: State::Idle,
@@ -43,6 +86,59 @@ impl PlayerModel {
             has_engine,
             queue: Arc::new(Vec::new()),
             index: 0,
+            mode,
+        }
+    }
+
+    /// 循环切换播放模式。
+    pub(crate) fn cycle_mode(&mut self) -> PlayMode {
+        self.mode = self.mode.next();
+        self.mode
+    }
+
+    /// 获取下一首曲目索引（受播放模式制约）。
+    pub(crate) fn next_index(&self) -> Option<usize> {
+        let len = self.queue.len();
+        if len == 0 {
+            return None;
+        }
+        match self.mode {
+            PlayMode::SingleLoop => Some(self.index),
+            PlayMode::ListLoop => Some((self.index + 1) % len),
+            PlayMode::Shuffle => {
+                if len == 1 {
+                    Some(0)
+                } else {
+                    let seed = std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .map_or(0, |d| d.as_nanos());
+                    let offset = (seed as usize % (len - 1)) + 1;
+                    Some((self.index + offset) % len)
+                }
+            }
+        }
+    }
+
+    /// 获取上一首曲目索引（受播放模式制约）。
+    pub(crate) fn prev_index(&self) -> Option<usize> {
+        let len = self.queue.len();
+        if len == 0 {
+            return None;
+        }
+        match self.mode {
+            PlayMode::SingleLoop => Some(self.index),
+            PlayMode::ListLoop => Some((self.index + len - 1) % len),
+            PlayMode::Shuffle => {
+                if len == 1 {
+                    Some(0)
+                } else {
+                    let seed = std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .map_or(0, |d| d.as_nanos());
+                    let offset = (seed as usize % (len - 1)) + 1;
+                    Some((self.index + offset) % len)
+                }
+            }
         }
     }
 
@@ -95,6 +191,7 @@ pub(crate) struct PlayerBar {
     progress: Entity<SliderState>,
     volume: Entity<SliderState>,
     dragging: bool,
+    volume_dragging: bool,
     playing: bool,
     title: SharedString,
     singer: SharedString,
@@ -116,9 +213,9 @@ impl PlayerBar {
         let volume = cx.new(|_| {
             SliderState::new()
                 .min(0.0)
-                .max(1.0)
-                .step(0.01)
-                .default_value(initial_volume)
+                .max(100.0)
+                .step(1.0)
+                .default_value(initial_volume * 100.0)
         });
 
         let progress_sub = cx.subscribe(&progress, |this, _state, event: &SliderEvent, cx| match event {
@@ -130,10 +227,16 @@ impl PlayerBar {
         });
         let volume_sub = cx.subscribe(&volume, |this, _state, event: &SliderEvent, _cx| {
             let (value, persist) = match event {
-                SliderEvent::Change(value) => (*value, false),
-                SliderEvent::Release(value) => (*value, true),
+                SliderEvent::Change(value) => {
+                    this.volume_dragging = true;
+                    (*value, false)
+                }
+                SliderEvent::Release(value) => {
+                    this.volume_dragging = false;
+                    (*value, true)
+                }
             };
-            this.apply_volume(value_single(value), persist);
+            this.apply_volume(value_single(value) / 100.0, persist);
         });
 
         if let Some(engine) = backend.engine() {
@@ -159,6 +262,7 @@ impl PlayerBar {
             progress,
             volume,
             dragging: false,
+            volume_dragging: false,
             playing: false,
             title: SharedString::new_static("未在播放"),
             singer: SharedString::new_static(""),
@@ -202,11 +306,15 @@ impl PlayerBar {
                 }
             });
         }
-        self.volume.update(cx, |state, state_cx| {
-            if (value_single(state.value()) - volume).abs() > 0.001 {
-                state.set_value(volume, window, state_cx);
-            }
-        });
+        if !self.volume_dragging {
+            self.volume.update(cx, |state, state_cx| {
+                let current_slider_val = value_single(state.value());
+                let target_slider_val = (volume * 100.0).clamp(0.0, 100.0);
+                if (current_slider_val - target_slider_val).abs() > 1.0 {
+                    state.set_value(target_slider_val, window, state_cx);
+                }
+            });
+        }
 
         if changed || retitled {
             cx.notify();
@@ -231,6 +339,20 @@ impl PlayerBar {
         #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
         let ms = (f64::from(percent.clamp(0.0, 100.0)) / 100.0 * duration as f64).round() as u64;
         engine.seek(ms);
+    }
+
+    /// 持久化播放模式，下次启动沿用（与音量同一套读改写设置的方式）。
+    fn persist_mode(&self, mode: PlayMode) {
+        let app = self.backend.app();
+        self.backend.spawn(async move {
+            match app.settings().and_then(|mut settings| {
+                settings.play_mode = mode;
+                app.set_settings(&settings)
+            }) {
+                Ok(()) => Msg::Noop,
+                Err(error) => Msg::Toast(format!("保存播放模式失败: {error}")),
+            }
+        });
     }
 
     /// 设置音量并在松开时持久化设置。
@@ -264,105 +386,324 @@ fn value_single(value: SliderValue) -> f32 {
 
 impl Render for PlayerBar {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let theme = cx.theme();
-        let (position, duration, has_engine) = {
+        let (position, duration, has_engine, volume, current_song, play_mode, queue_len) = {
             let model = self.player.read(cx);
-            (model.snapshot.position_ms, model.snapshot.duration_ms, model.has_engine)
+            (
+                model.snapshot.position_ms,
+                model.snapshot.duration_ms,
+                model.has_engine,
+                model.snapshot.volume,
+                model.current_song().cloned(),
+                model.mode,
+                model.queue.len(),
+            )
         };
-        let play_label = if self.playing {
-            SharedString::new_static("❚❚")
-        } else {
-            SharedString::new_static("▶")
-        };
+
+        let play_icon = if self.playing { IconName::Pause } else { IconName::Play };
+
+        let is_muted = volume <= 0.001;
+        let vol_icon = if is_muted { IconName::VolumeX } else { IconName::Volume2 };
+
         let shell_prev = self.shell.clone();
         let shell_next = self.shell.clone();
+        let shell_lyrics_cover = self.shell.clone();
+        let shell_queue = self.shell.clone();
+        let like_backend = self.backend.clone();
 
         h_flex()
-            .h(px(78.0))
+            .h(px(76.0))
             .w_full()
-            .px_4()
+            .px_5()
             .gap(px(16.0))
-            .bg(theme.background)
-            .border_t_1()
-            .border_color(theme.border)
-            .child(cover_box(self.title.as_ref(), 48.0, cx))
-            .child(
-                v_flex()
-                    .w(px(220.0))
-                    .min_w(px(0.0))
-                    .child(div().text_sm().truncate().child(self.title.clone()))
-                    .child(
-                        div()
-                            .text_xs()
-                            .text_color(theme.muted_foreground)
-                            .truncate()
-                            .child(self.singer.clone()),
-                    ),
-            )
+            .bg(CARD_BG)
+            .rounded(px(14.0))
+            .border_1()
+            .border_color(CARD_BORDER)
+            .shadow_sm()
+            // 左侧：封面（点击进入歌词写真）、歌名歌手与收藏按钮
             .child(
                 h_flex()
-                    .gap(px(6.0))
-                    .child(
-                        Button::new("prev")
-                            .ghost()
-                            .small()
-                            .label("⏮")
-                            .on_click(move |_event, _window, cx| {
-                                shell_prev.update(cx, AppShell::play_prev).ok();
-                            }),
-                    )
-                    .child(
-                        Button::new("toggle")
-                            .primary()
-                            .small()
-                            .label(play_label)
-                            .on_click(cx.listener(|this, _event, _window, _cx| this.toggle())),
-                    )
-                    .child(
-                        Button::new("next")
-                            .ghost()
-                            .small()
-                            .label("⏭")
-                            .on_click(move |_event, _window, cx| {
-                                shell_next.update(cx, AppShell::play_next).ok();
-                            }),
-                    ),
-            )
-            .child(
-                h_flex()
-                    .flex_1()
+                    .w(px(260.0))
                     .min_w(px(0.0))
-                    .gap(px(10.0))
+                    .gap(px(12.0))
+                    .items_center()
                     .child(
                         div()
-                            .w(px(48.0))
-                            .text_xs()
-                            .text_color(theme.muted_foreground)
-                            .child(SharedString::from(format_duration(position))),
+                            .id("player_cover_link")
+                            .role(Role::Button)
+                            .cursor_pointer()
+                            .on_click(move |_event, _window, cx| {
+                                shell_lyrics_cover.update(cx, |shell, cx| {
+                                    if shell.nav == Nav::Lyrics {
+                                        shell.go_back(cx);
+                                    } else {
+                                        shell.set_nav(Nav::Lyrics, cx);
+                                    }
+                                }).ok();
+                            })
+                            .hover(|s| s.opacity(0.85))
+                            .child(cover_box(self.title.as_ref(), 46.0, cx)),
                     )
                     .child(
-                        div()
+                        v_flex()
                             .flex_1()
                             .min_w(px(0.0))
-                            .child(Slider::new(&self.progress).w_full()),
+                            .gap(px(2.0))
+                            .child(
+                                h_flex()
+                                    .gap(px(6.0))
+                                    .items_center()
+                                    .child(
+                                        div()
+                                            .text_sm()
+                                            .font_weight(FontWeight::BOLD)
+                                            .text_color(TEXT_PRIMARY)
+                                            .truncate()
+                                            .child(self.title.clone()),
+                                    )
+                                    .child(badge("SQ", ACCENT_GREEN_LIGHT, ACCENT_GREEN)),
+                            )
+                            .child(
+                                div()
+                                    .text_xs()
+                                    .text_color(TEXT_MUTED)
+                                    .truncate()
+                                    .child(self.singer.clone()),
+                            ),
                     )
                     .child(
-                        div()
-                            .w(px(48.0))
-                            .text_xs()
-                            .text_color(theme.muted_foreground)
-                            .child(SharedString::from(format_duration(duration))),
+                        Button::new("player_like")
+                            .ghost()
+                            .small()
+                            .icon(IconName::Heart)
+                            .tooltip("收藏当前歌曲")
+                            .on_click(move |_event, _window, _cx| {
+                                if let Some(song) = current_song.clone() {
+                                    let app = like_backend.app();
+                                    like_backend.spawn(async move {
+                                        Msg::Toast(match app.like(&song).await {
+                                            Ok(()) => "已加入「我喜欢」".to_owned(),
+                                            Err(error) => format!("收藏失败: {error}"),
+                                        })
+                                    });
+                                }
+                            }),
                     ),
             )
+            // 中间：核心播放控制器与进度时间轴
+            .child(
+                v_flex()
+                    .flex_1()
+                    .min_w(px(0.0))
+                    .items_center()
+                    .justify_center()
+                    .gap(px(3.0))
+                    .child(
+                        h_flex()
+                            .gap(px(14.0))
+                            .items_center()
+                            // 播放模式切换
+                            .child(
+                                Button::new("mode_toggle")
+                                    .ghost()
+                                    .small()
+                                    .icon(play_mode.icon())
+                                    .tooltip(format!("播放模式：{}", play_mode.label()))
+                                    .on_click(cx.listener(|this, _event, _window, cx| {
+                                        let next = this.player.update(cx, |model, cx| {
+                                            let m = model.cycle_mode();
+                                            cx.notify();
+                                            m
+                                        });
+                                        this.persist_mode(next);
+                                        this.backend.send(Msg::Toast(format!("已切换为：{}", next.label())));
+                                    })),
+                            )
+                            // 上一首
+                            .child(
+                                Button::new("prev")
+                                    .ghost()
+                                    .small()
+                                    .icon(IconName::SkipBack)
+                                    .tooltip("上一首")
+                                    .on_click(move |_event, _window, cx| {
+                                        shell_prev.update(cx, AppShell::play_prev).ok();
+                                    }),
+                            )
+                            // 翡翠绿圆形主播放/暂停按键
+                            .child(
+                                div()
+                                    .id("toggle_play_btn")
+                                    .role(Role::Button)
+                                    .cursor_pointer()
+                                    .w(px(38.0))
+                                    .h(px(38.0))
+                                    .rounded_full()
+                                    .bg(ACCENT_GREEN)
+                                    .hover(|s| s.bg(ACCENT_GREEN_HOVER))
+                                    .shadow_sm()
+                                    .flex()
+                                    .items_center()
+                                    .justify_center()
+                                    .on_click(cx.listener(|this, _event, _window, _cx| this.toggle()))
+                                    .child(Icon::new(play_icon).size(px(20.0)).text_color(rgb(0xffffff))),
+                            )
+                            // 下一首
+                            .child(
+                                Button::new("next")
+                                    .ghost()
+                                    .small()
+                                    .icon(IconName::SkipForward)
+                                    .tooltip("下一首")
+                                    .on_click(move |_event, _window, cx| {
+                                        shell_next.update(cx, AppShell::play_next).ok();
+                                    }),
+                            ),
+                    )
+                    // 进度时间条
+                    .child(
+                        h_flex()
+                            .w_full()
+                            .gap(px(10.0))
+                            .items_center()
+                            .child(
+                                div()
+                                    .w(px(40.0))
+                                    .text_xs()
+                                    .font_weight(FontWeight::MEDIUM)
+                                    .text_color(TEXT_MUTED)
+                                    .text_right()
+                                    .child(SharedString::from(format_duration(position))),
+                            )
+                            .child(
+                                div()
+                                    .flex_1()
+                                    .min_w(px(0.0))
+                                    .child(Slider::new(&self.progress).w_full()),
+                            )
+                            .child(
+                                div()
+                                    .w(px(40.0))
+                                    .text_xs()
+                                    .font_weight(FontWeight::MEDIUM)
+                                    .text_color(TEXT_MUTED)
+                                    .child(SharedString::from(format_duration(duration))),
+                            ),
+                    ),
+            )
+            // 右侧：音频设备状态、音量调节组（静音切换+滑块拖动）与播放队列抽屉
             .child(
                 h_flex()
-                    .w(px(170.0))
-                    .gap(px(8.0))
-                    .child(div().text_xs().text_color(theme.muted_foreground).child("音量"))
-                    .child(div().flex_1().child(Slider::new(&self.volume).w_full())),
+                    .w(px(260.0))
+                    .justify_end()
+                    .items_center()
+                    .gap(px(10.0))
+                    .when(!has_engine, |this| {
+                        this.child(badge("无音频设备", hsla(0.0, 0.85, 0.95, 1.0), hsla(0.0, 0.85, 0.45, 1.0)))
+                    })
+                    // 音量调节集群：静音图标 + 自由拖动音量滑块
+                    .child(
+                        h_flex()
+                            .items_center()
+                            .gap(px(4.0))
+                            .child(
+                                Button::new("vol_toggle")
+                                    .ghost()
+                                    .small()
+                                    .icon(vol_icon)
+                                    .tooltip(if is_muted { "恢复音量" } else { "静音" })
+                                    .on_click(cx.listener(|this, _event, window, cx| {
+                                        let current = this.player.read(cx).snapshot.volume;
+                                        let target = if current > 0.001 { 0.0 } else { 0.8 };
+                                        this.volume.update(cx, |state, state_cx| {
+                                            state.set_value(target * 100.0, window, state_cx);
+                                        });
+                                        this.apply_volume(target, true);
+                                    })),
+                            )
+                            .child(
+                                div()
+                                    .w(px(80.0))
+                                    .child(Slider::new(&self.volume).w_full()),
+                            ),
+                    )
+                    // 播放队列弹窗开关
+                    .child(
+                        Button::new("queue_drawer_toggle")
+                            .ghost()
+                            .small()
+                            .icon(IconName::ListMusic)
+                            .tooltip(format!("播放队列 ({} 首)", queue_len))
+                            .on_click(move |_event, _window, cx| {
+                                shell_queue.update(cx, AppShell::toggle_queue).ok();
+                            }),
+                    ),
             )
-            .when(!has_engine, |this| {
-                this.child(div().text_xs().text_color(theme.danger).child("无音频设备"))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #![allow(clippy::unwrap_used, clippy::expect_used, clippy::pedantic)]
+
+    // 不能 `use super::*`：播放条模块 glob 引入了 `gpui_kit::*`，会把 Rust 自带的 `#[test]` 发现成 GPUI 的同名宏。
+    use std::sync::Arc;
+
+    use lyra_api::model::Song;
+
+    use super::{PlayMode, PlayerModel};
+
+    /// 造一个 3 首曲目的队列，当前停在第 `index` 首。
+    fn model(mode: PlayMode, index: usize) -> PlayerModel {
+        let songs: Vec<Song> = ["a", "b", "c"]
+            .iter()
+            .map(|hash| Song {
+                hash: (*hash).to_owned(),
+                ..Song::default()
             })
+            .collect();
+        let mut model = PlayerModel::new(true, mode);
+        model.set_queue(Arc::new(songs), index);
+        model
+    }
+
+    #[test]
+    fn persisted_mode_is_what_the_session_starts_with() {
+        // 上次选的模式经配置落盘，重开客户端必须沿用，而不是回到列表循环。
+        assert_eq!(PlayerModel::new(true, PlayMode::Shuffle).mode, PlayMode::Shuffle);
+        assert_eq!(PlayerModel::new(true, PlayMode::SingleLoop).mode, PlayMode::SingleLoop);
+        assert_eq!(PlayerModel::new(true, PlayMode::ListLoop).mode, PlayMode::ListLoop);
+    }
+
+    #[test]
+    fn cycling_visits_every_mode_and_wraps() {
+        let mut model = PlayerModel::new(true, PlayMode::ListLoop);
+        assert_eq!(model.cycle_mode(), PlayMode::SingleLoop);
+        assert_eq!(model.cycle_mode(), PlayMode::Shuffle);
+        assert_eq!(model.cycle_mode(), PlayMode::ListLoop);
+    }
+
+    #[test]
+    fn next_index_follows_the_play_mode() {
+        assert_eq!(model(PlayMode::ListLoop, 0).next_index(), Some(1));
+        assert_eq!(
+            model(PlayMode::ListLoop, 2).next_index(),
+            Some(0),
+            "列表循环到尾回到开头"
+        );
+        assert_eq!(model(PlayMode::SingleLoop, 1).next_index(), Some(1), "单曲循环原地重复");
+        assert_ne!(
+            model(PlayMode::Shuffle, 1).next_index(),
+            Some(1),
+            "随机不落在当前曲目上"
+        );
+    }
+
+    #[test]
+    fn empty_queue_has_no_next_or_previous() {
+        let model = PlayerModel::new(true, PlayMode::ListLoop);
+        assert_eq!(model.next_index(), None);
+        assert_eq!(model.prev_index(), None);
+        assert!(model.current_song().is_none());
     }
 }
