@@ -1,6 +1,9 @@
 //! 沉浸式透明彩胶唱机与动态滚动歌词视图。
 
+use std::cell::Cell;
+use std::rc::Rc;
 use std::sync::Arc;
+use std::time::Duration;
 
 use gpui_kit::assets::IconName;
 use gpui_kit::component::button::{Button, ButtonVariants};
@@ -28,7 +31,34 @@ pub(crate) struct LyricsView {
     singer: SharedString,
     current_hash: Option<String>,
     status: Option<SharedString>,
+    /// 歌词滚动区控制柄
+    scroll: ScrollHandle,
+    /// 已跟随到的歌词行；None 表示布局还没就绪，下一帧重试
+    followed: Option<usize>,
+    /// 居中滚动的起点与当前目标偏移
+    scroll_from: f32,
+    scroll_target: f32,
+    /// 本次滚动是否已落位，落位后不再接管偏移，让用户自由滚动
+    scroll_settled: Rc<Cell<bool>>,
     _sub: Subscription,
+}
+
+/// 歌词滚动与切换动画时长
+const LYRIC_ANIMATION: Duration = Duration::from_millis(320);
+
+/// 让 `item` 的竖向中线落在 `viewport` 正中所需的滚动偏移
+fn center_offset(viewport: Bounds<Pixels>, item: Bounds<Pixels>) -> Pixels {
+    viewport.center().y - item.center().y
+}
+
+/// 离当前行越远的歌词越淡
+fn lyric_fade(distance: usize) -> f32 {
+    match distance {
+        0 => 1.0,
+        1 => 0.55,
+        2 => 0.35,
+        _ => 0.2,
+    }
 }
 
 impl LyricsView {
@@ -53,6 +83,11 @@ impl LyricsView {
             singer: SharedString::new_static(""),
             current_hash: None,
             status: None,
+            scroll: ScrollHandle::new(),
+            followed: None,
+            scroll_from: 0.0,
+            scroll_target: 0.0,
+            scroll_settled: Rc::new(Cell::new(true)),
             _sub: sub,
         }
     }
@@ -65,11 +100,14 @@ impl LyricsView {
         self.singer = SharedString::new_static("");
         self.current_hash = None;
         self.status = None;
+        self.followed = None;
         cx.notify();
     }
 
     /// 设置歌词行列表
     pub(crate) fn set_lines(&mut self, result: Result<Vec<LyricLine>, String>, cx: &mut Context<Self>) {
+        // 换歌后行高全变了，等新布局出来再重新跟随
+        self.followed = None;
         match result {
             Ok(lines) => {
                 self.texts = Arc::new(
@@ -90,6 +128,34 @@ impl LyricsView {
         cx.notify();
     }
 
+    /// 跟随当前行：行号变化时重新开始一次居中滚动，目标偏移逐帧按最新布局校正
+    fn follow_lyrics(&mut self, current: Option<usize>) {
+        if self.followed != current {
+            let Some(index) = current else {
+                self.followed = None;
+                return;
+            };
+            // 子元素边界来自上一帧布局，首帧或换歌当帧还没有，下一帧再跟随
+            let Some(item) = self.scroll.bounds_for_item(index) else {
+                return;
+            };
+            self.scroll_from = self.scroll.offset().y.into();
+            self.scroll_target = center_offset(self.scroll.bounds(), item).into();
+            self.followed = current;
+            self.scroll_settled.set(false);
+        } else if let Some(index) = current
+            && let Some(item) = self.scroll.bounds_for_item(index)
+        {
+            // 行边界来自上一帧：当前行放大、窗口缩放都会让目标偏移变，变了就再滚一次
+            let target: f32 = center_offset(self.scroll.bounds(), item).into();
+            // 亚像素的抖动没必要重新滚
+            if (target - self.scroll_target).abs() > 0.5 {
+                self.scroll_target = target;
+                self.scroll_settled.set(false);
+            }
+        }
+    }
+
     /// 跳转至指定播放进度（毫秒）
     fn seek_to(&self, time_ms: u64) {
         if let Some(engine) = self.backend.engine() {
@@ -106,6 +172,106 @@ impl LyricsView {
         self.current_hash = hash;
         self.title = title;
         self.singer = singer;
+    }
+
+    /// 渲染歌词流：当前行固定在滚动区正中，切换时平滑滚过去并淡入
+    fn lyric_stream(&self, current: Option<usize>, cx: &Context<Self>) -> AnyElement {
+        if let Some(status) = &self.status {
+            return notice_with_icon(IconName::CircleAlert, status.clone(), cx).into_any_element();
+        }
+        if self.lines.is_empty() {
+            return notice_with_icon(IconName::Mic, "暂无歌词（播放歌曲后将自动匹配歌词写真）", cx).into_any_element();
+        }
+
+        // 上下各留半个视口，首尾歌词也能停到正中
+        let pad = px(f32::from(self.scroll.bounds().size.height) / 2.0);
+        let (from, to) = (self.scroll_from, self.scroll_target);
+        let scroll = self.scroll.clone();
+        let settled = self.scroll_settled.clone();
+
+        let mut body = v_flex()
+            .id("lyrics-scroll-body")
+            .size_full()
+            .items_start()
+            .gap(px(12.0))
+            .pt(pad)
+            .pb(pad)
+            .overflow_y_scroll()
+            .track_scroll(&self.scroll);
+
+        for (index, line) in self.lines.iter().enumerate() {
+            let active = current == Some(index);
+            let text = self.texts.get(index).cloned().unwrap_or_default();
+            let time_ms = line.time_ms;
+
+            let label = div()
+                .when(active, |this| {
+                    this.text_2xl()
+                        .font_weight(FontWeight::BOLD)
+                        .text_color(hex_rgb(0x0284c7))
+                })
+                .when(!active, |this| {
+                    this.text_base()
+                        .font_weight(FontWeight::NORMAL)
+                        .text_color(hex_rgb(0x94a3b8))
+                        .hover(|s| s.text_color(hex_rgb(0x334155)))
+                })
+                .child(text);
+
+            // 当前行淡入并轻放大，其余行越远越淡
+            let label = if active {
+                label
+                    .with_animation(
+                        ("lyric_active", index),
+                        Animation::new(LYRIC_ANIMATION).with_easing(ease_in_out),
+                        |label, delta| label.text_size(rems(1.25 + 0.25 * delta)).opacity(delta),
+                    )
+                    .into_any_element()
+            } else {
+                label
+                    .opacity(lyric_fade(
+                        current.map_or(usize::MAX, |current| index.abs_diff(current)),
+                    ))
+                    .into_any_element()
+            };
+
+            body = body.child(
+                div()
+                    .id(("lyric_line", index))
+                    .role(Role::Button)
+                    .cursor_pointer()
+                    .w_full()
+                    .py(px(4.0))
+                    .flex()
+                    .items_center()
+                    .gap(px(10.0))
+                    .on_click(cx.listener(move |this, _event, _window, _cx| {
+                        this.seek_to(time_ms);
+                    }))
+                    .child(label),
+            );
+        }
+
+        div()
+            .id("lyrics-scroll")
+            .flex_1()
+            .min_h(px(0.0))
+            .w_full()
+            .relative()
+            .child(body.with_animation(
+                ("lyrics-scroll-follow", self.followed.unwrap_or(usize::MAX)),
+                Animation::new(LYRIC_ANIMATION).with_easing(ease_in_out),
+                move |body, delta| {
+                    // 落位后不再干预偏移，把滚动交还给用户
+                    if delta < 1.0 || !settled.get() {
+                        scroll.set_offset(point(px(0.0), px(from + (to - from) * delta)));
+                        settled.set(delta >= 1.0);
+                    }
+                    body
+                },
+            ))
+            .vertical_scrollbar(&self.scroll)
+            .into_any_element()
     }
 
     /// 渲染黑胶唱机拟态舞台
@@ -285,66 +451,14 @@ impl Render for LyricsView {
             )
         };
         let current = lyric_index(&self.lines, position);
+        self.follow_lyrics(current);
         let shell_exit = self.shell.clone();
 
         // 唱片区域
         let turntable_stage = self.vinyl_turntable_stage(is_playing, cx);
 
         // 歌词流区域
-        let lyric_stream = if let Some(status) = &self.status {
-            notice_with_icon(IconName::CircleAlert, status.clone(), cx)
-        } else if self.lines.is_empty() {
-            notice_with_icon(IconName::Mic, "暂无歌词（播放歌曲后将自动匹配歌词写真）", cx)
-        } else {
-            let mut list = v_flex().w_full().gap(px(12.0)).items_start();
-
-            for (index, line) in self.lines.iter().enumerate() {
-                let active = current == Some(index);
-                let text = self.texts.get(index).cloned().unwrap_or_default();
-                let time_ms = line.time_ms;
-
-                list = list.child(
-                    div()
-                        .id(("lyric_line", index))
-                        .role(Role::Button)
-                        .cursor_pointer()
-                        .w_full()
-                        .py(px(4.0))
-                        .flex()
-                        .items_center()
-                        .gap(px(10.0))
-                        .on_click(cx.listener(move |this, _event, _window, _cx| {
-                            this.seek_to(time_ms);
-                        }))
-                        .child(
-                            div()
-                                .when(active, |this| {
-                                    this.text_2xl()
-                                        .font_weight(FontWeight::BOLD)
-                                        .text_color(hex_rgb(0x0284c7))
-                                })
-                                .when(!active, |this| {
-                                    this.text_base()
-                                        .font_weight(FontWeight::NORMAL)
-                                        .text_color(hex_rgb(0x94a3b8))
-                                        .hover(|s| s.text_color(hex_rgb(0x334155)))
-                                })
-                                .child(text),
-                        ),
-                );
-            }
-
-            div()
-                .id("lyrics-scroll-body")
-                .flex_1()
-                .min_h(px(0.0))
-                .w_full()
-                .pt(px(20.0))
-                .pb(px(80.0))
-                .overflow_y_scrollbar()
-                .child(list)
-                .into_any_element()
-        };
+        let lyric_stream = self.lyric_stream(current, cx);
 
         // 曲目信息与歌词主体
         let right_lyrics_section = v_flex()
@@ -415,5 +529,31 @@ impl Render for LyricsView {
                             }),
                     ),
             )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #![allow(clippy::pedantic)]
+
+    // 避免与 gpui_kit::* 宏冲突
+    use gpui_kit::{Bounds, Pixels, point, px, size};
+
+    use super::center_offset;
+
+    fn bounds(top: f32, height: f32) -> Bounds<Pixels> {
+        Bounds {
+            origin: point(px(0.0), px(top)),
+            size: size(px(300.0), px(height)),
+        }
+    }
+
+    #[test]
+    fn center_offset_puts_item_middle_on_viewport_middle() {
+        let viewport = bounds(100.0, 400.0);
+        // 行中线 320 在视口中线 300 下方 → 向上滚 20
+        assert_eq!(center_offset(viewport, bounds(300.0, 40.0)), px(-20.0));
+        // 行中线 220 在视口中线 300 上方 → 向下滚 80
+        assert_eq!(center_offset(viewport, bounds(200.0, 40.0)), px(80.0));
     }
 }
