@@ -4,7 +4,19 @@ targets = [{ triple = "x86_64-pc-windows-msvc" }]
 
 [advisories]
 version = 2
-ignore = []
+# 只 ignore 没有修复版本可上的告警，逐条写明依据 —— 有补丁的一律升级，不做整组降级。
+ignore = [
+  # gpui-kit 0.7.3 的传递依赖（gpui-base / gpui-component / 字体栈），上游无修复版，
+  # 只能等 gpui-kit 换实现。这四条是 unmaintained 告警，不是可利用漏洞。
+  "RUSTSEC-2024-0384", # instant：作者已建议改用 web-time
+  "RUSTSEC-2024-0436", # paste：仓库已归档
+  "RUSTSEC-2026-0206", # rustybuzz：维护者声明不再维护
+  "RUSTSEC-2026-0192", # ttf-parser：同上
+  # rsa 的 Marvin 攻击打的是「解密」的时序侧信道。本仓只用 RsaPublicKey 做
+  # pkcs1v15 / OAEP 加密（crates/proto/src/cipher.rs），没有私钥、不做解密，
+  # 不满足攻击前提；且该 crate 至今无修复版本。
+  "RUSTSEC-2023-0071",
+]
 
 [licenses]
 version = 2
