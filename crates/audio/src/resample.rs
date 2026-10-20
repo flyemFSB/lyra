@@ -113,8 +113,9 @@ impl Resampler {
     }
 }
 
-/// 一次性重采样整段 PCM 样本
-pub fn resample_all(samples: &[f32], channels: usize, input_rate: u32, output_rate: u32) -> Result<Vec<f32>, Error> {
+/// 一次性重采样整段 PCM 样本（仅供测试与离线工具使用）
+#[cfg(test)]
+fn resample_all(samples: &[f32], channels: usize, input_rate: u32, output_rate: u32) -> Result<Vec<f32>, Error> {
     if input_rate == output_rate {
         return Ok(samples.to_vec());
     }

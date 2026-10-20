@@ -13,7 +13,7 @@
   <img src="https://img.shields.io/badge/gui-GPUI-blue.svg" alt="GPUI" />
   <img src="https://img.shields.io/badge/platform-Windows-lightgrey.svg" alt="Platform Windows" />
   <img src="https://img.shields.io/badge/license-MIT-green.svg" alt="License" />
-  <img src="https://img.shields.io/badge/tests-208%20passed-brightgreen.svg" alt="Tests" />
+  <img src="https://img.shields.io/badge/tests-292%20passed-brightgreen.svg" alt="Tests" />
 </p>
 
 ---
@@ -84,7 +84,7 @@ flowchart TD
 | [`lyra-app`](crates/app) | 业务用例门面（`Kugou`）组装与 CLI 命令入口；Tokio 运行时句柄由入口注入，应用层不自建运行时 | `tokio`, `tracing` | 否 |
 | [`lyra-ui`](crates/ui) | GPUI 现代化桌面交互视图（歌单、搜索、电台、歌词、播放条、设置） | `gpui-kit` | 是 |
 | [`lyra`](crates/desktop) | 桌面端可执行程序入口，支持无参数启动 GUI 或带参数运行 CLI | `lyra-app`, `lyra-ui` | 是 |
-| [`xtask`](crates/xtask) | 开发与 CI 辅助任务：依赖树静态合规审计与真实上游端点连通性探测 | `anyhow`, `cargo_metadata` | 否 |
+| [`xtask`](crates/xtask) | 开发与 CI 辅助任务：依赖树静态合规审计与真实上游端点连通性探测 | `anyhow`, `sha2` | 否 |
 
 ---
 
@@ -146,7 +146,7 @@ cargo run -p lyra -- download <song_hash> [album_id] <output_file>
 ### 运行全工作区离线测试
 
 ```powershell
-# 运行全部 208 个测试（完全离线，基于 Mock 桩与确定性伪随机源）
+# 运行全部 292 个测试（完全离线，基于 Mock 桩与确定性伪随机源）
 cargo test --workspace
 ```
 

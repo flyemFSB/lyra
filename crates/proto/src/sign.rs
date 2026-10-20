@@ -1,24 +1,15 @@
 //! 签名算法实现（Android、Web、设备注册、signKey 与 signParamsKey）。
 
-use md5::{Digest as _, Md5};
-
+use crate::cipher::md5_hex_parts;
 use crate::consts::{SALT_MD5, SALT_REGISTER, SALT_SIGNKEY, SALT_WEB};
 use crate::params::Params;
-
-fn md5_concat(parts: &[&[u8]]) -> String {
-    let mut h = Md5::new();
-    for p in parts {
-        h.update(p);
-    }
-    hex::encode(h.finalize())
-}
 
 /// Android 端签名：md5(SALT_MD5 + 按 key 排序的键值对 + 请求体 + SALT_MD5)
 ///
 /// 排序规则见 [`Params::sorted_kv_by_key`]（方案 §5.1）。
 #[must_use]
 pub fn signature_android(params: &Params, body: &str) -> String {
-    md5_concat(&[
+    md5_hex_parts(&[
         SALT_MD5.as_bytes(),
         params.sorted_kv_by_key().as_bytes(),
         body.as_bytes(),
@@ -28,12 +19,12 @@ pub fn signature_android(params: &Params, body: &str) -> String {
 
 /// Web 端签名：md5(SALT_WEB + 排序键值对 + 请求体 + SALT_WEB)
 ///
-/// ⚠️ 当前工作区**没有**构造 `SignMode::Web` 的地方，
-/// 本函数暂未被生产路径使用；它实现的是「先拼 `k=v` 再整串排序」的 Web 规则
-/// （见 [`Params::sorted_kv`]），与 Android 的按键排序在「前缀 + 数字」键对上不同。
+/// ⚠️ 当前工作区**没有**调用方：唯一使用它的是协议黄金向量测试。
+/// 本函数实现的是「先拼 `k=v` 再整串排序」的 Web 规则（见 [`Params::sorted_kv`]），
+/// 与 Android 的按键排序在「前缀 + 数字」键对上不同。
 #[must_use]
 pub fn signature_web(params: &Params, body: &str) -> String {
-    md5_concat(&[
+    md5_hex_parts(&[
         SALT_WEB.as_bytes(),
         params.sorted_kv().as_bytes(),
         body.as_bytes(),
@@ -44,7 +35,7 @@ pub fn signature_web(params: &Params, body: &str) -> String {
 /// 设备注册签名：按参数值排序拼接后加盐计算 MD5
 #[must_use]
 pub fn signature_register(params: &Params) -> String {
-    md5_concat(&[
+    md5_hex_parts(&[
         SALT_REGISTER.as_bytes(),
         params.sorted_values().as_bytes(),
         SALT_REGISTER.as_bytes(),
@@ -54,7 +45,7 @@ pub fn signature_register(params: &Params) -> String {
 /// 取址授权 sign_key：md5(hash + SALT_SIGNKEY + appid + mid + userid)
 #[must_use]
 pub fn sign_key(hash: &str, mid: &str, userid: i64, appid: u32) -> String {
-    md5_concat(&[
+    md5_hex_parts(&[
         hash.as_bytes(),
         SALT_SIGNKEY.as_bytes(),
         appid.to_string().as_bytes(),
@@ -66,7 +57,7 @@ pub fn sign_key(hash: &str, mid: &str, userid: i64, appid: u32) -> String {
 /// 电台参数密钥 sign_params_key：md5(appid + SALT_MD5 + clientver + data)
 #[must_use]
 pub fn sign_params_key(data: i64, appid: u32, clientver: u32) -> String {
-    md5_concat(&[
+    md5_hex_parts(&[
         appid.to_string().as_bytes(),
         SALT_MD5.as_bytes(),
         clientver.to_string().as_bytes(),

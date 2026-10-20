@@ -1,5 +1,5 @@
 [alias]
-xtask = "run --package xtask --"
+xtask = "run --package xtask --locked --"
 # 不加 --all-features：避免开启冲突的测试/实验后端
 lint = "clippy --workspace --all-targets -- -D warnings"
 

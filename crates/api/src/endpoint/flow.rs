@@ -114,26 +114,6 @@ pub async fn home_discover(api: &Api, pagesize: u32, today_play_num: u32) -> Res
     Ok(Page::single(songs_of(&value)))
 }
 
-/// 获取场景卡片推荐歌曲
-pub async fn card(api: &Api, card_id: u32, pagesize: u32) -> Result<Page<Song>> {
-    let body = serde_json::json!({
-        "tagid": "",
-        "u_info": "",
-        "source_mixsong": "",
-    });
-    let spec = RequestSpec::post("/youth/v1/song/single_card_recommend")
-        .body(body)
-        .param("card_id", card_id)
-        .param("area_code", 1)
-        .param("platform", "ios")
-        .param("module_id", 1)
-        .param("ver", "v2")
-        .param("pagesize", if pagesize == 0 { 30 } else { pagesize })
-        .param("clientver", 11_490);
-    let value = api.call(spec, Freshness::FLOW).await?;
-    Ok(Page::single(songs_of(&value)))
-}
-
 /// 从响应体多变结构中解析歌曲列表
 fn songs_of(value: &Value) -> Vec<Song> {
     codec::find_array(value, &["song_list", "songs", "items", "list", "data"])
@@ -227,23 +207,5 @@ mod tests {
         assert_eq!(clientver.1, "20809", "必须覆盖 lite 的 11440");
         let platform = request.query.iter().find(|(k, _)| k == "platform").unwrap();
         assert_eq!(platform.1, "android");
-    }
-
-    #[tokio::test]
-    async fn card_recommendation_sends_card_id() {
-        let mock = Arc::new(MockTransport::new());
-        mock.on_json(
-            "/youth/v1/song/single_card_recommend",
-            &serde_json::json!({"status": 1, "data": {"songs": []}}),
-        );
-        let api = api(mock.clone());
-        card(&api, 3005, 30).await.unwrap();
-        let request = mock.last_request().unwrap();
-        assert_eq!(
-            request.url,
-            "https://gateway.kugou.com/youth/v1/song/single_card_recommend"
-        );
-        assert_eq!(request.query.iter().find(|(k, _)| k == "card_id").unwrap().1, "3005");
-        assert_eq!(request.query.iter().find(|(k, _)| k == "clientver").unwrap().1, "11490");
     }
 }

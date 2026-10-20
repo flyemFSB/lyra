@@ -56,8 +56,6 @@ pub const KG_REC: &str = "1";
 pub const KG_RF: &str = "B9EDA08A64250DEFFBCADDEE00F8F25F";
 /// 登录版本标识 gitversion
 pub const GITVERSION: &str = "5f0b7c4";
-/// 登录固定 t3 占位符
-pub const T3: &str = "MCwwLDAsMCwwLDAsMCwwLDA=";
 
 /// 短信登录 t1 AES 密钥
 pub const T1_KEY: &str = "5e4ef500e9597fe004bd09a46d8add98";
@@ -77,5 +75,3 @@ pub const KRC_KEY: [u8; 16] = [64, 71, 97, 119, 94, 50, 116, 71, 81, 54, 49, 45,
 
 /// 大写字母数字字符集
 pub const CHARSET_UPPER: &[u8; 36] = b"1234567890ABCDEFGHIJKLMNOPQRSTUVWXYZ";
-/// Base62 字符集
-pub const CHARSET_B62: &[u8; 62] = b"0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ";

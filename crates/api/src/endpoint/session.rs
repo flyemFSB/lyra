@@ -10,7 +10,7 @@ use crate::client::Api;
 use crate::codec;
 use crate::error::{Error, Result};
 use crate::spec::RequestSpec;
-use crate::spec::{CAPTCHA_BASE, LOGIN_GATEWAY, USER_SERVICE, VERIFY_BASE, now_millis};
+use crate::spec::{CAPTCHA_BASE, LOGIN_GATEWAY, USER_SERVICE, now_millis};
 
 /// 登录结果
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -241,38 +241,6 @@ pub async fn register_dev(api: &Api, extra: Option<Value>) -> Result<String> {
     Ok(dfid)
 }
 
-/// 提交人机验证或二次校验验证码
-pub async fn verify_user_info(api: &Api, sid: &str, edt: &str, verifycode: &str, v_type: i64) -> Result<Value> {
-    let session = api.session();
-    let encrypted = if v_type == 32 {
-        aes_encrypt_derived(&serde_json::json!({ "code": verifycode }).to_string())?
-    } else {
-        aes_encrypt_derived("{}")?
-    };
-    let pk_plain = serde_json::json!({ "key": encrypted.key }).to_string();
-
-    let body = serde_json::json!({
-        "eventid": Value::Null,
-        "userid": session.userid(),
-        "platid": 2,
-        "v_type": v_type,
-        "wasm": 1,
-        "i": "",
-        "sid": sid,
-        "edt": edt,
-        "verifycode": verifycode,
-        "code": verifycode,
-        "pk": rsa_raw_encrypt_hex(pk_plain.as_bytes(), RSA_PUBLIC)?.to_uppercase(),
-        "params": encrypted.hex,
-    });
-
-    let spec = RequestSpec::post("/v4/verify_user_info")
-        .base(VERIFY_BASE)
-        .param("clientver", 11_510)
-        .body(body)
-        .timeout(std::time::Duration::from_secs(30));
-    api.call_auth(spec).await
-}
 #[cfg(test)]
 mod tests {
     #![allow(clippy::unwrap_used)]

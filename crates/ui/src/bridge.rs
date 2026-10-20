@@ -56,8 +56,21 @@ pub(crate) enum Msg {
     TrackRemoved(Result<(), String>),
     /// 当前曲目播放自然结束
     AudioEnded,
+    /// 播放直链解析成功（附带请求序号，过期响应必须丢弃）
+    PlayReady {
+        /// 发起请求时的序号
+        seq: u64,
+        /// 发起请求时的歌曲哈希
+        hash: String,
+        /// 待播放的曲目
+        track: lyra_audio::TrackRef,
+        /// 试听片段时长（毫秒，0 表示完整曲）
+        preview_ms: u64,
+    },
     /// 播放直链解析失败
-    AudioFailed {
+    PlayFailed {
+        /// 发起请求时的序号
+        seq: u64,
         /// 发起请求时的歌曲哈希
         hash: String,
         /// 错误描述

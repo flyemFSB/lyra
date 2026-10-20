@@ -20,42 +20,34 @@ use crate::theme::{
     ACCENT_GREEN, ACCENT_GREEN_HOVER, ACCENT_GREEN_LIGHT, CARD_BG, CARD_BORDER, TEXT_MUTED, TEXT_PRIMARY, badge,
     cover_box,
 };
+use crate::views::tracks::{TrackRow, build_rows};
 
 pub(crate) use lyra_app::PlayMode;
 
-/// 播放模式 UI 展示与切换扩展
-pub(crate) trait PlayModeUi {
-    /// 显示文本标签
-    fn label(self) -> &'static str;
-    /// 对应图标
-    fn icon(self) -> IconName;
-    /// 循环切换至下一模式
-    fn next(self) -> Self;
+/// 播放模式的展示文本
+pub(crate) fn mode_label(mode: PlayMode) -> &'static str {
+    match mode {
+        PlayMode::ListLoop => "列表循环",
+        PlayMode::SingleLoop => "单曲循环",
+        PlayMode::Shuffle => "随机播放",
+    }
 }
 
-impl PlayModeUi for PlayMode {
-    fn label(self) -> &'static str {
-        match self {
-            Self::ListLoop => "列表循环",
-            Self::SingleLoop => "单曲循环",
-            Self::Shuffle => "随机播放",
-        }
+/// 播放模式对应的图标
+pub(crate) fn mode_icon(mode: PlayMode) -> IconName {
+    match mode {
+        PlayMode::ListLoop => IconName::Repeat,
+        PlayMode::SingleLoop => IconName::Repeat1,
+        PlayMode::Shuffle => IconName::Shuffle,
     }
+}
 
-    fn icon(self) -> IconName {
-        match self {
-            Self::ListLoop => IconName::Repeat,
-            Self::SingleLoop => IconName::Repeat1,
-            Self::Shuffle => IconName::Shuffle,
-        }
-    }
-
-    fn next(self) -> Self {
-        match self {
-            Self::ListLoop => Self::SingleLoop,
-            Self::SingleLoop => Self::Shuffle,
-            Self::Shuffle => Self::ListLoop,
-        }
+/// 循环切换至下一播放模式
+pub(crate) fn next_mode(mode: PlayMode) -> PlayMode {
+    match mode {
+        PlayMode::ListLoop => PlayMode::SingleLoop,
+        PlayMode::SingleLoop => PlayMode::Shuffle,
+        PlayMode::Shuffle => PlayMode::ListLoop,
     }
 }
 
@@ -67,6 +59,8 @@ pub(crate) struct PlayerModel {
     pub(crate) has_engine: bool,
     /// 当前播放曲目队列
     pub(crate) queue: Arc<Vec<Song>>,
+    /// 队列的预格式化展示模型（渲染期零分配）
+    pub(crate) rows: Arc<Vec<TrackRow>>,
     /// 当前播放曲目在队列中的索引
     pub(crate) index: usize,
     /// 当前播放模式
@@ -91,6 +85,7 @@ impl PlayerModel {
             },
             has_engine,
             queue: Arc::new(Vec::new()),
+            rows: Arc::new(Vec::new()),
             index: 0,
             mode,
             // 用当前时间播种一次；之后完全由自身状态推进
@@ -115,7 +110,7 @@ impl PlayerModel {
 
     /// 循环切换播放模式
     pub(crate) fn cycle_mode(&mut self) -> PlayMode {
-        self.mode = self.mode.next();
+        self.mode = next_mode(self.mode);
         self.mode
     }
 
@@ -188,7 +183,15 @@ impl PlayerModel {
 
     /// 设置播放队列与当前索引
     pub(crate) fn set_queue(&mut self, queue: Arc<Vec<Song>>, index: usize) {
+        // 展示文本在这里预格式化：队列抽屉每帧都要渲染，不能在渲染期拼字符串
+        self.rows = Arc::new(build_rows(&queue));
         self.queue = queue;
+        self.index = index;
+        self.snapshot.position_ms = 0;
+    }
+
+    /// 只切换当前索引（进度归零，避免沿用上一首的位置）
+    pub(crate) fn set_index(&mut self, index: usize) {
         self.index = index;
         self.snapshot.position_ms = 0;
     }
@@ -381,7 +384,7 @@ impl PlayerBar {
         }
         if mode != self.last_mode {
             self.last_mode = mode;
-            self.mode_tip = SharedString::from(format!("播放模式：{}", mode.label()));
+            self.mode_tip = SharedString::from(format!("播放模式：{}", mode_label(mode)));
         }
 
         if changed || retitled {
@@ -413,10 +416,7 @@ impl PlayerBar {
     fn persist_mode(&self, mode: PlayMode) {
         let app = self.backend.app();
         self.backend.spawn(async move {
-            match app.settings().and_then(|mut settings| {
-                settings.play_mode = mode;
-                app.set_settings(&settings)
-            }) {
+            match app.update_settings(|settings| settings.play_mode = mode) {
                 Ok(()) => Msg::Noop,
                 Err(error) => Msg::Toast(format!("保存播放模式失败: {error}")),
             }
@@ -432,10 +432,7 @@ impl PlayerBar {
         if persist {
             let app = self.backend.app();
             self.backend.spawn(async move {
-                match app.settings().and_then(|mut settings| {
-                    settings.volume = value;
-                    app.set_settings(&settings)
-                }) {
+                match app.update_settings(|settings| settings.volume = value) {
                     Ok(()) => Msg::Noop,
                     Err(error) => Msg::Toast(format!("保存音量失败: {error}")),
                 }
@@ -516,7 +513,7 @@ impl Render for PlayerBar {
                                 }).ok();
                             })
                             .hover(|s| s.opacity(0.85))
-                            .child(cover_box(self.title.as_ref(), 46.0, cx)),
+                            .child(cover_box(self.title.as_ref(), 46.0)),
                     )
                     .child(
                         v_flex()
@@ -583,7 +580,7 @@ impl Render for PlayerBar {
                                 Button::new("mode_toggle")
                                     .ghost()
                                     .small()
-                                    .icon(play_mode.icon())
+                                    .icon(mode_icon(play_mode))
                                     .tooltip(self.mode_tip.clone())
                                     .on_click(cx.listener(|this, _event, _window, cx| {
                                         let next = this.player.update(cx, |model, cx| {
@@ -592,7 +589,7 @@ impl Render for PlayerBar {
                                             m
                                         });
                                         this.persist_mode(next);
-                                        this.backend.send(Msg::Toast(format!("已切换为：{}", next.label())));
+                                        this.backend.send(Msg::Toast(format!("已切换为：{}", mode_label(next))));
                                     })),
                             )
                             .child(

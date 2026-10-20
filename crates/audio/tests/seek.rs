@@ -6,7 +6,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use lyra_audio::{AudioConfig, Engine, FetchResult, Fetcher, ReadSeek, State, TrackRef, spawn_with};
+use lyra_audio::{Engine, FetchResult, Fetcher, ReadSeek, State, TrackRef, spawn};
 
 /// 本地文件抓取器
 struct FileFetcher(PathBuf);
@@ -19,12 +19,7 @@ impl Fetcher for FileFetcher {
 
 /// 创建本地文件播放引擎（无设备时返回 None）
 fn engine_for(path: &Path) -> Option<Engine> {
-    spawn_with(
-        Arc::new(FileFetcher(path.to_path_buf())),
-        Box::new(|_event| {}),
-        AudioConfig::default(),
-    )
-    .ok()
+    spawn(Arc::new(FileFetcher(path.to_path_buf())), Box::new(|_event| {})).ok()
 }
 
 /// 构造曲目信息

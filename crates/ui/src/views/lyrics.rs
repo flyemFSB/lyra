@@ -16,7 +16,7 @@ use lyra_api::model::LyricLine;
 use crate::bridge::Backend;
 use crate::format::lyric_index;
 use crate::shell::AppShell;
-use crate::theme::{CARD_BORDER, badge, cover_box, hex_rgb, notice_with_icon};
+use crate::theme::{CARD_BG, CARD_BORDER, badge, cover_box, hex_rgb, notice_with_icon};
 use crate::views::player::PlayerModel;
 
 /// 歌词视图
@@ -209,10 +209,10 @@ impl LyricsView {
     /// 渲染歌词流：当前行固定在滚动区正中，切换时平滑滚过去并淡入
     fn lyric_stream(&self, current: Option<usize>, cx: &Context<Self>) -> AnyElement {
         if let Some(status) = &self.status {
-            return notice_with_icon(IconName::CircleAlert, status.clone(), cx).into_any_element();
+            return notice_with_icon(IconName::CircleAlert, status.clone()).into_any_element();
         }
         if self.lines.is_empty() {
-            return notice_with_icon(IconName::Mic, "暂无歌词（播放歌曲后将自动匹配歌词写真）", cx).into_any_element();
+            return notice_with_icon(IconName::Mic, "暂无歌词（播放歌曲后将自动匹配歌词写真）").into_any_element();
         }
 
         // 上下各留半个视口，首尾歌词也能停到正中
@@ -307,7 +307,7 @@ impl LyricsView {
     }
 
     /// 渲染黑胶唱机拟态舞台
-    fn vinyl_turntable_stage(&self, is_playing: bool, cx: &Context<Self>) -> impl IntoElement {
+    fn vinyl_turntable_stage(&self, is_playing: bool) -> impl IntoElement {
         let title_label = self.title.as_ref();
 
         div()
@@ -384,12 +384,12 @@ impl LyricsView {
                                                     .rounded_full()
                                                     .overflow_hidden()
                                                     .border_2()
-                                                    .border_color(hex_rgb(0xffffff))
+                                                    .border_color(CARD_BG)
                                                     .shadow_md()
                                                     .flex()
                                                     .items_center()
                                                     .justify_center()
-                                                    .child(cover_box(title_label, 160.0, cx)),
+                                                    .child(cover_box(title_label, 160.0)),
                                             ),
                                     ),
                             ),
@@ -400,7 +400,7 @@ impl LyricsView {
                             .absolute()
                             .size(px(26.0))
                             .rounded_full()
-                            .bg(hex_rgb(0xffffff))
+                            .bg(CARD_BG)
                             .border_2()
                             .border_color(hex_rgb(0xcfd8dc))
                             .shadow_sm()
@@ -438,7 +438,7 @@ impl LyricsView {
                                     .right_0()
                                     .size(px(32.0))
                                     .rounded_full()
-                                    .bg(hex_rgb(0xffffff))
+                                    .bg(CARD_BG)
                                     .border_1()
                                     .border_color(hex_rgb(0xe2e8f0))
                                     .shadow_md()
@@ -474,7 +474,7 @@ impl LyricsView {
                                     .w(px(26.0))
                                     .h(px(16.0))
                                     .rounded(px(5.0))
-                                    .bg(hex_rgb(0xffffff))
+                                    .bg(CARD_BG)
                                     .border_1()
                                     .border_color(hex_rgb(0xcfd8dc))
                                     .shadow_md()
@@ -509,7 +509,7 @@ impl Render for LyricsView {
         let shell_exit = self.shell.clone();
 
         // 唱片区域
-        let turntable_stage = self.vinyl_turntable_stage(is_playing, cx);
+        let turntable_stage = self.vinyl_turntable_stage(is_playing);
 
         // 歌词流区域
         let lyric_stream = self.lyric_stream(current, cx);

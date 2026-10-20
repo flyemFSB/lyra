@@ -11,8 +11,8 @@ use lyra_api::model::VipStatus;
 use crate::bridge::{Backend, Msg};
 use crate::format::{QUALITY_CHOICES, format_bytes, quality_label};
 use crate::theme::{
-    ACCENT_GREEN, ACCENT_GREEN_HOVER, ACCENT_GREEN_LIGHT, CARD_BG, CARD_BORDER, TEXT_FAINT, TEXT_MUTED, TEXT_PRIMARY,
-    VIP_GOLD, badge, hex_rgb, title,
+    ACCENT_GREEN, ACCENT_GREEN_HOVER, ACCENT_GREEN_LIGHT, CANVAS_BG, CARD_BG, CARD_BORDER, TEXT_FAINT, TEXT_MUTED,
+    TEXT_PRIMARY, VIP_GOLD, VIP_GOLD_LIGHT, badge, hex_rgb, title,
 };
 
 /// 缓存容量预设选项
@@ -85,6 +85,14 @@ impl SettingsView {
             .spawn(async move { Msg::Vip(app.vip().await.map_err(|error| error.to_string())) });
     }
 
+    /// 重新加载会员状态（顶栏「刷新当前数据」）
+    ///
+    /// `ensure` 带 `loaded` 闩锁：直接复用它会让刷新按钮永远无效。
+    pub(crate) fn reload(&mut self, cx: &mut Context<Self>) {
+        self.loaded = false;
+        self.ensure(cx);
+    }
+
     /// 处理会员状态响应结果
     pub(crate) fn on_vip(&mut self, result: Result<VipStatus, String>, cx: &mut Context<Self>) {
         match result {
@@ -124,11 +132,7 @@ impl SettingsView {
         let chosen = self.quality.clone();
         self.backend.spawn(async move {
             Msg::SettingsSaved(
-                app.settings()
-                    .and_then(|mut settings| {
-                        settings.quality = chosen;
-                        app.set_settings(&settings)
-                    })
+                app.update_settings(|settings| settings.quality = chosen)
                     .map_err(|error| error.to_string()),
             )
         });
@@ -141,12 +145,10 @@ impl SettingsView {
         let app = self.backend.app();
         self.backend.spawn(async move {
             Msg::SettingsSaved(
-                app.settings()
-                    .and_then(|mut settings| {
-                        settings.cache_dir = if value.trim().is_empty() { None } else { Some(value) };
-                        app.set_settings(&settings)
-                    })
-                    .map_err(|error| error.to_string()),
+                app.update_settings(|settings| {
+                    settings.cache_dir = if value.trim().is_empty() { None } else { Some(value) };
+                })
+                .map_err(|error| error.to_string()),
             )
         });
     }
@@ -157,11 +159,7 @@ impl SettingsView {
         let app = self.backend.app();
         self.backend.spawn(async move {
             Msg::SettingsSaved(
-                app.settings()
-                    .and_then(|mut settings| {
-                        settings.max_cache_bytes = bytes;
-                        app.set_settings(&settings)
-                    })
+                app.update_settings(|settings| settings.max_cache_bytes = bytes)
                     .map_err(|error| error.to_string()),
             )
         });
@@ -187,8 +185,10 @@ impl SettingsView {
     fn logout(&mut self) {
         let app = self.backend.app();
         self.backend.spawn(async move {
-            app.logout()
-                .map_or_else(|error| Msg::Toast(format!("登出失败: {error}")), |()| Msg::LoggedOut)
+            match app.logout().await {
+                Ok(()) => Msg::LoggedOut,
+                Err(error) => Msg::Toast(format!("登出失败: {error}")),
+            }
         });
     }
 
@@ -256,7 +256,7 @@ impl Render for SettingsView {
                     .w(px(44.0))
                     .h(px(44.0))
                     .rounded_full()
-                    .bg(hex_rgb(0xfef3c7))
+                    .bg(VIP_GOLD_LIGHT)
                     .border_1()
                     .border_color(hex_rgb(0xfcd34d))
                     .flex()
@@ -348,7 +348,7 @@ impl Render for SettingsView {
                     .px_3()
                     .py(px(4.0))
                     .rounded(px(10.0))
-                    .bg(hex_rgb(0xf2f4f7))
+                    .bg(CANVAS_BG)
                     .border_1()
                     .border_color(CARD_BORDER)
                     .gap(px(8.0))
@@ -411,7 +411,7 @@ impl Render for SettingsView {
                     .py_4()
                     .border_b_1()
                     .border_color(CARD_BORDER)
-                    .child(title("设置", cx)),
+                    .child(title("设置")),
             )
             .child(
                 v_flex()

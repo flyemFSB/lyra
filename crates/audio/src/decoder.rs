@@ -19,27 +19,27 @@ use crate::{Error, ReadSeek};
 /// 引擎会误判为"正常播完"并切到下一首。这里给一个上限把它变成显式失败。
 const MAX_DECODE_ERRORS: u32 = 32;
 
-/// 解码后的 PCM 音频数据
+/// 解码后的 PCM 音频数据（仅供测试与离线工具使用）
+#[cfg(test)]
 #[derive(Debug, Clone)]
-pub struct Decoded {
+struct Decoded {
     /// 采样率（Hz）
-    pub sample_rate: u32,
+    sample_rate: u32,
     /// 声道数
-    pub channels: usize,
+    channels: usize,
     /// 交织 PCM 样本
-    pub samples: Vec<f32>,
+    samples: Vec<f32>,
 }
 
+#[cfg(test)]
 impl Decoded {
     /// 音频帧数（样本数 / 声道数）
-    #[must_use]
-    pub fn frames(&self) -> usize {
+    fn frames(&self) -> usize {
         self.samples.len().checked_div(self.channels).unwrap_or(0)
     }
 
     /// 音频时长（毫秒）
-    #[must_use]
-    pub fn duration_ms(&self) -> u64 {
+    fn duration_ms(&self) -> u64 {
         if self.sample_rate == 0 {
             0
         } else {
@@ -235,8 +235,9 @@ fn interleave(audio: &AudioBufferRef<'_>) -> Option<(Vec<f32>, usize, u32)> {
     Some((buf.samples().to_vec(), channels, sample_rate))
 }
 
-/// 一次性解码整条音频流
-pub fn decode_all(reader: Box<dyn ReadSeek + Send>) -> Result<Decoded, Error> {
+/// 一次性解码整条音频流（仅供测试与离线工具使用）
+#[cfg(test)]
+fn decode_all(reader: Box<dyn ReadSeek + Send>) -> Result<Decoded, Error> {
     let mut decoder = Decoder::open(reader)?;
     let sample_rate = decoder.sample_rate();
     let channels = decoder.channels();

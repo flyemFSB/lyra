@@ -18,7 +18,7 @@ use crate::theme::{
     TEXT_FAINT, TEXT_MUTED, TEXT_PRIMARY, VIP_GOLD, notice_with_icon, row_sizes, title,
 };
 use crate::views::player::PlayerModel;
-use crate::views::tracks::{TrackRow, build_rows, track_row};
+use crate::views::tracks::{RowContext, TrackRow, build_rows, current_play_state, song_row};
 
 /// 电台视图
 pub(crate) struct RadioView {
@@ -41,8 +41,10 @@ pub(crate) struct RadioView {
     loading_catalog: bool,
     loading_songs: bool,
     loaded: bool,
-    /// 分类与频道加载错误信息
-    catalog_error: Option<SharedString>,
+    /// 电台分类加载错误信息
+    classes_error: Option<SharedString>,
+    /// 电台频道列表加载错误信息
+    stations_error: Option<SharedString>,
     /// 频道歌曲加载错误信息
     songs_error: Option<SharedString>,
     /// 请求序号（用于丢弃过期响应）
@@ -78,7 +80,8 @@ impl RadioView {
             loading_catalog: false,
             loading_songs: false,
             loaded: false,
-            catalog_error: None,
+            classes_error: None,
+            stations_error: None,
             songs_error: None,
             request_seq: 0,
             _sub: sub,
@@ -100,7 +103,8 @@ impl RadioView {
         self.loading_catalog = false;
         self.loading_songs = false;
         self.loaded = false;
-        self.catalog_error = None;
+        self.classes_error = None;
+        self.stations_error = None;
         self.songs_error = None;
         self.request_seq += 1;
         cx.notify();
@@ -137,7 +141,8 @@ impl RadioView {
     fn fetch_catalog(&mut self, cx: &mut Context<Self>) {
         self.loading_catalog = true;
         self.loaded = false;
-        self.catalog_error = None;
+        self.classes_error = None;
+        self.stations_error = None;
         cx.notify();
         let app = self.backend.app();
         let classes_app = app.clone();
@@ -158,9 +163,9 @@ impl RadioView {
                     .map(|class| SharedString::from(format!("{}（{}）", class.name, class.count)))
                     .collect();
                 self.classes = classes;
-                self.catalog_error = None;
+                self.classes_error = None;
             }
-            Err(error) => self.catalog_error = Some(error.into()),
+            Err(error) => self.classes_error = Some(error.into()),
         }
         cx.notify();
     }
@@ -173,12 +178,12 @@ impl RadioView {
             Ok(stations) => {
                 self.stations = Arc::new(stations);
                 self.rebuild_filtered();
-                self.catalog_error = None;
+                self.stations_error = None;
                 if self.station_name.is_none() && !self.filtered.is_empty() {
                     self.select_station(0, cx);
                 }
             }
-            Err(error) => self.catalog_error = Some(error.into()),
+            Err(error) => self.stations_error = Some(error.into()),
         }
         cx.notify();
     }
@@ -210,6 +215,17 @@ impl RadioView {
     fn select_class(&mut self, classid: Option<String>, cx: &mut Context<Self>) {
         self.selected_class = classid;
         self.rebuild_filtered();
+        // 分类变了：原先选中的频道可能已不在该分类下，必须重新选一个，
+        // 否则下面的曲目列表还停留在上一个分类的频道上。
+        self.station_name = None;
+        if self.filtered.is_empty() {
+            self.songs = Arc::new(Vec::new());
+            self.rows = Arc::new(Vec::new());
+            self.sizes = row_sizes(0);
+            self.songs_error = None;
+        } else {
+            self.select_station(0, cx);
+        }
         cx.notify();
     }
 
@@ -236,26 +252,6 @@ impl RadioView {
                 app.station_songs(&fmid, 0).await.map_err(|error| error.to_string()),
             )
         });
-    }
-
-    /// 渲染单首曲目行
-    fn row(&self, index: usize, cur_hash: Option<&str>, is_playing: bool, cx: &App) -> AnyElement {
-        let this_hash = self.songs.get(index).map(|s| s.hash.as_str());
-        let is_current = cur_hash.is_some() && cur_hash == this_hash;
-        let Some(row) = self.rows.get(index) else {
-            return div().into_any_element();
-        };
-        track_row(
-            index,
-            row,
-            &self.songs,
-            &self.shell,
-            &self.backend,
-            None,
-            is_current,
-            is_playing,
-            cx,
-        )
     }
 
     /// 渲染分类标签栏
@@ -321,14 +317,16 @@ impl RadioView {
             return div()
                 .h(px(140.0))
                 .w_full()
-                .child(notice_with_icon(IconName::RefreshCw, "载入电台频道中…", cx))
+                .child(notice_with_icon(IconName::RefreshCw, "载入电台频道中…"))
                 .into_any_element();
         }
-        if let Some(error) = &self.catalog_error {
+        // 分类与频道是两路独立请求：错误必须分别展示，
+        // 否则其中一路失败会被另一路成功清空。
+        if let Some(error) = self.classes_error.as_ref().or(self.stations_error.as_ref()) {
             return div()
                 .h(px(140.0))
                 .w_full()
-                .child(notice_with_icon(IconName::CircleAlert, error.clone(), cx))
+                .child(notice_with_icon(IconName::CircleAlert, error.clone()))
                 .into_any_element();
         }
 
@@ -426,7 +424,6 @@ impl Render for RadioView {
                 self.station_name
                     .clone()
                     .unwrap_or_else(|| SharedString::new_static("请选择上方电台频道")),
-                cx,
             ))
             .child(
                 div()
@@ -454,11 +451,11 @@ impl Render for RadioView {
         }
 
         let song_body = if self.loading_songs {
-            notice_with_icon(IconName::RefreshCw, "正在调频载入频道歌曲…", cx)
+            notice_with_icon(IconName::RefreshCw, "正在调频载入频道歌曲…")
         } else if let Some(error) = &self.songs_error {
-            notice_with_icon(IconName::CircleAlert, error.clone(), cx)
+            notice_with_icon(IconName::CircleAlert, error.clone())
         } else if self.songs.is_empty() {
-            notice_with_icon(IconName::Radio, "点击上方电台卡片即可收听实时频道", cx)
+            notice_with_icon(IconName::Radio, "点击上方电台卡片即可收听实时频道")
         } else {
             let this = cx.entity();
             let sizes = self.sizes.clone();
@@ -469,15 +466,21 @@ impl Render for RadioView {
                 move |view, range, _window, cx| {
                     let app: &App = cx;
                     // 播放器状态整批读取一次，避免每行都做一次实体读取
-                    let (cur_hash, is_playing) = {
-                        let model = view.player.read(app);
-                        (
-                            model.current_song().map(|s| s.hash.clone()),
-                            model.snapshot.state == lyra_audio::State::Playing,
-                        )
-                    };
+                    let (cur_hash, is_playing) = current_play_state(&view.player, app);
                     range
-                        .map(|index| view.row(index, cur_hash.as_deref(), is_playing, app))
+                        .map(|index| {
+                            song_row(
+                                index,
+                                &RowContext {
+                                    queue: &view.songs,
+                                    rows: &view.rows,
+                                    shell: &view.shell,
+                                    backend: &view.backend,
+                                },
+                                cur_hash.as_deref(),
+                                is_playing,
+                            )
+                        })
                         .collect::<Vec<_>>()
                 },
             )

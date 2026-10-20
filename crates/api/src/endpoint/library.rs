@@ -1,16 +1,12 @@
 //! 音乐库与用户信息端点。
 
-use lyra_proto::consts::RSA_PUBLIC;
-use lyra_proto::rsa_raw_encrypt_hex;
-use serde_json::Value;
-
 use crate::cache::Freshness;
 use crate::client::Api;
 use crate::codec;
 use crate::error::Result;
 use crate::model::{Page, Playlist, Song};
 use crate::spec::RequestSpec;
-use crate::spec::now_millis;
+use serde_json::Value;
 
 /// 获取当前登录用户歌单列表
 pub async fn playlists(api: &Api) -> Result<Vec<Playlist>> {
@@ -73,32 +69,6 @@ pub async fn playlist_tracks(api: &Api, global_collection_id: &str, page: u32, p
 pub fn invalidate_playlist_cache(api: &Api, _global_collection_id: &str) {
     api.cache().invalidate_prefix("/pubsongs/v2/get_other_list_file_nofilt");
     api.cache().invalidate_prefix("/v7/get_all_list");
-}
-
-/// 获取当前登录用户个人资料
-pub async fn user_detail(api: &Api) -> Result<Value> {
-    let session = api.session();
-    crate::spec::ensure_logged_in(&session)?;
-    let clienttime = now_millis() / 1000;
-    let p = rsa_raw_encrypt_hex(
-        serde_json::json!({ "token": session.token(), "clienttime": clienttime })
-            .to_string()
-            .as_bytes(),
-        RSA_PUBLIC,
-    )?
-    .to_uppercase();
-
-    let body = serde_json::json!({
-        "visit_time": clienttime,
-        "usertype": 1,
-        "p": p,
-        "userid": session.userid(),
-    });
-    let spec = RequestSpec::post("/v3/get_my_info")
-        .body(body)
-        .param("plat", 1)
-        .header("x-router", "usercenter.kugou.com");
-    api.call(spec, Freshness::ACCOUNT).await
 }
 
 #[cfg(test)]

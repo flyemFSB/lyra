@@ -282,12 +282,6 @@ impl BlobCache {
         }
     }
 
-    /// 缓存根目录
-    #[must_use]
-    pub fn root(&self) -> &Path {
-        &self.root
-    }
-
     /// 获取当前容量上限
     #[must_use]
     pub fn max_bytes(&self) -> u64 {
@@ -297,9 +291,9 @@ impl BlobCache {
     /// 设置容量上限并触发超额淘汰
     pub fn set_max_bytes(&self, bytes: u64) {
         self.max_bytes.store(bytes, Ordering::Relaxed);
-        if self.quota_bytes() > bytes {
-            self.evict_oldest_first(bytes);
-        }
+        // 淘汰内部已按配额算好总量，超限时才会真正删文件：
+        // 这里必须复用同一次遍历，否则改一次上限要扫两遍缓存目录。
+        self.evict_oldest_first(bytes);
     }
 
     /// 校验路径片段字符安全性
@@ -376,13 +370,28 @@ impl BlobCache {
     /// 获取参与容量配额的字节数（不含 `.part` 临时文件）
     ///
     /// 临时文件随时会被改名或删除，计入配额会误伤已缓存的完整文件。
-    fn quota_bytes(&self) -> u64 {
-        walk_files(&self.root)
-            .into_iter()
-            .filter(|path| !is_part_file(path))
-            .filter_map(|path| std::fs::metadata(&path).ok())
-            .map(|meta| meta.len())
+    #[must_use]
+    pub fn quota_bytes(&self) -> u64 {
+        self.cached_files()
+            .iter()
+            .filter(|(_, _, path)| !is_part_file(path))
+            .map(|(_, len, _)| *len)
             .sum()
+    }
+
+    /// 收集缓存目录下的文件（跳过符号链接与在途写入的临时文件）
+    fn cached_files(&self) -> Vec<(std::time::SystemTime, u64, PathBuf)> {
+        let mut files: Vec<(std::time::SystemTime, u64, PathBuf)> = walk_files(&self.root)
+            .into_iter()
+            .filter(|path| !self.is_being_written(path))
+            .filter_map(|path| {
+                let meta = std::fs::metadata(&path).ok()?;
+                Some((meta.modified().ok()?, meta.len(), path))
+            })
+            .collect();
+        // 按修改时间与路径排序保证确定性
+        files.sort_by(|a, b| a.0.cmp(&b.0).then_with(|| a.2.cmp(&b.2)));
+        files
     }
 
     /// 检查指定路径是否为当前在途写入的临时文件
@@ -397,26 +406,32 @@ impl BlobCache {
     ///
     /// 这里的“旧”指文件修改时间（下载时间）：先下载的先被淘汰。
     /// 本缓存不记录访问时间，因此不是按最近访问排序的 LRU。
+    ///
+    /// 配额只统计正式缓存文件；下载中断留下的孤儿 `.part` 临时文件一律回收。
     pub fn evict_oldest_first(&self, target_bytes: u64) -> u64 {
-        let mut files: Vec<(std::time::SystemTime, u64, PathBuf)> = walk_files(&self.root)
-            .into_iter()
-            .filter(|path| !self.is_being_written(path))
-            .filter_map(|path| {
-                let meta = std::fs::metadata(&path).ok()?;
-                Some((meta.modified().ok()?, meta.len(), path))
-            })
-            .collect();
-        // 按修改时间与路径排序保证确定性
-        files.sort_by(|a, b| a.0.cmp(&b.0).then_with(|| a.2.cmp(&b.2)));
-
-        let mut total: u64 = files.iter().map(|(_, len, _)| *len).sum();
+        let files = self.cached_files();
         let mut freed = 0;
-        for (_, len, path) in files {
+        // 先回收孤儿临时文件：它们是下载中断的残留，永远没有存在价值
+        for (_, len, path) in &files {
+            if is_part_file(path) && std::fs::remove_file(path).is_ok() {
+                freed += len;
+            }
+        }
+        // 再按修改时间淘汰最旧的正式缓存文件
+        let mut total: u64 = files
+            .iter()
+            .filter(|(_, _, path)| !is_part_file(path))
+            .map(|(_, len, _)| *len)
+            .sum();
+        for (_, len, path) in &files {
+            if is_part_file(path) {
+                continue;
+            }
             if total <= target_bytes {
                 break;
             }
-            if std::fs::remove_file(&path).is_ok() {
-                total = total.saturating_sub(len);
+            if std::fs::remove_file(path).is_ok() {
+                total = total.saturating_sub(*len);
                 freed += len;
             }
         }

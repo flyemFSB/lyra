@@ -152,7 +152,7 @@ async fn logout_clears_the_persisted_token() {
     app.login("13800138000", "123456").await.unwrap();
     assert!(app.is_logged_in());
 
-    app.logout().unwrap();
+    app.logout().await.unwrap();
     assert!(!app.is_logged_in());
     assert!(app.store().account().unwrap().is_none(), "登出必须清掉凭据");
     assert!(app.playlists().await.is_err());
@@ -521,7 +521,7 @@ async fn concurrent_device_registration_and_logout_keep_the_session_consistent()
     assert!(entered.load(Ordering::Acquire), "设备注册请求应当到达闸门");
 
     // 并发登出
-    app.logout().unwrap();
+    app.logout().await.unwrap();
     release.store(true, Ordering::Release);
     register.await.unwrap().unwrap();
 

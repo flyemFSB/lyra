@@ -16,20 +16,25 @@ pub(crate) fn index_label(index: usize) -> SharedString {
         .unwrap_or_else(|| SharedString::from(format!("{index:02}")))
 }
 
+/// 音质标识 → 展示文本
+const QUALITY_LABELS: &[(&str, &str)] = &[
+    ("flac", "无损"),
+    ("320", "高品 320K"),
+    ("128", "标准 128K"),
+    ("viper_tape", "蝰蛇母带"),
+    ("viper_clear", "蝰蛇全景"),
+    ("viper_atmos", "蝰蛇环绕"),
+];
+
 /// 设置页支持的音质选项列表
 pub(crate) const QUALITY_CHOICES: &[(&str, &str)] = &[("flac", "无损"), ("320", "高品 320K"), ("128", "标准 128K")];
 
 /// 获取音质编码对应的展示文本
 pub(crate) fn quality_label(quality: &str) -> &'static str {
-    match quality {
-        "flac" => "无损",
-        "320" => "高品 320K",
-        "128" => "标准 128K",
-        "viper_tape" => "蝰蛇母带",
-        "viper_clear" => "蝰蛇全景",
-        "viper_atmos" => "蝰蛇环绕",
-        _ => "标准",
-    }
+    QUALITY_LABELS
+        .iter()
+        .find(|(id, _)| *id == quality)
+        .map_or("标准", |(_, label)| *label)
 }
 
 /// 毫秒时间格式化写入已有缓冲区（不额外分配）

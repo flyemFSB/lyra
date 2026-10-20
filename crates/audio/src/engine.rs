@@ -1,12 +1,11 @@
 //! 音频引擎控制：解码线程生命周期与跨线程播放调度。
 
 use std::sync::Arc;
-use std::thread::{self, JoinHandle};
+use std::thread;
 use std::time::{Duration, Instant};
 
 use cpal::traits::{DeviceTrait, HostTrait};
 use crossbeam_channel::{Receiver, RecvTimeoutError, Sender, unbounded};
-use parking_lot::Mutex;
 use ringbuf::traits::{Observer, Split};
 use ringbuf::{HeapProd, HeapRb};
 
@@ -17,18 +16,8 @@ use crate::ring::{map_channels, push_slice, ring_capacity};
 use crate::state::Shared;
 use crate::{Error, Event, Fetcher, Snapshot, State, TrackRef};
 
-/// 音频引擎配置参数
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct AudioConfig {
-    /// 环形缓冲区目标时长（毫秒，默认 200ms）
-    pub ring_ms: u32,
-}
-
-impl Default for AudioConfig {
-    fn default() -> Self {
-        Self { ring_ms: 200 }
-    }
-}
+/// 环形缓冲区目标时长（毫秒）
+const RING_MS: u32 = 200;
 
 /// 解码线程控制命令
 enum Command {
@@ -47,7 +36,6 @@ pub struct Engine {
 struct EngineInner {
     shared: Arc<Shared>,
     cmd_tx: Sender<Command>,
-    thread: Mutex<Option<JoinHandle<()>>>,
     /// 输出流句柄（随引擎销毁而停止）
     _stream: cpal::Stream,
 }
@@ -87,26 +75,6 @@ impl Engine {
         self.inner.shared.set_volume(v.clamp(0.0, 1.0));
     }
 
-    /// 关闭引擎并等待解码线程退出（最多等待 2 秒）
-    ///
-    /// 需要在退出前同步收尾时显式调用；`Drop` 不会阻塞调用方。
-    pub fn close(&self) {
-        let _ = self.inner.cmd_tx.send(Command::Shutdown);
-        let handle = self.inner.thread.lock().take();
-        let Some(handle) = handle else {
-            return;
-        };
-        let deadline = Instant::now() + Duration::from_secs(2);
-        while !handle.is_finished() && Instant::now() < deadline {
-            thread::sleep(Duration::from_millis(20));
-        }
-        if handle.is_finished() {
-            let _ = handle.join();
-        } else {
-            tracing::warn!("解码线程退出超时，已放弃等待");
-        }
-    }
-
     /// 获取当前状态快照（非阻塞）
     #[must_use]
     pub fn snapshot(&self) -> Snapshot {
@@ -129,17 +97,8 @@ impl Engine {
     }
 }
 
-/// 使用默认配置启动音频引擎
-pub fn spawn(fetcher: Arc<dyn Fetcher>, events: Box<dyn Fn(Event) + Send + Sync>) -> Result<Engine, Error> {
-    spawn_with(fetcher, events, AudioConfig::default())
-}
-
 /// 启动音频引擎（配置输出设备、缓冲区与解码线程）
-pub fn spawn_with(
-    fetcher: Arc<dyn Fetcher>,
-    events: Box<dyn Fn(Event) + Send + Sync>,
-    config: AudioConfig,
-) -> Result<Engine, Error> {
+pub fn spawn(fetcher: Arc<dyn Fetcher>, events: Box<dyn Fn(Event) + Send + Sync>) -> Result<Engine, Error> {
     let host = cpal::default_host();
     let device = host.default_output_device().ok_or(Error::NoOutputDevice)?;
     let supported = device
@@ -151,7 +110,7 @@ pub fn spawn_with(
     let sample_format = supported.sample_format();
     let stream_config = supported.config();
 
-    let capacity = ring_capacity(sample_rate, channels, config.ring_ms);
+    let capacity = ring_capacity(sample_rate, channels, RING_MS);
     let ring = HeapRb::<f32>::new(capacity);
     let (prod, cons) = ring.split();
 
@@ -169,11 +128,11 @@ pub fn spawn_with(
         sample_rate,
         channels,
     };
-    let thread = thread::Builder::new()
+    thread::Builder::new()
         .name("lyra-audio".into())
         .spawn(move || {
-            // 解码线程必须自己兜住 panic：release 构建开了 panic = "abort"，
-            // 一次解码异常就会终止整个应用。这里捕获后转成日志，音频失败不应拖垮进程。
+            // Debug 构建下捕获 panic 转成日志；release 开启 panic = "abort" 时
+            // 解码异常会直接终止进程，这里的捕获只在 Debug 下生效。
             let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| Player::new(ctx).run()));
             if result.is_err() {
                 tracing::error!("音频解码线程异常退出");
@@ -185,7 +144,6 @@ pub fn spawn_with(
         inner: Arc::new(EngineInner {
             shared,
             cmd_tx,
-            thread: Mutex::new(Some(thread)),
             _stream: stream,
         }),
     })

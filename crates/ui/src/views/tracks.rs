@@ -16,6 +16,7 @@ use crate::theme::{
     ACCENT_GREEN, ACCENT_GREEN_BORDER, ACCENT_GREEN_HOVER, ACCENT_GREEN_LIGHT, ROW_HEIGHT, SURFACE_HOVER, TEXT_FAINT,
     TEXT_MUTED, TEXT_PRIMARY, badge, cover_box,
 };
+use crate::views::player::PlayerModel;
 
 /// 曲目行的展示模型
 ///
@@ -46,29 +47,61 @@ pub(crate) fn build_rows(songs: &[Song]) -> Vec<TrackRow> {
         .collect()
 }
 
+/// 曲目行渲染所需的上下文
+///
+/// 把「队列 + 外壳 + 后端」三样总是成对出现的东西收在一起，
+/// 免得每行都传三个句柄。
+pub(crate) struct RowContext<'a> {
+    /// 歌曲队列
+    pub(crate) queue: &'a Arc<Vec<Song>>,
+    /// 队列的预格式化展示模型
+    pub(crate) rows: &'a Arc<Vec<TrackRow>>,
+    /// 外壳实体（点击行时替换播放队列）
+    pub(crate) shell: &'a WeakEntity<AppShell>,
+    /// 后端桥接（收藏、移除等动作）
+    pub(crate) backend: &'a Backend,
+}
+
+/// 渲染普通歌曲行（无移除按钮）
+///
+/// 四个列表视图的行渲染完全相同，只有「可移除」这一项不同。
+pub(crate) fn song_row(index: usize, ctx: &RowContext<'_>, cur_hash: Option<&str>, is_playing: bool) -> AnyElement {
+    let this_hash = ctx.queue.get(index).map(|song| song.hash.as_str());
+    let is_current = cur_hash.is_some() && cur_hash == this_hash;
+    let Some(row) = ctx.rows.get(index) else {
+        return div().into_any_element();
+    };
+    track_row(index, row, ctx, None, is_current, is_playing)
+}
+
+/// 读取当前播放状态（整批读取一次，避免每行都做一次实体读取）
+pub(crate) fn current_play_state(player: &Entity<PlayerModel>, cx: &App) -> (Option<String>, bool) {
+    let model = player.read(cx);
+    (
+        model.current_song().map(|song| song.hash.clone()),
+        model.snapshot.state == lyra_audio::State::Playing,
+    )
+}
+
 /// 渲染单首曲目行
-#[allow(clippy::too_many_arguments)]
 pub(crate) fn track_row(
     index: usize,
     row: &TrackRow,
-    queue: &Arc<Vec<Song>>,
-    shell: &WeakEntity<AppShell>,
-    backend: &Backend,
+    ctx: &RowContext<'_>,
     removable_listid: Option<&SharedString>,
     is_current: bool,
     is_playing: bool,
-    cx: &App,
 ) -> AnyElement {
-    let Some(song) = queue.get(index) else {
+    let Some(song) = ctx.queue.get(index) else {
         return div().into_any_element();
     };
 
     // 队列是 `Arc`，克隆只是引用计数递增；曲目本体等到真正点击「收藏」时再克隆，
     // 避免渲染期把整首曲目（10 个 String 字段）复制一遍。
-    let play_queue = queue.clone();
-    let play_shell = shell.clone();
-    let like_queue = queue.clone();
-    let like_backend = backend.clone();
+    let play_queue = ctx.queue.clone();
+    let play_shell = ctx.shell.clone();
+    let like_queue = ctx.queue.clone();
+    let like_backend = ctx.backend.clone();
 
     let mut track = h_flex()
         .id(("track", index))
@@ -120,7 +153,7 @@ pub(crate) fn track_row(
                         .border_1()
                         .border_color(ACCENT_GREEN_BORDER)
                 })
-                .child(cover_box(row.title.as_ref(), 36.0, cx)),
+                .child(cover_box(row.title.as_ref(), 36.0)),
         )
         // 主标题：歌名；副标题：歌手名
         .child(
@@ -187,7 +220,7 @@ pub(crate) fn track_row(
 
     // 移除按钮（仅自建歌单可用）
     if let Some(listid) = removable_listid {
-        let remove_backend = backend.clone();
+        let remove_backend = ctx.backend.clone();
         let listid = listid.clone();
         let fileid = song.fileid;
         track = track.child(

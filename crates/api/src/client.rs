@@ -47,11 +47,6 @@ impl Api {
         self.session.read().clone()
     }
 
-    /// 替换当前会话
-    pub fn set_session(&self, session: Session) {
-        *self.session.write() = session;
-    }
-
     /// 更新账号登录态
     pub fn set_account(&self, account: Option<crate::spec::Account>) {
         self.session.write().set_account(account);
@@ -59,7 +54,7 @@ impl Api {
 
     /// 在同一把写锁内原地更新会话的设备信息
     ///
-    /// 与 [`Api::set_session`] 的区别：这里**只**改设备字段，登录态在回调前后保持不变。
+    /// 这里**只**改设备字段，登录态在回调前后保持不变。
     /// 因此并发的登出（[`Api::set_account`]）不会被迟到的写回复活，
     /// 并发的新登录也不会被覆盖成旧快照。
     pub fn update_device(&self, f: impl FnOnce(&mut Session)) {

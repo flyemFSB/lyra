@@ -10,8 +10,8 @@ mod ring;
 mod state;
 mod types;
 
-pub use decoder::{Decoded, DecodedChunk, Decoder, decode_all};
-pub use engine::{AudioConfig, Engine, spawn, spawn_with};
+pub use decoder::{DecodedChunk, Decoder};
+pub use engine::{Engine, spawn};
 pub use error::Error;
-pub use resample::{Resampler, resample_all};
+pub use resample::Resampler;
 pub use types::{Event, FetchError, FetchResult, Fetcher, ReadSeek, Snapshot, State, TrackRef};

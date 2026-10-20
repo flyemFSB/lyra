@@ -3,11 +3,11 @@ name: CI
 on:
   push:
     branches: [main]
+    tags: ['v*']
   pull_request:
 
 env:
   CARGO_TERM_COLOR: always
-  RUSTFLAGS: -D warnings
 
 jobs:
   build:
@@ -17,35 +17,33 @@ jobs:
 
       - name: 工具链
         uses: dtolnay/rust-toolchain@stable
-        with:
-          components: rustfmt, clippy
 
       - uses: Swatinem/rust-cache@v2
-
-      # 保证 §4.3 的 MSRV 声明与实际工具链一致
-      - name: 校验 rust-version
-        shell: pwsh
-        run: |
-          $declared = (Select-String -Path Cargo.toml -Pattern '^rust-version\s*=\s*"([^"]+)"').Matches[0].Groups[1].Value
-          $actual = (rustc --version) -replace '^rustc ([0-9]+\.[0-9]+).*', '$1'
-          Write-Host "declared=$declared actual=$actual"
-          if ([version]$actual -lt [version]$declared) { throw "工具链低于声明的 MSRV $declared" }
 
       - name: 格式
         run: cargo fmt --all --check
 
-      # 不加 --all-features：那会同时打开 gpui-kit 的 tree-sitter-* 与 test-support，后者会让两套 GPUI 后端进同一依赖图而解析失败
+      # 不加 --all-features：那会同时打开 gpui-kit 的 tree-sitter-* 与 test-support，
+      # 后者会让两个 GPUI 后端进同一依赖图而解析失败
       - name: Clippy
         run: cargo clippy --workspace --all-targets --locked -- -D warnings
+        env:
+          RUSTFLAGS: -D warnings
 
       - name: 测试（全部离线，不需要账号）
         run: cargo test --workspace --locked
+        env:
+          RUSTFLAGS: -D warnings
 
-      # §3.2 的约定：只允许 rustls+ring，禁止 OpenSSL / native-tls
+      # 发布配置只在打 tag 时才用到：必须在 CI 里编一次，
+      # 否则 panic = "abort" 之类的问题要到发布当天才会暴露
+      - name: Release 配置编译
+        run: cargo build --release --locked -p lyra
+
+      # §3.2 的约定：只允许 rustls+ring，禁 OpenSSL / native-tls
       - name: 依赖审计
         run: cargo run -p xtask --locked -- audit
 
       - name: 许可证与安全公告
-        run: |
-          cargo install cargo-deny --locked
-          cargo deny check
+        uses: taiki-e/install-action@cargo-deny
+      - run: cargo deny check

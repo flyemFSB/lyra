@@ -7,7 +7,7 @@ use lyra_api::endpoint::{audio, flow, library, lyrics, playlist, privilege, sear
 use lyra_api::model::{LyricLine, Page, Playlist, Song, SongRights, SongUrl, Station, StationClass, VipStatus};
 use lyra_api::transport::Transport;
 use lyra_api::{Api, Session};
-use lyra_audio::{AudioConfig, Engine, Event, TrackRef};
+use lyra_audio::{Engine, Event, TrackRef};
 use lyra_store::{Account as StoreAccount, PlayMode, Settings, Store};
 
 use crate::error::{Error, Result};
@@ -34,6 +34,8 @@ pub struct Kugou {
     data_dir: PathBuf,
     /// 进程内唯一的 tokio 运行时句柄（由调用方注入，应用层不自建运行时）
     runtime: tokio::runtime::Handle,
+    /// 设置读改写的互斥锁（保证「读 → 改 → 写」不会互相覆盖）
+    settings_lock: Arc<std::sync::Mutex<()>>,
 }
 
 impl std::fmt::Debug for Kugou {
@@ -95,6 +97,7 @@ impl Kugou {
             engine: None,
             data_dir,
             runtime,
+            settings_lock: Arc::new(std::sync::Mutex::new(())),
         })
     }
 
@@ -114,7 +117,7 @@ impl Kugou {
     /// 挂载音频引擎并注册事件监听回调
     pub fn attach_audio(&mut self, events: Box<dyn Fn(Event) + Send + Sync>) -> Result<bool> {
         let fetcher = Arc::new(BlobFetcher::new(self.blobs.clone(), self.runtime.clone()));
-        match lyra_audio::spawn_with(fetcher, events, AudioConfig::default()) {
+        match lyra_audio::spawn(fetcher, events) {
             Ok(engine) => {
                 // 同步持久化的音量设置至音频引擎
                 let volume = self.settings().map_or(1.0, |settings| settings.volume);
@@ -139,12 +142,6 @@ impl Kugou {
     #[must_use]
     pub fn store(&self) -> &Store {
         &self.store
-    }
-
-    /// 获取 API 客户端引用
-    #[must_use]
-    pub fn api(&self) -> &Api {
-        &self.api
     }
 
     /// 获取 Blob 缓存引用
@@ -197,6 +194,20 @@ impl Kugou {
         // 运行时更新缓存上限并按 LRU 即时收敛
         self.blobs.set_max_bytes(settings.max_cache_bytes);
         Ok(())
+    }
+
+    /// 原子地读改写用户配置
+    ///
+    /// 「读 → 改 → 写」必须在一把锁内完成：多个界面动作并发时，
+    /// 各自基于旧快照写回会互相覆盖对方的修改。
+    pub fn update_settings(&self, mutate: impl FnOnce(&mut Settings)) -> Result<()> {
+        let _guard = self
+            .settings_lock
+            .lock()
+            .map_err(|_| Error::Invalid("配置锁已中毒".to_owned()))?;
+        let mut settings = self.store.settings()?;
+        mutate(&mut settings);
+        self.set_settings(&settings)
     }
 
     // ---------------------------------------------------------- 账号与会话
@@ -254,8 +265,15 @@ impl Kugou {
     }
 
     /// 退出登录并清除持久化凭据
-    pub fn logout(&self) -> Result<()> {
-        self.store.clear_account()?;
+    ///
+    /// 凭据删除要访问 redb 与系统密钥环，属于阻塞 I/O：放到独立线程执行，
+    /// 避免占住 tokio 的工作线程。
+    pub async fn logout(&self) -> Result<()> {
+        let store = self.store.clone();
+        self.runtime
+            .spawn_blocking(move || store.clear_account())
+            .await
+            .map_err(|error| Error::Invalid(format!("退出登录失败: {error}")))??;
         self.api.set_account(None);
         Ok(())
     }
@@ -295,11 +313,6 @@ impl Kugou {
             || Error::Api(lyra_api::Error::EmptyData("设备注册未返回 dfid".to_owned())),
             Error::Api,
         ))
-    }
-
-    /// 获取当前登录用户的详细资料
-    pub async fn user_detail(&self) -> Result<serde_json::Value> {
-        Ok(library::user_detail(&self.api).await?)
     }
 
     // ---------------------------------------------------------- 曲库管理
@@ -388,14 +401,16 @@ impl Kugou {
             .min_by_key(|hit| (hit.privilege != 0, hit.duration_ms.abs_diff(song.duration_ms)))
     }
 
-    /// 解析播放直链并投送至音频引擎
-    pub async fn play(&self, song: &Song, quality: &str) -> Result<Playback> {
-        let engine = self
-            .engine
-            .as_ref()
-            .ok_or_else(|| Error::Audio("没有可用的音频输出设备".to_owned()))?;
+    /// 解析播放直链并准备曲目（**不启动引擎**，由调用方决定何时起播）
+    ///
+    /// 引擎的启动被刻意留在调用方：取址是异步的，若在服务层直接起播，
+    /// 后发起的请求可能先返回，导致旧歌抢占新歌。
+    pub async fn prepare_play(&self, song: &Song, quality: &str) -> Result<(TrackRef, Playback)> {
+        if self.engine.is_none() {
+            return Err(Error::Audio("没有可用的音频输出设备".to_owned()));
+        }
         let url = self.song_url(song, quality).await?;
-        engine.play(TrackRef {
+        let track = TrackRef {
             // 使用变体哈希作为缓存键（试听片段自带 _preview 后缀隔离缓存）
             hash: url.blob_key(&song.hash),
             url: url.url.clone(),
@@ -405,10 +420,13 @@ impl Kugou {
                 url.duration_ms
             },
             ext: url.ext_or_guess(),
-        });
-        Ok(Playback {
-            preview_ms: url.preview_ms,
-        })
+        };
+        Ok((
+            track,
+            Playback {
+                preview_ms: url.preview_ms,
+            },
+        ))
     }
 
     /// 获取逐行滚动歌词
@@ -436,11 +454,6 @@ impl Kugou {
     /// 搜索单曲列表
     pub async fn search(&self, keyword: &str, page: u32) -> Result<Vec<Song>> {
         Ok(lyra_api::endpoint::search::songs(&self.api, keyword, page, 30, None).await?)
-    }
-
-    /// 获取卡片专区歌曲推荐
-    pub async fn card(&self, card_id: u32) -> Result<Vec<Song>> {
-        Ok(flow::card(&self.api, card_id, 30).await?.items)
     }
 
     /// 获取推荐电台频道列表

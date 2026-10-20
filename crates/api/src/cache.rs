@@ -25,8 +25,6 @@ impl Freshness {
     pub const SONG_URL: Self = Self::Ttl(Duration::from_secs(60));
     /// 目录与电台分类（10 分钟）
     pub const CATALOG: Self = Self::Ttl(Duration::from_secs(600));
-    /// 账号与 VIP 状态（30 秒）
-    pub const ACCOUNT: Self = Self::Ttl(Duration::from_secs(30));
 
     /// 获取当前策略的有效 TTL
     #[must_use]

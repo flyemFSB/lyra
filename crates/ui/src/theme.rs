@@ -2,7 +2,6 @@
 
 use gpui_kit::assets::IconName;
 use gpui_kit::component::Icon;
-use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 
 /// 十六进制 RGB 颜色构造
@@ -44,7 +43,6 @@ pub(crate) const ACCENT_GREEN_BORDER: Rgba = hex_rgb(0xa7f3d0);
 pub(crate) const VIP_GOLD: Rgba = hex_rgb(0xf59e0b);
 
 /// VIP 浅金背景色
-#[allow(dead_code)]
 pub(crate) const VIP_GOLD_LIGHT: Rgba = hex_rgb(0xfef3c7);
 
 // 基础文字颜色层级
@@ -84,7 +82,7 @@ pub(crate) fn badge(text: impl Into<SharedString>, bg: impl Into<Hsla>, fg: impl
 }
 
 /// 构造区块标题组件
-pub(crate) fn title(text: impl Into<SharedString>, _cx: &App) -> impl IntoElement {
+pub(crate) fn title(text: impl Into<SharedString>) -> impl IntoElement {
     div()
         .text_base()
         .font_weight(FontWeight::BOLD)
@@ -93,7 +91,7 @@ pub(crate) fn title(text: impl Into<SharedString>, _cx: &App) -> impl IntoElemen
 }
 
 /// 构造居中状态提示组件（支持自定义图标与旋转动效）
-pub(crate) fn notice_with_icon(icon: IconName, text: impl Into<SharedString>, _cx: &App) -> AnyElement {
+pub(crate) fn notice_with_icon(icon: IconName, text: impl Into<SharedString>) -> AnyElement {
     let is_spinning = matches!(icon, IconName::RefreshCw | IconName::Loader);
     let icon_element = Icon::new(icon)
         .size(px(26.0))
@@ -126,12 +124,12 @@ pub(crate) fn notice_with_icon(icon: IconName, text: impl Into<SharedString>, _c
 }
 
 /// 构造居中状态提示组件
-pub(crate) fn notice(text: impl Into<SharedString>, cx: &App) -> AnyElement {
-    notice_with_icon(IconName::Music, text, cx)
+pub(crate) fn notice(text: impl Into<SharedString>) -> AnyElement {
+    notice_with_icon(IconName::Music, text)
 }
 
 /// 构造专辑封面占位组件
-pub(crate) fn cover_box(label: &str, edge: f32, _cx: &App) -> AnyElement {
+pub(crate) fn cover_box(label: &str, edge: f32) -> AnyElement {
     // 封面占位会在每一行曲目里渲染，必须零分配：
     // 单字符走 SmolStr 的内联存储，不占堆。
     let initial = label
@@ -169,31 +167,23 @@ pub(crate) fn cover_box(label: &str, edge: f32, _cx: &App) -> AnyElement {
         .into_any_element()
 }
 
-/// 构造可点击的标签胶囊组件
-pub(crate) fn chip(label: impl Into<SharedString>, active: bool, icon: Option<IconName>) -> Div {
+/// 构造热门词胶囊组件
+pub(crate) fn chip(label: impl Into<SharedString>, icon: IconName) -> Div {
     div()
         .cursor_pointer()
         .px_3()
         .py_1()
         .rounded(px(999.0))
         .text_xs()
-        .font_weight(if active { FontWeight::BOLD } else { FontWeight::NORMAL })
+        .font_weight(FontWeight::NORMAL)
         .flex()
         .items_center()
         .gap(px(5.0))
-        .when(active, |this| {
-            this.bg(ACCENT_GREEN_LIGHT)
-                .border_1()
-                .border_color(ACCENT_GREEN_BORDER)
-                .text_color(ACCENT_GREEN_HOVER)
-        })
-        .when(!active, |this| {
-            this.bg(CARD_BG)
-                .border_1()
-                .border_color(CARD_BORDER)
-                .text_color(TEXT_MUTED)
-                .hover(|s| s.bg(SURFACE_HOVER).text_color(TEXT_PRIMARY))
-        })
-        .when_some(icon, |this, icon| this.child(Icon::new(icon).size(px(13.0))))
+        .bg(CARD_BG)
+        .border_1()
+        .border_color(CARD_BORDER)
+        .text_color(TEXT_MUTED)
+        .hover(|s| s.bg(SURFACE_HOVER).text_color(TEXT_PRIMARY))
+        .child(Icon::new(icon).size(px(13.0)))
         .child(label.into())
 }

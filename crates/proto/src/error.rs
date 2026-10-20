@@ -15,9 +15,6 @@ pub enum Error {
     /// Base64 解码失败。
     #[error("base64 decode failed: {0}")]
     Base64(#[from] base64::DecodeError),
-    /// JSON 序列化 / 反序列化失败。
-    #[error("json failed: {0}")]
-    Json(#[from] serde_json::Error),
     /// 加密 / 解密失败。
     #[error("crypto failed: {0}")]
     Crypto(#[from] CryptoError),

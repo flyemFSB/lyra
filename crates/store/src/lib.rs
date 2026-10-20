@@ -12,15 +12,13 @@ pub use types::{Account, PlayMode, Settings};
 use std::fmt;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use redb::TableDefinition;
 use serde::de::DeserializeOwned;
 
 /// 元数据表（设备、账号及设置）
 const META: TableDefinition<&str, &[u8]> = TableDefinition::new("meta");
-/// 缓存表：(ns, key) -> (过期毫秒, 二进制数据)
-const BLOBS: TableDefinition<(&str, &str), (u64, &[u8])> = TableDefinition::new("blobs");
 /// 临时文件自增序号
 static TEMP_SEQ: AtomicU64 = AtomicU64::new(0);
 
@@ -252,36 +250,6 @@ impl Store {
         self.put_meta("settings", &serde_json::to_vec(&s.normalized())?)
     }
 
-    /// 写入带 TTL 的缓存数据
-    ///
-    /// TTL 用**墙钟**（Unix 毫秒）而不是单调时钟：缓存条目要能跨进程重启继续过期，
-    /// 单调时钟的起点是本次进程启动，重启后所有 TTL 都会失效。
-    pub fn put_blob(&self, ns: &str, key: &str, bytes: &[u8], ttl: Option<Duration>) -> Result<()> {
-        let expires = ttl.map_or(0, |ttl| now_ms().saturating_add(millis(ttl)));
-        self.write(|txn| {
-            txn.open_table(BLOBS)?.insert((ns, key), (expires, bytes))?;
-            Ok(())
-        })
-    }
-
-    /// 读取缓存数据（过期或未命中返回 None）
-    pub fn get_blob(&self, ns: &str, key: &str) -> Result<Option<Vec<u8>>> {
-        let txn = self.db.begin_read().map_err(Box::new)?;
-        let table = match txn.open_table(BLOBS) {
-            Ok(table) => table,
-            Err(redb::TableError::TableDoesNotExist(_)) => return Ok(None),
-            Err(e) => return Err(e.into()),
-        };
-        let Some(guard) = table.get((ns, key))? else {
-            return Ok(None);
-        };
-        let (expires, bytes) = guard.value();
-        if is_expired(expires, now_ms()) {
-            return Ok(None);
-        }
-        Ok(Some(bytes.to_vec()))
-    }
-
     /// 写事务辅助函数
     fn write<F, T>(&self, body: F) -> Result<T>
     where
@@ -374,23 +342,6 @@ fn unique_temp_path() -> Result<PathBuf> {
         std::io::ErrorKind::AlreadyExists,
         "无法在临时目录创建唯一的数据库文件",
     )))
-}
-
-/// 0 表示永不过期
-fn is_expired(expires: u64, now: u64) -> bool {
-    expires != 0 && expires <= now
-}
-
-/// 当前时间戳（毫秒）
-fn now_ms() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map_or(0, |d| u64::try_from(d.as_millis()).unwrap_or(u64::MAX))
-}
-
-/// 时长转毫秒
-fn millis(d: Duration) -> u64 {
-    u64::try_from(d.as_millis()).unwrap_or(u64::MAX)
 }
 
 /// 生成 VIP 令牌密钥环键名
@@ -631,22 +582,6 @@ mod tests {
     }
 
     #[test]
-    fn blob_cache_round_trip_and_ttl() {
-        let store = temp_store();
-
-        store.put_blob("meta", "a", b"hello", None).unwrap();
-        assert_eq!(
-            store.get_blob("meta", "a").unwrap().as_deref(),
-            Some(b"hello".as_slice())
-        );
-        assert!(store.get_blob("meta", "missing").unwrap().is_none());
-
-        // 零 TTL 视为立即过期。
-        store.put_blob("meta", "ttl", b"x", Some(Duration::ZERO)).unwrap();
-        assert!(store.get_blob("meta", "ttl").unwrap().is_none());
-    }
-
-    #[test]
     fn account_token_round_trip_via_secrets() {
         let store = temp_store();
         assert!(store.account().unwrap().is_none());
@@ -836,8 +771,8 @@ mod tests {
         assert!(path_a.exists() && path_b.exists());
 
         // 两个实例互不可见。
-        store_a.put_blob("t", "k", b"a", None).unwrap();
-        assert!(store_b.get_blob("t", "k").unwrap().is_none());
+        store_a.set_device(&lyra_proto::Device::generate()).unwrap();
+        assert!(store_b.device().unwrap().is_none());
 
         // Drop 时文件被删除。
         drop(store_a);

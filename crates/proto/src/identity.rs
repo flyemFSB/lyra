@@ -4,7 +4,7 @@
 use rsa::BigUint;
 use serde::{Deserialize, Serialize};
 
-use crate::cipher::{md5_hex, random_string};
+use crate::cipher::{md5_hex, random_string_with};
 use crate::rng::{JsRng, OsRng};
 
 /// 根据 GUID 的 MD5 计算十进制大数 MID
@@ -98,7 +98,7 @@ impl Device {
             guid,
             mid,
             mac: "02:00:00:00:00:00".to_owned(),
-            dev: random_string(10),
+            dev: random_string_with(rng, 10),
             webgl: random_webgl(rng),
             dfid: "-".to_owned(),
         }
@@ -147,6 +147,18 @@ mod tests {
         assert_eq!(d.dev.len(), 10);
         assert_eq!(d.mac, "02:00:00:00:00:00");
         assert_eq!(d.dfid_or_dash(), "-");
+    }
+
+    #[test]
+    fn generated_device_is_reproducible_from_the_seeded_rng() {
+        // 注入的随机源必须被完整使用：同一个种子必须生成同一份设备标识。
+        let mut first = Mulberry32::new(42);
+        let mut second = Mulberry32::new(42);
+        let a = Device::generate_with(&mut first);
+        let b = Device::generate_with(&mut second);
+        assert_eq!(a.dev, b.dev, "dev 也必须来自注入的随机源");
+        assert_eq!(a.guid, b.guid);
+        assert_eq!(a.webgl, b.webgl);
     }
 
     #[test]

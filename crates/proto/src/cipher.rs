@@ -8,7 +8,6 @@ use aes::cipher::{BlockDecryptMut, BlockEncryptMut, KeyIvInit, block_padding::No
 use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD as B64;
 use md5::{Digest as _, Md5};
-use rand::Rng as _;
 use rsa::RsaPublicKey;
 // 大数模幂计算：rsa 0.9 使用 num-bigint-dig，其 `e()` / `n()` 就是这个类型
 use rsa::BigUint;
@@ -16,14 +15,45 @@ use rsa::pkcs8::DecodePublicKey as _;
 use rsa::traits::PublicKeyParts as _;
 use zeroize::Zeroize as _;
 
-use crate::consts::{CHARSET_B62, CHARSET_UPPER, FP_IV, FP_RSA_PUBLIC, KRC_KEY, RSA_PUBLIC};
+use crate::consts::{CHARSET_UPPER, FP_IV, FP_RSA_PUBLIC, KRC_KEY, RSA_PUBLIC};
 use crate::error::{CryptoError, Error, Result};
 use crate::rng::JsRng;
 
 /// 计算 MD5 哈希（32 位小写十六进制）
 #[must_use]
 pub fn md5_hex(data: &[u8]) -> String {
-    hex::encode(Md5::digest(data))
+    md5_hex_parts(&[data])
+}
+
+/// 依次拼接多段数据后计算 MD5（签名按「盐 + 参数 + 体」的顺序拼接）
+pub(crate) fn md5_hex_parts(parts: &[&[u8]]) -> String {
+    let mut hasher = Md5::new();
+    for part in parts {
+        hasher.update(part);
+    }
+    hex::encode(hasher.finalize())
+}
+
+/// 由会话密钥派生 AES-128 的 key 与 iv（md5 前 16 字节为 key，后 16 字节为 iv）
+fn secret_key_iv(secret: &str) -> ([u8; 16], [u8; 16]) {
+    let digest = md5_hex(secret.as_bytes());
+    let bytes = digest.as_bytes();
+    let mut key = [0_u8; 16];
+    let mut iv = [0_u8; 16];
+    key.copy_from_slice(&bytes[0..16]);
+    iv.copy_from_slice(&bytes[16..32]);
+    (key, iv)
+}
+
+/// 由临时密钥派生 AES-256 的 key 与 iv（iv 取自 key 的后 16 字节）
+fn derived_key_iv(temp_key: &str) -> ([u8; 32], [u8; 16]) {
+    let digest = md5_hex(temp_key.as_bytes());
+    let bytes = digest.as_bytes();
+    let mut key = [0_u8; 32];
+    let mut iv = [0_u8; 16];
+    key.copy_from_slice(&bytes[0..32]);
+    iv.copy_from_slice(&bytes[16..32]);
+    (key, iv)
 }
 
 /// 计算 SHA-256 哈希（64 位小写十六进制）
@@ -140,15 +170,6 @@ pub fn random_string(len: usize) -> String {
     random_string_with(&mut crate::rng::OsRng, len)
 }
 
-/// 生成 6 位随机 Base62 会话密钥
-#[must_use]
-pub fn random_aes_secret() -> String {
-    let mut rng = rand::thread_rng();
-    (0..6)
-        .map(|_| char::from(CHARSET_B62[rng.gen_range(0..CHARSET_B62.len())]))
-        .collect()
-}
-
 /// 派生密钥 AES 加密结果
 #[derive(Clone, PartialEq, Eq)]
 pub struct AesBox {
@@ -183,10 +204,8 @@ pub fn aes_encrypt_derived(plaintext: &str) -> Result<AesBox> {
 
 /// 基于指定临时密钥派生 AES 加密
 pub fn aes_encrypt_derived_with(plaintext: &str, temp_key: &str) -> Result<AesBox> {
-    let digest = md5_hex(temp_key.as_bytes());
-    let key = &digest[0..32];
-    let iv = &key[16..32];
-    let ct = cbc_encrypt(key.as_bytes(), iv.as_bytes(), plaintext.as_bytes())?;
+    let (key, iv) = derived_key_iv(temp_key);
+    let ct = cbc_encrypt(&key, &iv, plaintext.as_bytes())?;
     Ok(AesBox {
         hex: hex::encode(ct),
         key: temp_key.to_owned(),
@@ -204,10 +223,8 @@ pub fn aes_encrypt_with_key_iv(plaintext: &str, key: &str, iv: &str) -> Result<S
 
 /// 基于临时密钥派生 AES 解密
 pub fn aes_decrypt_derived(data_hex: &str, temp_key: &str) -> Result<Vec<u8>> {
-    let digest = md5_hex(temp_key.as_bytes());
-    let key = &digest[0..32];
-    let iv = &key[16..32];
-    cbc_decrypt(key.as_bytes(), iv.as_bytes(), &hex::decode(data_hex)?)
+    let (key, iv) = derived_key_iv(temp_key);
+    cbc_decrypt(&key, &iv, &hex::decode(data_hex)?)
 }
 
 /// 会话加密结果
@@ -244,12 +261,8 @@ pub fn secret_encrypt(plaintext: &str) -> Result<SecretBox> {
 
 /// 基于指定会话密钥执行加密
 pub fn secret_encrypt_with(plaintext: &str, secret: &str) -> Result<SecretBox> {
-    let digest = md5_hex(secret.as_bytes());
-    let ct = cbc_encrypt(
-        &digest.as_bytes()[0..16],
-        &digest.as_bytes()[16..32],
-        plaintext.as_bytes(),
-    )?;
+    let (key, iv) = secret_key_iv(secret);
+    let ct = cbc_encrypt(&key, &iv, plaintext.as_bytes())?;
     Ok(SecretBox {
         key: secret.to_owned(),
         base64: base64_encode(&ct),
@@ -258,28 +271,14 @@ pub fn secret_encrypt_with(plaintext: &str, secret: &str) -> Result<SecretBox> {
 
 /// 解密 Base64 格式会话密文
 pub fn secret_decrypt_base64(cipher_b64: &str, secret: &str) -> Result<Vec<u8>> {
-    let digest = md5_hex(secret.as_bytes());
-    cbc_decrypt(
-        &digest.as_bytes()[0..16],
-        &digest.as_bytes()[16..32],
-        &base64_decode(cipher_b64)?,
-    )
+    let (key, iv) = secret_key_iv(secret);
+    cbc_decrypt(&key, &iv, &base64_decode(cipher_b64)?)
 }
 
 /// 解密原始字节会话密文
 pub fn secret_decrypt_bytes(cipher: &[u8], secret: &str) -> Result<Vec<u8>> {
-    let digest = md5_hex(secret.as_bytes());
-    cbc_decrypt(&digest.as_bytes()[0..16], &digest.as_bytes()[16..32], cipher)
-}
-
-/// 云请求体加密（返回原始密文）
-pub fn secret_encrypt_bytes(plaintext: &str, secret: &str) -> Result<Vec<u8>> {
-    let digest = md5_hex(secret.as_bytes());
-    cbc_encrypt(
-        &digest.as_bytes()[0..16],
-        &digest.as_bytes()[16..32],
-        plaintext.as_bytes(),
-    )
+    let (key, iv) = secret_key_iv(secret);
+    cbc_decrypt(&key, &iv, cipher)
 }
 
 // RSA 与指纹加密

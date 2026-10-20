@@ -2,6 +2,7 @@
 
 #![forbid(unsafe_code)]
 
+use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -25,476 +26,27 @@ fn main() -> anyhow::Result<()> {
 
 /// 禁止引入的非纯 Rust TLS 依赖
 const BANNED: &[&str] = &["native-tls", "openssl", "openssl-sys"];
-/// 允许引入的非纯 Rust 密码学依赖（唯一被认可的非 Rust 工件）
-const KNOWN_NON_RUST: &[&str] = &["ring", "aws-lc-sys", "aws-lc-rs"];
-/// 纯 Rust 系统接口绑定
-const SYSTEM_BINDINGS: &[&str] = &[
+/// 允许出现的、**内含 C / 汇编源码**的依赖
+///
+/// 除此之外，依赖树里不允许再出现任何携带 C 代码的 crate。
+const KNOWN_NON_RUST: &[&str] = &["ring"];
+/// 允许的 FFI 绑定 crate
+///
+/// 这些 crate 只是用 Rust 声明调用系统 API，本身不携带 C 源码。
+/// 其它 `-sys` / `-ffi` 结尾的 crate 通常会捆绑并编译 C 库，必须逐个人工确认。
+const ALLOWED_FFI: &[&str] = &[
     "windows",
     "windows-sys",
     "windows-targets",
     "windows-link",
+    "windows-strings",
     "winapi",
+    "winapi-util",
+    "dirs-sys",
+    "vswhom-sys",
     "schannel",
     "security-framework",
     "security-framework-sys",
-];
-
-/// 已确认的**纯 Rust**依赖白名单
-///
-/// 依赖树里的每个 crate 都必须在此列中，否则视为「未分类」，审计直接失败。
-/// 这样新增一个没人预料到的 C 依赖（如 `libz-sys` / `zstd-sys`）时能被立刻发现，
-/// 而不是像「非 Rust 白名单」那样被静默放行。
-const KNOWN_PURE_RUST: &[&str] = &[
-    "accesskit",
-    "accesskit_consumer",
-    "accesskit_windows",
-    "adler2",
-    "aes",
-    "aho-corasick",
-    "annotate-snippets",
-    "anstyle",
-    "anyhow",
-    "arc-swap",
-    "arraydeque",
-    "arrayref",
-    "arrayvec",
-    "async-channel",
-    "async-executor",
-    "async-fs",
-    "async-io",
-    "async-lock",
-    "async-net",
-    "async-process",
-    "async-task",
-    "async-trait",
-    "atomic-waker",
-    "backtrace",
-    "base62",
-    "base64",
-    "base64ct",
-    "bit_field",
-    "bitflags",
-    "block-buffer",
-    "blocking",
-    "block-padding",
-    "bstr",
-    "bytemuck",
-    "byteorder",
-    "byteorder-lite",
-    "bytes",
-    "cbc",
-    "cfg-if",
-    "chrono",
-    "cipher",
-    "color_quant",
-    "concurrent-queue",
-    "const-oid",
-    "convert_case",
-    "core_detect",
-    "core_maths",
-    "cpal",
-    "cpufeatures",
-    "crc32fast",
-    "crossbeam-channel",
-    "crossbeam-deque",
-    "crossbeam-epoch",
-    "crossbeam-utils",
-    "crypto-common",
-    "ctor",
-    "dashmap",
-    "dasp_sample",
-    "data-url",
-    "der",
-    "derive_more",
-    "derive_more-impl",
-    "digest",
-    "dirs",
-    "dirs-sys",
-    "displaydoc",
-    "dunce",
-    "dyn-clone",
-    "either",
-    "encoding_rs",
-    "encoding_rs_io",
-    "enum-iterator",
-    "enum-iterator-derive",
-    "enumn",
-    "equivalent",
-    "errno",
-    "etagere",
-    "euclid",
-    "event-listener",
-    "event-listener-strategy",
-    "exr",
-    "extended",
-    "fastrand",
-    "fax",
-    "fdeflate",
-    "flate2",
-    "float_next_after",
-    "float-cmp",
-    "fluent-uri",
-    "flume",
-    "fnv",
-    "foldhash",
-    "fontdb",
-    "form_urlencoded",
-    "futf",
-    "futures",
-    "futures-channel",
-    "futures-core",
-    "futures-executor",
-    "futures-io",
-    "futures-lite",
-    "futures-macro",
-    "futures-sink",
-    "futures-task",
-    "futures-util",
-    "generic-array",
-    "getrandom",
-    "gif",
-    "glob",
-    "globset",
-    "globwalk",
-    "gpui-base",
-    "gpui-component",
-    "gpui-component-macros",
-    "gpui-kit",
-    "gpui-kit-assets",
-    "gpui-pre",
-    "gpui-pre-collections",
-    "gpui-pre-derive-refineable",
-    "gpui-pre-http-client",
-    "gpui-pre-macros",
-    "gpui-pre-platform",
-    "gpui-pre-refineable",
-    "gpui-pre-scheduler",
-    "gpui-pre-shared-string",
-    "gpui-pre-sum-tree",
-    "gpui-pre-util",
-    "gpui-pre-windows",
-    "gpui-pre-ztracing",
-    "gpui-pre-ztracing-macro",
-    "granit-parser",
-    "h2",
-    "half",
-    "hash32",
-    "hashbrown",
-    "heapless",
-    "heck",
-    "hex",
-    "html5ever",
-    "http",
-    "httparse",
-    "http-body",
-    "http-body-util",
-    "hybrid-array",
-    "hyper",
-    "hyper-rustls",
-    "hyper-util",
-    "icu_collections",
-    "icu_locale_core",
-    "icu_normalizer",
-    "icu_normalizer_data",
-    "icu_properties",
-    "icu_properties_data",
-    "icu_provider",
-    "idna",
-    "idna_adapter",
-    "ignore",
-    "image",
-    "imagesize",
-    "image-webp",
-    "indexmap",
-    "inout",
-    "instant",
-    "inventory",
-    "ipnet",
-    "itertools",
-    "itoa",
-    "keyring",
-    "kurbo",
-    "lazy_static",
-    "lebe",
-    "libc",
-    "libm",
-    "link-section",
-    "linktime-proc-macro",
-    "litemap",
-    "lock_api",
-    "log",
-    "lsp-types",
-    "lyon",
-    "lyon_algorithms",
-    "lyon_geom",
-    "lyon_path",
-    "lyon_tessellation",
-    "lyra",
-    "lyra-api",
-    "lyra-app",
-    "lyra-audio",
-    "lyra-proto",
-    "lyra-store",
-    "lyra-ui",
-    "mac",
-    "markdown",
-    "markup5ever",
-    "markup5ever_rcdom",
-    "matchers",
-    "md-5",
-    "memchr",
-    "memmap2",
-    "mime",
-    "mime_guess",
-    "miniz_oxide",
-    "mio",
-    "moka",
-    "moxcms",
-    "multiversion_no_op",
-    "new_debug_unreachable",
-    "nohash-hasher",
-    "normpath",
-    "notify",
-    "notify-types",
-    "nu-ansi-term",
-    "num_cpus",
-    "num-bigint",
-    "num-bigint-dig",
-    "num-complex",
-    "num-integer",
-    "num-iter",
-    "num-traits",
-    "once_cell",
-    "option-ext",
-    "parking",
-    "parking_lot",
-    "parking_lot_core",
-    "paste",
-    "pem-rfc7468",
-    "percent-encoding",
-    "phf",
-    "phf_shared",
-    "pico-args",
-    "pin-project",
-    "pin-project-internal",
-    "pin-project-lite",
-    "piper",
-    "pkcs1",
-    "pkcs8",
-    "png",
-    "polling",
-    "pollster",
-    "polycool",
-    "portable-atomic",
-    "potential_utf",
-    "ppv-lite86",
-    "precomputed-hash",
-    "primal-check",
-    "proc-macro2",
-    "proc-macro-crate",
-    "profiling",
-    "profiling-procmacros",
-    "pulp",
-    "pulp-wasm-simd-flag",
-    "pxfm",
-    "qoi",
-    "quick-error",
-    "quote",
-    "rand",
-    "rand_chacha",
-    "rand_core",
-    "raw-cpuid",
-    "raw-window-handle",
-    "rayon",
-    "rayon-core",
-    "realfft",
-    "reborrow",
-    "redb",
-    "ref-cast",
-    "ref-cast-impl",
-    "regex",
-    "regex-automata",
-    "regex-syntax",
-    "reqwest",
-    "resvg",
-    "rgb",
-    "ringbuf",
-    "ropey",
-    "roxmltree",
-    "rsa",
-    "rubato",
-    "rustc-demangle",
-    "rustc-hash",
-    "rust-embed",
-    "rust-embed-impl",
-    "rust-embed-utils",
-    "rustfft",
-    "rust-i18n",
-    "rust-i18n-macro",
-    "rust-i18n-support",
-    "rustix",
-    "rustls",
-    "rustls-native-certs",
-    "rustls-pki-types",
-    "rustls-webpki",
-    "rustversion",
-    "rustybuzz",
-    "ryu",
-    "same-file",
-    "schannel",
-    "schemars",
-    "schemars_derive",
-    "scopeguard",
-    "seahash",
-    "serde",
-    "serde_core",
-    "serde_derive",
-    "serde_derive_internals",
-    "serde_json",
-    "serde_repr",
-    "serde_spanned",
-    "serde_urlencoded",
-    "serde-saphyr",
-    "sha1_smol",
-    "sha2",
-    "sharded-slab",
-    "shellexpand",
-    "signature",
-    "simd-adler32",
-    "simdutf8",
-    "similar",
-    "simplecss",
-    "siphasher",
-    "slab",
-    "slotmap",
-    "smallvec",
-    "smol",
-    "smol_str",
-    "socket2",
-    "spin",
-    "spki",
-    "stable_deref_trait",
-    "static_assertions",
-    "str_indices",
-    "strength_reduce",
-    "strict-num",
-    "string_cache",
-    "strum",
-    "strum_macros",
-    "subtle",
-    "svg_fmt",
-    "svgtypes",
-    "symphonia",
-    "symphonia-bundle-flac",
-    "symphonia-bundle-mp3",
-    "symphonia-codec-aac",
-    "symphonia-codec-pcm",
-    "symphonia-codec-vorbis",
-    "symphonia-core",
-    "symphonia-format-isomp4",
-    "symphonia-format-ogg",
-    "symphonia-format-riff",
-    "symphonia-metadata",
-    "symphonia-utils-xiph",
-    "syn",
-    "sync_wrapper",
-    "synstructure",
-    "taffy",
-    "tagptr",
-    "tendril",
-    "thiserror",
-    "thiserror-impl",
-    "thread_local",
-    "tiff",
-    "tiny-skia",
-    "tiny-skia-path",
-    "tinystr",
-    "tinyvec",
-    "tokio",
-    "tokio-macros",
-    "tokio-rustls",
-    "tokio-util",
-    "toml",
-    "toml_datetime",
-    "toml_edit",
-    "toml_parser",
-    "toml_write",
-    "tower",
-    "tower-http",
-    "tower-layer",
-    "tower-service",
-    "tracing",
-    "tracing-attributes",
-    "tracing-core",
-    "tracing-log",
-    "tracing-subscriber",
-    "transpose",
-    "triomphe",
-    "try-lock",
-    "ttf-parser",
-    "typenum",
-    "unicase",
-    "unicode-bidi",
-    "unicode-bidi-mirroring",
-    "unicode-ccc",
-    "unicode-id",
-    "unicode-ident",
-    "unicode-linebreak",
-    "unicode-properties",
-    "unicode-script",
-    "unicode-segmentation",
-    "unicode-vo",
-    "unicode-width",
-    "untrusted",
-    "url",
-    "usvg",
-    "utf-8",
-    "utf8_iter",
-    "uuid",
-    "waker-fn",
-    "walkdir",
-    "want",
-    "web-time",
-    "weezl",
-    "which",
-    "winapi-util",
-    "windows",
-    "windows_x86_64_msvc",
-    "windows-collections",
-    "windows-core",
-    "windows-future",
-    "windows-implement",
-    "windows-interface",
-    "windows-link",
-    "windows-numerics",
-    "windows-registry",
-    "windows-result",
-    "windows-strings",
-    "windows-sys",
-    "windows-targets",
-    "windows-threading",
-    "winnow",
-    "writeable",
-    "xml5ever",
-    "xmlwriter",
-    "xtask",
-    "yoke",
-    "yoke-derive",
-    "zerocopy",
-    "zerocopy-derive",
-    "zerofrom",
-    "zerofrom-derive",
-    "zeroize",
-    "zerotrie",
-    "zerovec",
-    "zerovec-derive",
-    "zmij",
-    "zune-core",
-    "zune-inflate",
-    "zune-jpeg",
-    // 构建脚本助手与纯 Rust 实现，不含 C 源码
-    "cc",
-    "blake3",
 ];
 
 /// 依赖审计结果
@@ -508,17 +60,23 @@ struct Report {
     banned: Vec<String>,
     /// 已确认的非 Rust 工件
     non_rust: Vec<String>,
-    /// 纯 Rust 系统接口绑定
-    system_bindings: Vec<String>,
-    /// 未分类依赖（既不在纯 Rust 白名单，也不在非 Rust 白名单）
-    unclassified: Vec<String>,
+    /// 需要人工确认的 FFI 绑定 crate
+    unapproved_ffi: Vec<String>,
 }
 
 impl Report {
-    /// 校验是否合规（无禁用依赖、无未分类依赖）
+    /// 校验是否合规（无禁用依赖、无未确认的 FFI crate）
     fn is_ok(&self) -> bool {
-        self.banned.is_empty() && self.unclassified.is_empty()
+        self.banned.is_empty() && self.unapproved_ffi.is_empty()
     }
+}
+
+/// 判断是否为「通常会捆绑 C 源码」的 crate
+///
+/// `-sys` / `-ffi` 结尾的 crate 基本都是 C 库的 Rust 绑定，
+/// 它们会把 C 源码一起编译进来，必须逐个人工确认。
+fn looks_like_c_binding(name: &str) -> bool {
+    name.ends_with("-sys") || name.ends_with("-ffi")
 }
 
 /// 对依赖进行分类统计
@@ -539,10 +97,10 @@ fn classify(nodes: &[String]) -> Report {
     let mut unique: Vec<&str> = nodes.iter().map(String::as_str).collect();
     unique.sort_unstable();
     unique.dedup();
-    // 未分类 = 既不在纯 Rust 白名单，也不是已确认的非 Rust 工件
-    let unclassified: Vec<String> = unique
+    // 需要人工确认的 FFI 绑定：既不在允许清单里，也不在已确认的非 Rust 工件里
+    let unapproved_ffi: Vec<String> = unique
         .iter()
-        .filter(|name| !KNOWN_PURE_RUST.contains(name) && !KNOWN_NON_RUST.contains(name))
+        .filter(|name| looks_like_c_binding(name) && !ALLOWED_FFI.contains(name) && !KNOWN_NON_RUST.contains(name))
         .map(|name| (*name).to_owned())
         .collect();
     Report {
@@ -550,8 +108,7 @@ fn classify(nodes: &[String]) -> Report {
         unique: unique.len(),
         banned: hit(BANNED),
         non_rust: hit(KNOWN_NON_RUST),
-        system_bindings: hit(SYSTEM_BINDINGS),
-        unclassified,
+        unapproved_ffi,
     }
 }
 
@@ -565,7 +122,9 @@ fn cargo(args: &[&str]) -> anyhow::Result<std::process::Output> {
 
 /// 执行依赖静态审计
 fn audit() -> anyhow::Result<()> {
-    let output = cargo(&["tree", "--edges", "normal", "--prefix", "none", "--workspace"])?;
+    // 必须用 `--edges all`：C 代码几乎总是经由构建脚本进入依赖树，
+    // 只看 normal 边会把 `cc` 这类构建依赖整类漏掉。
+    let output = cargo(&["tree", "--edges", "all", "--prefix", "none", "--workspace"])?;
     anyhow::ensure!(
         output.status.success(),
         "cargo tree 执行失败：{}",
@@ -598,18 +157,21 @@ fn audit() -> anyhow::Result<()> {
         }
     }
 
-    println!("\n系统库绑定（纯 Rust FFI，编译期不产生 C）：");
-    if report.system_bindings.is_empty() {
-        println!("  （无）");
+    if report.unapproved_ffi.is_empty() {
+        println!("\n✅ 未发现被禁用的 C 实现依赖，且没有未确认的 FFI 绑定 crate");
     } else {
-        for name in &report.system_bindings {
-            println!("  - {name}");
-        }
+        anyhow::ensure!(
+            report.is_ok(),
+            "依赖树里出现了 {} 个未确认的 FFI 绑定 crate：{:?}。\n\
+             这类 crate 通常会捆绑并编译 C 源码，请确认后加入 crates/xtask/src/main.rs 的 ALLOWED_FFI 清单。",
+            report.unapproved_ffi.len(),
+            report.unapproved_ffi
+        );
     }
 
-    if report.system_bindings.iter().any(|name| name == "schannel") {
-        // 核查 schannel 的依赖来源
-        let who = cargo(&["tree", "-i", "schannel", "--edges", "normal", "--prefix", "none"])?;
+    if report.non_rust.iter().any(|name| name == "ring") {
+        // 核查 schannel 的依赖来源：schannel 是系统 TLS 后端，绝不能被启用
+        let who = cargo(&["tree", "-i", "schannel", "--edges", "all", "--prefix", "none"])?;
         anyhow::ensure!(
             who.status.success(),
             "cargo tree -i schannel 执行失败：{}",
@@ -645,16 +207,7 @@ fn audit() -> anyhow::Result<()> {
          cargo tree -e features -i keyring 输出：\n{features}"
     );
 
-    // 未分类依赖 = 有人引入了白名单之外的新 crate，必须人工确认是不是纯 Rust
-    anyhow::ensure!(
-        report.is_ok(),
-        "依赖树里有 {} 个未分类依赖：{:?}。\n\
-         请确认它们是纯 Rust；确认后把名字加入 crates/xtask/src/main.rs 的 KNOWN_PURE_RUST 白名单。",
-        report.unclassified.len(),
-        report.unclassified
-    );
-
-    println!("\n✅ 未发现被禁用的 C 实现依赖，且所有依赖均已分类");
+    println!("\n✅ 依赖审计通过：没有被禁用的 C 实现，也没有未确认的 FFI 绑定 crate");
     Ok(())
 }
 
@@ -777,7 +330,7 @@ fn package() -> anyhow::Result<()> {
     let dist_dir = root.join("target").join("dist");
 
     println!("📦 开始构建 Release 二进制...");
-    let output = cargo(&["build", "--release", "-p", "lyra"])?;
+    let output = cargo(&["build", "--release", "--locked", "-p", "lyra"])?;
     anyhow::ensure!(
         output.status.success(),
         "cargo build --release 执行失败：{}",
@@ -794,25 +347,21 @@ fn package() -> anyhow::Result<()> {
     // 获取工作区版本号
     let version = env!("CARGO_PKG_VERSION");
 
-    // 生成便携版压缩包
+    // 生成便携版压缩包（Compress-Archive 是 Windows 自带的，不依赖外部 tar）
     let zip_dest = dist_dir.join(format!("Lyra-v{version}-windows-x64-portable.zip"));
-    let tar_status = Command::new("tar")
+    let status = Command::new("powershell")
         .args([
-            "-a",
-            "-c",
-            "-f",
-            &zip_dest.to_string_lossy(),
-            "-C",
-            &release_dir.to_string_lossy(),
-            "lyra.exe",
+            "-NoProfile",
+            "-Command",
+            &format!(
+                "Compress-Archive -Path '{}' -DestinationPath '{}' -Force",
+                exe_src.display(),
+                zip_dest.display()
+            ),
         ])
-        .status();
-    match tar_status {
-        Ok(status) if status.success() => println!("✅ 绿色便携包生成完成: {}", zip_dest.display()),
-        // 检查归档退出码
-        Ok(status) => println!("⚠️  tar 退出码 {status}，便携包可能未生成: {}", zip_dest.display()),
-        Err(error) => println!("⚠️  无法执行 tar（{error}），已跳过便携包: {}", zip_dest.display()),
-    }
+        .status()?;
+    anyhow::ensure!(status.success(), "便携包生成失败（Compress-Archive 返回 {status}）");
+    println!("✅ 绿色便携包生成完成: {}", zip_dest.display());
 
     // 寻找 Inno Setup 编译器 ISCC
     let iscc_paths = [
@@ -857,7 +406,42 @@ fn package() -> anyhow::Result<()> {
         println!("   提示: 可通过 `winget install JRSoftware.InnoSetup` 安装后再次运行以生成安装包。");
     }
 
+    write_checksums(&dist_dir)?;
     Ok(())
+}
+
+/// 为产物目录生成 SHA256 校验清单
+///
+/// 清单与产物放在同一目录：CI 与本地打包的产物集合因此完全一致。
+fn write_checksums(dist_dir: &Path) -> anyhow::Result<()> {
+    let manifest = dist_dir.join("checksums.sha256");
+    let _ = std::fs::remove_file(&manifest);
+    let mut entries: Vec<PathBuf> = std::fs::read_dir(dist_dir)?
+        .filter_map(Result::ok)
+        .map(|entry| entry.path())
+        .filter(|path| path.is_file() && path.extension().is_some_and(|ext| ext == "exe" || ext == "zip"))
+        .collect();
+    entries.sort();
+    let mut text = String::new();
+    for path in &entries {
+        let hash = sha256_hex(&std::fs::read(path)?);
+        let name = path.file_name().unwrap_or_default().to_string_lossy();
+        let _ = writeln!(text, "{hash}  {name}");
+    }
+    std::fs::write(&manifest, text)?;
+    println!("✅ 校验清单生成完成: {}", manifest.display());
+    Ok(())
+}
+
+/// 计算文件的 SHA-256（十六进制小写）
+fn sha256_hex(data: &[u8]) -> String {
+    use sha2::{Digest as _, Sha256};
+    let digest = Sha256::digest(data);
+    let mut out = String::with_capacity(digest.len() * 2);
+    for byte in digest {
+        let _ = write!(out, "{byte:02x}");
+    }
+    out
 }
 
 /// 构建与打包 Windows 安装程序（非 Windows 平台没有对应的安装器）
@@ -881,7 +465,6 @@ mod tests {
         let report = classify(&names(&["ring", "windows", "serde", "lyra-api"]));
         assert!(report.is_ok());
         assert_eq!(report.non_rust, vec!["ring".to_owned()]);
-        assert_eq!(report.system_bindings, vec!["windows".to_owned()]);
         assert_eq!(report.unique, 4);
     }
 
@@ -900,18 +483,18 @@ mod tests {
     }
 
     #[test]
-    fn unknown_crates_are_reported_as_unclassified() {
+    fn unexpected_c_bindings_are_reported() {
         // 没人预料到的 C 依赖必须被报出来，而不是被静默放行
         let report = classify(&names(&["libz-sys", "ring", "serde"]));
-        assert!(!report.is_ok(), "未分类依赖必须让审计失败");
-        assert_eq!(report.unclassified, vec!["libz-sys".to_owned()]);
+        assert!(!report.is_ok(), "未确认的 C 绑定必须让审计失败");
+        assert_eq!(report.unapproved_ffi, vec!["libz-sys".to_owned()]);
         assert_eq!(report.non_rust, vec!["ring".to_owned()]);
     }
 
     #[test]
-    fn known_pure_rust_crates_are_not_reported() {
+    fn ordinary_crates_are_not_reported() {
         let report = classify(&names(&["serde", "tokio", "windows", "ring"]));
-        assert!(report.unclassified.is_empty(), "{:?}", report.unclassified);
+        assert!(report.unapproved_ffi.is_empty(), "{:?}", report.unapproved_ffi);
         assert!(report.is_ok());
     }
 

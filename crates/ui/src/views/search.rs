@@ -15,11 +15,11 @@ use lyra_api::model::Song;
 use crate::bridge::{Backend, Msg};
 use crate::shell::AppShell;
 use crate::theme::{
-    ACCENT_GREEN, ACCENT_GREEN_HOVER, ACCENT_GREEN_LIGHT, CARD_BORDER, TEXT_MUTED, badge, chip, hex_rgb,
+    ACCENT_GREEN, ACCENT_GREEN_HOVER, ACCENT_GREEN_LIGHT, CANVAS_BG, CARD_BORDER, TEXT_MUTED, badge, chip,
     notice_with_icon, row_sizes, title,
 };
 use crate::views::player::PlayerModel;
-use crate::views::tracks::{TrackRow, build_rows, track_row};
+use crate::views::tracks::{RowContext, TrackRow, build_rows, current_play_state, song_row};
 
 /// 快捷热门搜索词
 const HOT_TAGS: &[&str] = &[
@@ -159,26 +159,6 @@ impl SearchView {
         }
         cx.notify();
     }
-
-    /// 渲染单首曲目行
-    fn row(&self, index: usize, cur_hash: Option<&str>, is_playing: bool, cx: &App) -> AnyElement {
-        let this_hash = self.songs.get(index).map(|s| s.hash.as_str());
-        let is_current = cur_hash.is_some() && cur_hash == this_hash;
-        let Some(row) = self.rows.get(index) else {
-            return div().into_any_element();
-        };
-        track_row(
-            index,
-            row,
-            &self.songs,
-            &self.shell,
-            &self.backend,
-            None,
-            is_current,
-            is_playing,
-            cx,
-        )
-    }
 }
 
 /// 检查关键词是否有效（非空且非全空白）
@@ -202,7 +182,7 @@ impl Render for SearchView {
                     .w_full()
                     .gap(px(10.0))
                     .items_center()
-                    .child(title("发现歌曲", cx))
+                    .child(title("发现歌曲"))
                     .child(badge(
                         format!("{} 条搜索结果", self.songs.len()),
                         ACCENT_GREEN_LIGHT,
@@ -238,7 +218,7 @@ impl Render for SearchView {
                             .px_3()
                             .py(px(4.0))
                             .rounded(px(10.0))
-                            .bg(hex_rgb(0xf2f4f7))
+                            .bg(CANVAS_BG)
                             .border_1()
                             .border_color(CARD_BORDER)
                             .gap(px(8.0))
@@ -283,7 +263,7 @@ impl Render for SearchView {
             // 热门词是 'static 字符串，直接借用，不构造中间 String
             let kw: &'static str = tag;
             hot_row = hot_row.child(
-                chip(kw, false, Some(IconName::Sparkles))
+                chip(kw, IconName::Sparkles)
                     .id(("hot_tag", index))
                     .on_click(cx.listener(move |this, _event, window, cx| {
                         this.search_keyword(kw, window, cx);
@@ -293,17 +273,16 @@ impl Render for SearchView {
         header = header.child(hot_row);
 
         let body = if self.loading {
-            notice_with_icon(IconName::RefreshCw, "正在全网曲库检索中…", cx)
+            notice_with_icon(IconName::RefreshCw, "正在全网曲库检索中…")
         } else if let Some(error) = &self.error {
-            notice_with_icon(IconName::CircleAlert, error.clone(), cx)
+            notice_with_icon(IconName::CircleAlert, error.clone())
         } else if !self.searched {
             notice_with_icon(
                 IconName::Search,
                 "输入歌曲、歌手或专辑关键字，或点击上方热搜标签探索音乐",
-                cx,
             )
         } else if self.songs.is_empty() {
-            notice_with_icon(IconName::Search, "没有找到相关歌曲，换个关键词试试吧", cx)
+            notice_with_icon(IconName::Search, "没有找到相关歌曲，换个关键词试试吧")
         } else {
             let this = cx.entity();
             let sizes = self.sizes.clone();
@@ -314,15 +293,21 @@ impl Render for SearchView {
                 move |view, range, _window, cx| {
                     let app: &App = cx;
                     // 播放器状态整批读取一次，避免每行都做一次实体读取
-                    let (cur_hash, is_playing) = {
-                        let model = view.player.read(app);
-                        (
-                            model.current_song().map(|s| s.hash.clone()),
-                            model.snapshot.state == lyra_audio::State::Playing,
-                        )
-                    };
+                    let (cur_hash, is_playing) = current_play_state(&view.player, app);
                     range
-                        .map(|index| view.row(index, cur_hash.as_deref(), is_playing, app))
+                        .map(|index| {
+                            song_row(
+                                index,
+                                &RowContext {
+                                    queue: &view.songs,
+                                    rows: &view.rows,
+                                    shell: &view.shell,
+                                    backend: &view.backend,
+                                },
+                                cur_hash.as_deref(),
+                                is_playing,
+                            )
+                        })
                         .collect::<Vec<_>>()
                 },
             )

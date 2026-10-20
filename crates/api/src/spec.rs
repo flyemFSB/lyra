@@ -4,7 +4,7 @@ use std::borrow::Cow;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use lyra_proto::consts::{APPID, CLIENTVER, KG_RC, KG_REC, KG_RF, KG_THASH, UA_DEFAULT};
-use lyra_proto::{Params, Val, sign_key, signature_android, signature_web};
+use lyra_proto::{Params, Val, sign_key, signature_android};
 
 use crate::error::{Error, Result};
 use crate::transport::{Method, Request};
@@ -14,6 +14,11 @@ pub const GATEWAY: &str = "https://gateway.kugou.com";
 /// 短信登录重试网关
 pub const LOGIN_GATEWAY: &str = "https://loginserviceretry.kugou.com";
 /// 验证码下发服务（明文 HTTP 协议）
+///
+/// shortcut: 上游 `login.user.kugou.com` 的 TLS 握手失败（实测 https 不可用，
+/// http 可用且返回正常业务码），因此发码请求只能走明文 HTTP。
+/// 风险是同网段中间人可改写请求体（改 pk/params 即可让上游给任意号码发码）。
+/// 当上游支持 HTTPS 时改回 `https://` 即可，其余代码无需改动。
 pub const CAPTCHA_BASE: &str = "http://login.user.kugou.com";
 /// 设备注册服务
 pub const USER_SERVICE: &str = "https://userservice.kugou.com";
@@ -21,25 +26,8 @@ pub const USER_SERVICE: &str = "https://userservice.kugou.com";
 pub const LYRICS_BASE: &str = "https://lyrics.kugou.com";
 /// 会员服务
 pub const VIP_BASE: &str = "https://kugouvip.kugou.com";
-/// 行为验证服务
-pub const VERIFY_BASE: &str = "https://verifyservice.kugou.com";
-/// 用户关系服务
-pub const RELATION_BASE: &str = "http://relation.user.kugou.com";
 /// 云歌单服务路由网关
 pub const CLOUD_ROUTER: &str = "cloudlist.service.kugou.com";
-
-/// 签名模式
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum SignMode {
-    /// Android 客户端签名（默认）
-    Android,
-    /// Web / H5 签名
-    Web,
-    /// 设备注册签名
-    Register,
-    /// 不签名
-    None,
-}
 
 /// 获取当前 Unix 毫秒时间戳
 #[must_use]
@@ -148,14 +136,8 @@ pub struct RequestSpec {
     pub headers: Vec<(String, String)>,
     /// 是否禁用公共默认参数
     pub clear_default_params: bool,
-    /// 是否禁用默认请求头
-    pub clear_default_headers: bool,
-    /// 签名算法模式
-    pub sign: SignMode,
     /// 是否追加音源验证密钥 `signKey`
     pub encrypt_key: bool,
-    /// 透传客户端 IP
-    pub ip: Option<String>,
     /// 覆盖本次请求的 `dfid`
     pub dfid_override: Option<String>,
     /// 签名后追加的额外查询参数
@@ -187,11 +169,8 @@ impl RequestSpec {
             raw_body: None,
             headers: Vec::new(),
             clear_default_params: false,
-            clear_default_headers: false,
-            sign: SignMode::Android,
             encrypt_key: false,
             dfid_override: None,
-            ip: None,
             extra_query: Vec::new(),
             timeout: Some(Duration::from_secs(15)),
         }
@@ -246,20 +225,6 @@ impl RequestSpec {
         self
     }
 
-    /// 禁用默认请求头
-    #[must_use]
-    pub fn clear_default_headers(mut self) -> Self {
-        self.clear_default_headers = true;
-        self
-    }
-
-    /// 禁用请求签名
-    #[must_use]
-    pub fn no_signature(mut self) -> Self {
-        self.sign = SignMode::None;
-        self
-    }
-
     /// 启用音源验证密钥追加
     #[must_use]
     pub fn encrypt_key(mut self) -> Self {
@@ -274,23 +239,12 @@ impl RequestSpec {
         self
     }
 
-    /// 设置透传的客户端 IP
-    #[must_use]
-    pub fn ip(mut self, ip: impl Into<String>) -> Self {
-        let ip = ip.into();
-        if !ip.is_empty() {
-            self.ip = Some(ip);
-        }
-        self
-    }
-
     /// 添加不参与签名的查询参数
     #[must_use]
     pub fn extra_query(mut self, key: impl Into<String>, value: impl Into<String>) -> Self {
         self.extra_query.push((key.into(), value.into()));
         self
     }
-
     /// 设置请求超时时长
     #[must_use]
     pub fn timeout(mut self, timeout: Duration) -> Self {
@@ -359,15 +313,7 @@ impl RequestSpec {
         let body_string = body_bytes.as_deref().map_or(Cow::Borrowed(""), String::from_utf8_lossy);
 
         if !params.contains("signature") {
-            let signature = match self.sign {
-                SignMode::Android => Some(signature_android(&params, &body_string)),
-                SignMode::Web => Some(signature_web(&params, &body_string)),
-                SignMode::Register => Some(lyra_proto::signature_register(&params)),
-                SignMode::None => None,
-            };
-            if let Some(signature) = signature {
-                params.set("signature", signature);
-            }
+            params.set("signature", signature_android(&params, &body_string));
         }
 
         let clienttime_header = params.get("clienttime").map(Val::render);
@@ -382,15 +328,8 @@ impl RequestSpec {
         if let Some(clienttime) = clienttime_header {
             protocol_headers.push(("clienttime".to_owned(), clienttime));
         }
-        if let Some(ip) = &self.ip {
-            protocol_headers.push(("X-Real-IP".to_owned(), ip.clone()));
-            protocol_headers.push(("X-Forwarded-For".to_owned(), ip.clone()));
-        }
 
-        let mut layers: Vec<(String, String)> = Vec::new();
-        if !self.clear_default_headers {
-            layers.push(("User-Agent".to_owned(), UA_DEFAULT.to_owned()));
-        }
+        let mut layers: Vec<(String, String)> = vec![("User-Agent".to_owned(), UA_DEFAULT.to_owned())];
         // 存在 JSON 体时自动设置 Content-Type
         if self.body.is_some() {
             layers.push(("Content-Type".to_owned(), "application/json".to_owned()));
@@ -419,8 +358,7 @@ fn param_i64(params: &Params, key: &str, fallback: i64) -> i64 {
 }
 
 /// 拼接 URL 基础路径与子路径并规范化斜杠
-#[must_use]
-pub fn combine_urls(base: &str, path: &str) -> String {
+fn combine_urls(base: &str, path: &str) -> String {
     let base = base.trim_end_matches('/');
     let path = path.trim_start_matches('/');
     if path.is_empty() {
@@ -431,8 +369,7 @@ pub fn combine_urls(base: &str, path: &str) -> String {
 }
 
 /// 合并请求头并消除大小写重复
-#[must_use]
-pub fn merge_headers(layers: Vec<(String, String)>) -> Vec<(String, String)> {
+fn merge_headers(layers: Vec<(String, String)>) -> Vec<(String, String)> {
     let mut out: Vec<(String, String)> = Vec::with_capacity(layers.len());
     for (key, value) in layers {
         match out.iter_mut().find(|(k, _)| k.eq_ignore_ascii_case(&key)) {
@@ -555,33 +492,13 @@ mod tests {
     fn clear_default_params_keeps_only_module_params() {
         let request = RequestSpec::get("/v1/search")
             .clear_default_params()
-            .no_signature()
             .param("hash", "abc")
             .build(&session());
         let names: Vec<&str> = request.query.iter().map(|(k, _)| k.as_str()).collect();
-        assert_eq!(names, vec!["hash"]);
+        assert_eq!(names, vec!["hash", "signature"]);
         // 无时间戳参数时请求头中亦不携带 clienttime。
         assert_eq!(request.get_header("clienttime"), None);
         assert_eq!(request.get_header("dfid"), Some("DfidValue"));
-    }
-
-    #[test]
-    fn no_signature_omits_the_signature_but_keeps_params() {
-        let request = RequestSpec::get("/v1/search")
-            .clear_default_params()
-            .no_signature()
-            .build(&session());
-        assert!(!request.query.iter().any(|(k, _)| k == "signature"));
-    }
-
-    #[test]
-    fn clear_default_headers_drops_the_ua() {
-        let request = RequestSpec::get("/v1/x")
-            .clear_default_headers()
-            .header("x-router", "svc.kugou.com")
-            .build(&session());
-        assert_eq!(request.get_header("User-Agent"), None);
-        assert_eq!(request.get_header("x-router"), Some("svc.kugou.com"));
     }
 
     #[test]

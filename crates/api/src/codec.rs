@@ -57,17 +57,6 @@ pub fn as_str_cow(value: &Value) -> Cow<'_, str> {
     }
 }
 
-/// 宽容解析为布尔值
-#[must_use]
-pub fn as_bool(value: &Value) -> bool {
-    match value {
-        Value::Bool(b) => *b,
-        Value::Number(n) => n.as_i64().unwrap_or(0) != 0,
-        Value::String(s) => matches!(s.as_str(), "true" | "1" | "yes"),
-        _ => false,
-    }
-}
-
 /// 按候选键名优先提取字段（大小写无关）
 #[must_use]
 pub fn pick<'a>(value: &'a Value, keys: &[&str]) -> Option<&'a Value> {
@@ -316,9 +305,6 @@ mod tests {
         assert_eq!(as_i64(&json!(12.9)), 12);
         assert_eq!(as_u64(&json!("7")), 7);
         assert_eq!(as_str(&json!(9)), "9");
-        assert!(as_bool(&json!("true")));
-        assert!(as_bool(&json!(1)));
-        assert!(!as_bool(&json!("false")));
     }
 
     #[test]

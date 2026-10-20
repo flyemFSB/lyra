@@ -8886,6 +8886,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "lyra-app",
+ "sha2 0.10.9",
  "tokio",
  "tracing-subscriber",
 ]

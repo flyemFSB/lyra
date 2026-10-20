@@ -1,7 +1,7 @@
 //! 应用主外壳：导航、内容承载、播放模式调度与播放队列抽屉
 
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use async_channel::Receiver;
 use gpui_kit::assets::IconName;
@@ -13,7 +13,6 @@ use gpui_kit::*;
 use lyra_api::model::Song;
 
 use crate::bridge::{Backend, Msg, Nav};
-use crate::format::format_duration;
 use crate::theme::{
     ACCENT_GREEN, ACCENT_GREEN_BORDER, ACCENT_GREEN_HOVER, ACCENT_GREEN_LIGHT, CANVAS_BG, CARD_BG, CARD_BORDER,
     SURFACE_HOVER, TEXT_FAINT, TEXT_MUTED, TEXT_PRIMARY, badge, cover_box, hex_rgb, main_card, notice,
@@ -22,7 +21,7 @@ use crate::theme::{
 use crate::views::daily::DailyView;
 use crate::views::login::LoginView;
 use crate::views::lyrics::LyricsView;
-use crate::views::player::{PlayModeUi, PlayerBar, PlayerModel};
+use crate::views::player::{PlayerBar, PlayerModel, mode_label};
 use crate::views::playlists::{PlaylistTab, PlaylistsView};
 use crate::views::radio::RadioView;
 use crate::views::search::SearchView;
@@ -58,10 +57,11 @@ pub(crate) struct AppShell {
     history: Vec<Nav>,
     history_idx: usize,
     logged_in: bool,
+    /// 账号昵称（登录态变化时读一次，渲染期直接复用）
+    nickname: Option<String>,
     player: Entity<PlayerModel>,
     views: Option<Views>,
     toast: Option<SharedString>,
-    toast_deadline: Option<Instant>,
     /// 是否展开右侧播放队列抽屉
     show_queue: bool,
     /// 歌词大屏正在收起退出过渡
@@ -77,11 +77,23 @@ pub(crate) struct AppShell {
     queue_seq: u64,
     /// 歌词请求序列号（用于丢弃过期响应）
     lyrics_seq: u64,
+    /// 播放请求序列号（用于丢弃过期的取址结果）
+    play_seq: u64,
     /// 连续自动跳过的曲目计数
     auto_skips: usize,
     /// 轻提示过期计时任务（重复提示时自动取消前一个）
     toast_task: Option<Task<()>>,
     _drain: Task<()>,
+}
+
+/// 读取当前账号昵称（只在登录态变化时调用，渲染期不得碰数据库）
+fn read_nickname(app: &lyra_app::Kugou) -> Option<String> {
+    app.store()
+        .account()
+        .ok()
+        .flatten()
+        .map(|account| account.nickname)
+        .filter(|nickname| !nickname.is_empty())
 }
 
 impl AppShell {
@@ -102,16 +114,17 @@ impl AppShell {
             }
         });
         let initial_nav = if logged_in { Nav::Daily } else { Nav::Login };
+        let nickname = read_nickname(&backend.app());
         Self {
             backend,
             nav: initial_nav,
             history: vec![initial_nav],
             history_idx: 0,
             logged_in,
+            nickname,
             player,
             views: None,
             toast: None,
-            toast_deadline: None,
             show_queue: false,
             closing_lyrics: false,
             closing_lyrics_seq: 1,
@@ -120,6 +133,7 @@ impl AppShell {
             toast_seq: 1,
             queue_seq: 1,
             lyrics_seq: 0,
+            play_seq: 0,
             auto_skips: 0,
             toast_task: None,
             _drain: drain,
@@ -207,13 +221,45 @@ impl AppShell {
                 }
                 Err(error) => self.set_toast(format!("移除失败: {error}"), cx),
             },
+            // 播放请求：过期的响应必须丢弃，否则旧歌会抢在新歌之前起播
+            Msg::PlayReady {
+                seq,
+                hash,
+                track,
+                preview_ms,
+            } => {
+                if seq != self.play_seq {
+                    return;
+                }
+                // 曲目必须仍是当前曲目才起播
+                let is_current = self
+                    .player
+                    .read(cx)
+                    .current_song()
+                    .is_some_and(|song| song.hash == hash);
+                if !is_current {
+                    return;
+                }
+                if let Some(engine) = self.backend.engine() {
+                    engine.play(track);
+                }
+                // 上游仅授权试听片段
+                if preview_ms > 0 {
+                    self.set_toast(format!("仅试听 {} 秒（完整版需会员或购买）", preview_ms / 1000), cx);
+                }
+            }
+            Msg::PlayFailed { seq, hash, message } => {
+                if seq != self.play_seq {
+                    return;
+                }
+                self.on_play_failed(&hash, &message, cx);
+            }
             Msg::AudioEnded => {
                 // 正常播放结束，重置连续跳过计数
                 self.auto_skips = 0;
                 self.play_next(cx);
             }
             // 播放失败处理：提示并尝试跳过
-            Msg::AudioFailed { hash, message } => self.on_play_failed(&hash, &message, cx),
             Msg::EngineFailed(message) => self.on_engine_failed(&message, cx),
             Msg::Noop => {}
             Msg::Toast(text) => self.set_toast(text, cx),
@@ -332,7 +378,7 @@ impl AppShell {
             Nav::Playlists => views.playlists.update(cx, PlaylistsView::reload),
             Nav::Daily => views.daily.update(cx, DailyView::reload),
             Nav::Radio => views.radio.update(cx, RadioView::reload),
-            Nav::Settings => views.settings.update(cx, SettingsView::ensure),
+            Nav::Settings => views.settings.update(cx, SettingsView::reload),
             Nav::Login | Nav::Search | Nav::Lyrics => {}
         }
     }
@@ -360,17 +406,21 @@ impl AppShell {
         let quality = app
             .settings()
             .map_or_else(|_| "flac".to_owned(), |settings| settings.quality);
-        // 携带歌曲哈希以在异步回调中核对曲目一致性
+        // 携带歌曲哈希与请求序号：过期的取址结果必须被丢弃，
+        // 否则先发后到的旧请求会抢在新歌之前起播。
         let hash = song.hash.clone();
+        self.play_seq += 1;
+        let seq = self.play_seq;
         self.backend.spawn(async move {
-            match app.play(&song, &quality).await {
-                // 上游仅授权试听片段
-                Ok(playback) if playback.preview_ms > 0 => Msg::Toast(format!(
-                    "仅试听 {} 秒（完整版需会员或购买）",
-                    playback.preview_ms / 1000
-                )),
-                Ok(_) => Msg::Noop,
-                Err(error) => Msg::AudioFailed {
+            match app.prepare_play(&song, &quality).await {
+                Ok((track, playback)) => Msg::PlayReady {
+                    seq,
+                    hash,
+                    track,
+                    preview_ms: playback.preview_ms,
+                },
+                Err(error) => Msg::PlayFailed {
+                    seq,
                     hash,
                     message: error.to_string(),
                 },
@@ -414,7 +464,7 @@ impl AppShell {
         let next_idx = self.player.read(cx).next_index();
         if let Some(idx) = next_idx {
             self.player.update(cx, |model, model_cx| {
-                model.index = idx;
+                model.set_index(idx);
                 model_cx.notify();
             });
             self.play_index(cx);
@@ -428,7 +478,7 @@ impl AppShell {
         let prev_idx = self.player.read(cx).prev_index();
         if let Some(idx) = prev_idx {
             self.player.update(cx, |model, model_cx| {
-                model.index = idx;
+                model.set_index(idx);
                 model_cx.notify();
             });
             self.play_index(cx);
@@ -460,6 +510,7 @@ impl AppShell {
     /// 处理登录成功事件
     fn on_logged_in(&mut self, cx: &mut Context<Self>) {
         self.logged_in = true;
+        self.nickname = read_nickname(&self.backend.app());
         self.set_toast("登录成功".to_owned(), cx);
         if let Some(views) = self.views.as_ref() {
             views.login.update(cx, LoginView::reset);
@@ -467,16 +518,15 @@ impl AppShell {
             views.daily.update(cx, DailyView::reload);
             views.settings.update(cx, SettingsView::ensure);
         }
-        self.nav = Nav::Playlists;
-        self.nav_seq += 1;
+        // 必须走 set_nav：否则历史栈与当前页不同步，后退/前进会失效
+        self.set_nav(Nav::Playlists, cx);
         cx.notify();
     }
 
     /// 处理退出登录事件
     fn on_logged_out(&mut self, cx: &mut Context<Self>) {
         self.logged_in = false;
-        self.nav = Nav::Login;
-        self.nav_seq += 1;
+        self.nickname = None;
         // 清除旧账号视图状态
         if let Some(views) = self.views.as_ref() {
             views.playlists.update(cx, PlaylistsView::reset);
@@ -485,6 +535,7 @@ impl AppShell {
             views.lyrics.update(cx, LyricsView::clear);
             views.search.update(cx, SearchView::reset);
         }
+        self.set_nav(Nav::Login, cx);
         self.set_toast("已登出".to_owned(), cx);
     }
 
@@ -492,14 +543,12 @@ impl AppShell {
     fn set_toast(&mut self, text: String, cx: &mut Context<Self>) {
         self.toast_seq += 1;
         self.toast = Some(SharedString::from(text));
-        self.toast_deadline = Some(Instant::now() + TOAST_TTL);
         cx.notify();
         // 到期后再收一次提示：一次性计时任务，重复提示时会自动取消上一个
         self.toast_task = Some(cx.spawn(async move |this, cx| {
             cx.background_executor().timer(TOAST_TTL).await;
             let _ = this.update(cx, |shell, cx| {
                 shell.toast = None;
-                shell.toast_deadline = None;
                 shell.toast_task = None;
                 cx.notify();
             });
@@ -556,7 +605,7 @@ impl AppShell {
                     .rounded(px(999.0))
                     .bg(if is_search { ACCENT_GREEN_LIGHT } else { hex_rgb(0xeef1f5) })
                     .border_1()
-                    .border_color(if is_search { ACCENT_GREEN_BORDER } else { hex_rgb(0xe5e7eb) })
+                    .border_color(if is_search { ACCENT_GREEN_BORDER } else { CARD_BORDER })
                     .flex()
                     .items_center()
                     .gap(px(8.0))
@@ -599,21 +648,14 @@ impl AppShell {
         column = column.child(crate::logo::lyra_brand_header());
 
         // 用户身份卡片
-        let username = self
-            .backend
-            .app()
-            .store()
-            .account()
-            .ok()
-            .flatten()
-            .and_then(|a| if a.nickname.is_empty() { None } else { Some(a.nickname) })
-            .unwrap_or_else(|| {
-                if self.logged_in {
-                    "已登录用户".to_owned()
-                } else {
-                    "点击登录账号".to_owned()
-                }
-            });
+        // 昵称在登录态变化时读一次并缓存：渲染期访问存储会拖慢每一帧
+        let username = self.nickname.clone().unwrap_or_else(|| {
+            if self.logged_in {
+                "已登录用户".to_owned()
+            } else {
+                "点击登录账号".to_owned()
+            }
+        });
 
         let user_capsule = div()
             .id("user_capsule")
@@ -643,7 +685,7 @@ impl AppShell {
                             .bg(if self.logged_in {
                                 ACCENT_GREEN_LIGHT
                             } else {
-                                hex_rgb(0xe5e7eb)
+                                CARD_BORDER
                             })
                             .border_1()
                             .border_color(if self.logged_in {
@@ -704,13 +746,11 @@ impl AppShell {
                 .items_center()
                 .justify_center()
                 .gap(px(4.0))
-                .when(active, |this| {
-                    this.bg(hex_rgb(0x111827)).text_color(hex_rgb(0xffffff)).shadow_sm()
-                })
+                .when(active, |this| this.bg(TEXT_PRIMARY).text_color(CARD_BG).shadow_sm())
                 .when(!active, |this| {
                     this.bg(hex_rgb(0xe5e9ef))
-                        .text_color(hex_rgb(0x4b5563))
-                        .hover(|s| s.bg(hex_rgb(0xd9dfe7)).text_color(hex_rgb(0x111827)))
+                        .text_color(TEXT_MUTED)
+                        .hover(|s| s.bg(hex_rgb(0xd9dfe7)).text_color(TEXT_PRIMARY))
                 })
                 .on_click(cx.listener(move |shell, _event, _window, cx| shell.set_nav(nav, cx)))
                 .child(Icon::new(icon).size(px(14.0)))
@@ -835,7 +875,7 @@ impl AppShell {
         let mut playlist_list = v_flex().w_full().gap(px(3.0));
 
         if loading_playlists && entries.is_empty() {
-            playlist_list = playlist_list.child(notice_with_icon(IconName::RefreshCw, "加载歌单中…", cx));
+            playlist_list = playlist_list.child(notice_with_icon(IconName::RefreshCw, "加载歌单中…"));
         }
 
         if !loading_playlists && entries.is_empty() {
@@ -846,7 +886,6 @@ impl AppShell {
                 } else {
                     "暂无收藏歌单"
                 },
-                cx,
             )));
         }
 
@@ -897,7 +936,7 @@ impl AppShell {
                             .child(Icon::new(IconName::Heart).size(px(14.0)).text_color(hex_rgb(0xef4444)))
                             .into_any_element()
                     } else {
-                        cover_box(&name, 28.0, cx).into_any_element()
+                        cover_box(&name, 28.0).into_any_element()
                     })
                     .child(
                         div()
@@ -969,10 +1008,11 @@ impl AppShell {
             return None;
         }
 
-        let (queue, current_idx, is_playing, mode) = {
+        let (queue, rows, current_idx, is_playing, mode) = {
             let model = self.player.read(cx);
             (
                 model.queue.clone(),
+                model.rows.clone(),
                 model.index,
                 model.snapshot.state == lyra_audio::State::Playing,
                 model.mode,
@@ -1018,7 +1058,7 @@ impl AppShell {
                 h_flex()
                     .gap(px(6.0))
                     .items_center()
-                    .child(badge(mode.label(), hex_rgb(0xf2f4f7), TEXT_MUTED))
+                    .child(badge(mode_label(mode), CANVAS_BG, TEXT_MUTED))
                     .child(
                         Button::new("close_queue")
                             .ghost()
@@ -1032,7 +1072,7 @@ impl AppShell {
         panel = panel.child(header);
 
         if queue.is_empty() {
-            panel = panel.child(notice_with_icon(IconName::ListMusic, "队列暂无歌曲", cx));
+            panel = panel.child(notice_with_icon(IconName::ListMusic, "队列暂无歌曲"));
         } else {
             let mut list = v_flex()
                 .id("queue_tracks_scroll")
@@ -1040,10 +1080,12 @@ impl AppShell {
                 .min_h(px(0.0))
                 .overflow_y_scrollbar()
                 .gap(px(4.0));
-            for (idx, song) in queue.iter().enumerate() {
+            for idx in 0..queue.len() {
                 let is_current = idx == current_idx;
                 let play_queue = queue.clone();
                 let shell = cx.entity().downgrade();
+                // 展示文本已在队列入队时预格式化：渲染期不再拼字符串
+                let row = rows.get(idx);
 
                 list = list.child(
                     h_flex()
@@ -1105,21 +1147,21 @@ impl AppShell {
                                         })
                                         .text_color(if is_current { ACCENT_GREEN_HOVER } else { TEXT_PRIMARY })
                                         .truncate()
-                                        .child(SharedString::from(song.display_title())),
+                                        .child(
+                                            row.map_or_else(|| SharedString::new_static(""), |row| row.title.clone()),
+                                        ),
                                 )
                                 .child(
-                                    div()
-                                        .text_xs()
-                                        .text_color(TEXT_MUTED)
-                                        .truncate()
-                                        .child(SharedString::from(song.display_singer())),
+                                    div().text_xs().text_color(TEXT_MUTED).truncate().child(
+                                        row.map_or_else(|| SharedString::new_static(""), |row| row.singer.clone()),
+                                    ),
                                 ),
                         )
                         .child(
                             div()
                                 .text_xs()
                                 .text_color(TEXT_FAINT)
-                                .child(format_duration(song.duration_ms)),
+                                .child(row.map_or_else(|| SharedString::new_static(""), |row| row.duration.clone())),
                         ),
                 );
             }
@@ -1133,7 +1175,7 @@ impl AppShell {
 impl Render for AppShell {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let Some(views) = self.views.as_ref() else {
-            return notice("初始化中…", cx);
+            return notice("初始化中…");
         };
         // 全屏沉浸式歌词视图模式（非退出过渡期）
         if self.nav == Nav::Lyrics && !self.closing_lyrics {

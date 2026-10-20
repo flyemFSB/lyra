@@ -6,7 +6,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use lyra_audio::{AudioConfig, Engine, Event, FetchResult, Fetcher, ReadSeek, State, TrackRef, spawn_with};
+use lyra_audio::{Engine, Event, FetchResult, Fetcher, ReadSeek, State, TrackRef, spawn};
 
 /// 本地文件抓取器
 struct FileFetcher(PathBuf);
@@ -35,10 +35,9 @@ fn write_sine_wav(path: &Path, seconds: u32) {
 
 /// 创建收集事件的测试引擎
 fn engine_with_events(path: &Path, events: Arc<Mutex<Vec<Event>>>) -> Option<Engine> {
-    spawn_with(
+    spawn(
         Arc::new(FileFetcher(path.to_path_buf())),
         Box::new(move |event| events.lock().unwrap().push(event)),
-        AudioConfig::default(),
     )
     .ok()
 }

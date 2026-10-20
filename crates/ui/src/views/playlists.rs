@@ -14,7 +14,7 @@ use crate::bridge::{Backend, Msg};
 use crate::shell::AppShell;
 use crate::theme::{CARD_BORDER, TEXT_MUTED, cover_box, notice_with_icon, row_sizes, title};
 use crate::views::player::PlayerModel;
-use crate::views::tracks::{TrackRow, build_rows, track_row};
+use crate::views::tracks::{RowContext, TrackRow, build_rows, current_play_state, track_row};
 
 /// 歌单分类标签页
 #[derive(Clone, Copy, PartialEq, Eq, Default)]
@@ -238,7 +238,9 @@ impl PlaylistsView {
             Ok(page) => {
                 self.next_page = page.cursor.as_deref().and_then(|cursor| cursor.parse().ok());
                 // 追加时优先零拷贝接管旧列表；队列仍持有引用时才退化为深拷贝
-                let mut songs = match Arc::try_unwrap(self.songs.clone()) {
+                // 注意：必须先把自己这份 Arc 换走，否则引用计数永远大于 1，
+                // try_unwrap 必然失败，退化成每次翻页都深拷贝整张歌单。
+                let mut songs = match Arc::try_unwrap(std::mem::replace(&mut self.songs, Arc::new(Vec::new()))) {
                     Ok(owned) => owned,
                     Err(shared) => (*shared).clone(),
                 };
@@ -299,14 +301,7 @@ impl PlaylistsView {
     }
 
     /// 渲染单首曲目行
-    fn row(
-        &self,
-        index: usize,
-        cur_hash: Option<&str>,
-        is_playing: bool,
-        listid: Option<&SharedString>,
-        cx: &App,
-    ) -> AnyElement {
+    fn row(&self, index: usize, cur_hash: Option<&str>, is_playing: bool, listid: Option<&SharedString>) -> AnyElement {
         let this_hash = self.songs.get(index).map(|s| s.hash.as_str());
         let is_current = cur_hash.is_some() && cur_hash == this_hash;
         let Some(row) = self.rows.get(index) else {
@@ -315,13 +310,15 @@ impl PlaylistsView {
         track_row(
             index,
             row,
-            &self.songs,
-            &self.shell,
-            &self.backend,
+            &RowContext {
+                queue: &self.songs,
+                rows: &self.rows,
+                shell: &self.shell,
+                backend: &self.backend,
+            },
             listid,
             is_current,
             is_playing,
-            cx,
         )
     }
 
@@ -335,9 +332,9 @@ impl PlaylistsView {
             .items_center()
             .border_b_1()
             .border_color(CARD_BORDER)
-            .child(cover_box(self.heading.as_ref(), 48.0, cx))
+            .child(cover_box(self.heading.as_ref(), 48.0))
             .child(
-                v_flex().gap(px(2.0)).child(title(self.heading.clone(), cx)).child(
+                v_flex().gap(px(2.0)).child(title(self.heading.clone())).child(
                     div()
                         .text_xs()
                         .text_color(TEXT_MUTED)
@@ -379,11 +376,11 @@ impl PlaylistsView {
         let listid = self.listid.as_deref().map(SharedString::from);
 
         let body = if self.loading_tracks {
-            notice_with_icon(IconName::RefreshCw, "正在加载曲目…", cx)
+            notice_with_icon(IconName::RefreshCw, "正在加载曲目…")
         } else if let Some(error) = &self.error {
-            notice_with_icon(IconName::CircleAlert, error.clone(), cx)
+            notice_with_icon(IconName::CircleAlert, error.clone())
         } else if self.songs.is_empty() {
-            notice_with_icon(IconName::ListMusic, "此歌单暂无曲目", cx)
+            notice_with_icon(IconName::ListMusic, "此歌单暂无曲目")
         } else {
             let this = cx.entity();
             let sizes = self.sizes.clone();
@@ -395,15 +392,9 @@ impl PlaylistsView {
                 move |view, range, _window, cx| {
                     let app: &App = cx;
                     // 播放器状态整批读取一次，避免每行都做一次实体读取
-                    let (cur_hash, is_playing) = {
-                        let model = view.player.read(app);
-                        (
-                            model.current_song().map(|s| s.hash.clone()),
-                            model.snapshot.state == lyra_audio::State::Playing,
-                        )
-                    };
+                    let (cur_hash, is_playing) = current_play_state(&view.player, app);
                     range
-                        .map(|index| view.row(index, cur_hash.as_deref(), is_playing, listid.as_ref(), app))
+                        .map(|index| view.row(index, cur_hash.as_deref(), is_playing, listid.as_ref()))
                         .collect::<Vec<_>>()
                 },
             )

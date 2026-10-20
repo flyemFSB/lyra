@@ -26,16 +26,18 @@ jobs:
         id: get_version
         shell: pwsh
         run: |
+          $manifest = (Select-String -Path Cargo.toml -Pattern '^version\s*=\s*"([^"]+)"').Matches[0].Groups[1].Value
           if ($env:GITHUB_REF -match '^refs/tags/v(.+)$') {
             $version = $Matches[1]
           } else {
-            $version = (Select-String -Path Cargo.toml -Pattern '^version\s*=\s*"([^"]+)"').Matches[0].Groups[1].Value
+            $version = $manifest
           }
+          if ($version -ne $manifest) { throw "tag 版本 $version 与 Cargo.toml 版本 $manifest 不一致" }
           Write-Host "发布版本号: $version"
           "VERSION=$version" | Out-File -FilePath $env:GITHUB_ENV -Append
 
       - name: 编译 Release 二进制
-        run: cargo build --release -p lyra
+        run: cargo build --release --locked -p lyra
 
       - name: 安装 Inno Setup
         shell: pwsh
@@ -48,23 +50,9 @@ jobs:
             }
           }
 
+      # 打包逻辑只有一份：与本地 `cargo xtask package` 完全一致
       - name: 构建安装程序与绿色便携包
-        shell: pwsh
-        run: |
-          New-Item -ItemType Directory -Force -Path target/dist
-          $isccPath = (Get-Command iscc -ErrorAction SilentlyContinue).Source
-          if (-not $isccPath) {
-            $isccPath = "C:\Program Files (x86)\Inno Setup 6\ISCC.exe"
-          }
-          Write-Host "使用 ISCC: $isccPath"
-          & $isccPath /DAppVersion="$env:VERSION" /DSourceDir="..\target\release" /DOutputDir="..\target\dist" installer/lyra.iss
-
-          Compress-Archive -Path target/release/lyra.exe -DestinationPath "target/dist/Lyra-v$($env:VERSION)-windows-x64-portable.zip" -Force
-
-          Get-ChildItem -Path target/dist -File | Where-Object { $_.Name -ne "checksums.sha256" } | ForEach-Object {
-            $hash = (Get-FileHash -Path $_.FullName -Algorithm SHA256).Hash.ToLower()
-            "$hash  $($_.Name)" | Out-File -FilePath target/dist/checksums.sha256 -Append -Encoding ascii
-          }
+        run: cargo run -p xtask --locked -- package
 
       - name: 发布至 GitHub Release
         uses: softprops/action-gh-release@v2

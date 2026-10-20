@@ -9,7 +9,7 @@ use gpui_kit::component::{Disableable as _, Icon, Sizable as _, h_flex, v_flex};
 use gpui_kit::*;
 
 use crate::bridge::{Backend, Msg};
-use crate::theme::{ACCENT_GREEN, CARD_BORDER, TEXT_MUTED, hex_rgb, main_card, title};
+use crate::theme::{ACCENT_GREEN, CANVAS_BG, CARD_BORDER, TEXT_MUTED, main_card, title};
 
 /// 验证码重发倒计时时长（秒）
 const RESEND_SECONDS: u32 = 60;
@@ -21,8 +21,10 @@ pub(crate) struct LoginView {
     code: Entity<InputState>,
     remaining: u32,
     sending: bool,
+    /// 登录请求进行中（与短信下发分开，避免互相挡住）
+    logging_in: bool,
     status: Option<SharedString>,
-    /// 倒计时异步任务
+    /// 倒计时异步任务（只写不读：持有任务句柄，避免任务被立即取消）
     #[allow(dead_code)]
     countdown: Task<()>,
     _subs: Vec<Subscription>,
@@ -49,6 +51,7 @@ impl LoginView {
             code,
             remaining: 0,
             sending: false,
+            logging_in: false,
             status: None,
             countdown: Task::ready(()),
             _subs: vec![mobile_sub, code_sub],
@@ -76,7 +79,8 @@ impl LoginView {
 
     /// 提交登录请求
     fn submit(&mut self, cx: &mut Context<Self>) {
-        if self.sending {
+        // 只挡重复提交登录：短信验证码仍在下发时也应允许登录
+        if self.logging_in {
             return;
         }
         let mobile = self.mobile.read(cx).value().to_string();
@@ -92,6 +96,7 @@ impl LoginView {
             return;
         }
         self.sending = true;
+        self.logging_in = true;
         self.status = Some(SharedString::new_static("正在登录验证…"));
         cx.notify();
         let app = self.backend.app();
@@ -121,6 +126,7 @@ impl LoginView {
     /// 处理登录响应
     pub(crate) fn on_login(&mut self, result: Result<(), String>, cx: &mut Context<Self>) {
         self.sending = false;
+        self.logging_in = false;
         self.status = result
             .err()
             .map(|error| SharedString::from(format!("登录失败: {error}")));
@@ -131,6 +137,7 @@ impl LoginView {
     pub(crate) fn reset(&mut self, cx: &mut Context<Self>) {
         self.remaining = 0;
         self.sending = false;
+        self.logging_in = false;
         self.status = None;
         self.countdown = Task::ready(());
         cx.notify();
@@ -184,7 +191,7 @@ impl Render for LoginView {
                                 h_flex()
                                     .gap(px(8.0))
                                     .items_center()
-                                    .child(title("登录到 Lyra音乐", cx)),
+                                    .child(title("登录到 Lyra音乐")),
                             )
                             .child(
                                 div()
@@ -198,7 +205,7 @@ impl Render for LoginView {
                             .px_3()
                             .py(px(4.0))
                             .rounded(px(10.0))
-                            .bg(hex_rgb(0xf2f4f7))
+                            .bg(CANVAS_BG)
                             .border_1()
                             .border_color(CARD_BORDER)
                             .gap(px(8.0))
@@ -217,7 +224,7 @@ impl Render for LoginView {
                                     .px_3()
                                     .py(px(4.0))
                                     .rounded(px(10.0))
-                                    .bg(hex_rgb(0xf2f4f7))
+                                    .bg(CANVAS_BG)
                                     .border_1()
                                     .border_color(CARD_BORDER)
                                     .gap(px(8.0))
