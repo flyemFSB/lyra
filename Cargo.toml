@@ -1,5 +1,7 @@
 [workspace]
-resolver = "2"
+# Rust 2024 版虚拟工作区必须显式声明解析器；resolver 3 启用 MSRV 感知的依赖解析
+# （incompatible-rust-versions = "fallback"），避免 cargo update 选到需要更高 rustc 的版本
+resolver = "3"
 members = [
   "crates/proto",
   "crates/api",
@@ -42,6 +44,8 @@ base64     = "0.22"
 hex        = "0.4"
 flate2     = "1"
 rand       = "0.8"
+# 密钥材料析构时清零（零化）
+zeroize    = "1"
 
 # 音频解码与播放（按需启用 FLAC/MP3/Vorbis/WAV/AAC）
 symphonia = { version = "0.5", default-features = false, features = ["flac", "mp3", "vorbis", "ogg", "wav", "aac", "isomp4", "pcm"] }
@@ -56,6 +60,8 @@ serde_json         = { version = "1", features = ["preserve_order"] }
 moka               = { version = "0.12", features = ["sync"] }
 redb               = "2"
 dashmap            = "6"
+# 签名热路径：参数表就地排序（方案 §5.1）
+smallvec           = "1"
 thiserror          = "2"
 anyhow             = "1"
 tracing            = "0.1"
@@ -68,7 +74,8 @@ async-channel      = "2"
 # 显式使用 Windows 原生凭据管理器，保证跨进程持久化
 keyring            = { version = "3", features = ["windows-native"] }
 url                = "2"
-reqwest            = { version = "0.12", default-features = false, features = ["rustls-tls-native-roots", "http2", "json", "charset"] }
+chrono             = { version = "0.4", default-features = false, features = ["std"] }
+reqwest            = { version = "0.12", default-features = false, features = ["rustls-tls-native-roots", "http2", "charset"] }
 
 # 测试依赖
 tempfile = "3"

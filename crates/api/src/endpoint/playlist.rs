@@ -75,7 +75,7 @@ pub async fn delete_songs(api: &Api, listid: &str, fileids: &[i64]) -> Result<()
 
     let spec = RequestSpec::post("/v4/delete_songs")
         .body(body)
-        .header("x-router", crate::cloud::CLOUD_ROUTER);
+        .header("x-router", crate::spec::CLOUD_ROUTER);
 
     api.call(spec, Freshness::SideEffect).await?;
     crate::endpoint::library::invalidate_playlist_cache(api, listid);
@@ -126,7 +126,7 @@ mod tests {
         let api = api(mock.clone());
         delete_songs(&api, "2", &[11, 22]).await.unwrap();
         let request = mock.last_request().unwrap();
-        assert_eq!(request.get_header("x-router"), Some(crate::cloud::CLOUD_ROUTER));
+        assert_eq!(request.get_header("x-router"), Some(crate::spec::CLOUD_ROUTER));
         let body: serde_json::Value = serde_json::from_slice(request.body.as_deref().unwrap()).unwrap();
         assert_eq!(body["data"][0]["fileid"], 11);
         assert_eq!(body["data"][1]["fileid"], 22);

@@ -1,6 +1,7 @@
 //! 磁盘 Blob 缓存：实现按内容寻址落盘与边下边播文件视图。
 
 use std::future::Future;
+use std::io::Write as _;
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
 use std::sync::Arc;
@@ -29,6 +30,8 @@ struct Progress {
     /// 数据写入通知锁与条件变量
     gate: Mutex<()>,
     cond: Condvar,
+    /// 完成广播等待者（每个等待者一个单槽通道）
+    waiters: Mutex<Vec<async_channel::Sender<()>>>,
 }
 
 impl Progress {
@@ -40,6 +43,7 @@ impl Progress {
             last_byte_at: Mutex::new(Instant::now()),
             gate: Mutex::new(()),
             cond: Condvar::new(),
+            waiters: Mutex::new(Vec::new()),
         }
     }
 
@@ -55,6 +59,33 @@ impl Progress {
     /// 检查下载是否长时间停滞
     fn stalled(&self) -> bool {
         self.last_byte_at.lock().elapsed() >= STALL_TIMEOUT
+    }
+
+    /// 订阅“下载结束”通知
+    ///
+    /// 复用在途下载的调用方必须等共享下载真正结束（临时文件已改名），
+    /// 否则它会在文件就绪前就去读它。
+    fn subscribe(&self) -> async_channel::Receiver<()> {
+        let (tx, rx) = async_channel::bounded(1);
+        let mut waiters = self.waiters.lock();
+        if self.complete.load(Ordering::Acquire) {
+            // 已经结束：直接唤醒订阅者
+            drop(waiters);
+            let _ = tx.try_send(());
+        } else {
+            waiters.push(tx);
+        }
+        rx
+    }
+
+    /// 广播“下载结束”
+    fn broadcast_done(&self) {
+        self.complete.store(true, Ordering::Release);
+        self.notify_finished();
+        let waiters = std::mem::take(&mut *self.waiters.lock());
+        for waiter in waiters {
+            let _ = waiter.try_send(());
+        }
     }
 }
 
@@ -76,8 +107,8 @@ impl Drop for InflightGuard {
                 .lock()
                 .get_or_insert_with(|| "下载被取消".to_owned());
         }
-        self.progress.complete.store(true, Ordering::Release);
-        self.progress.notify_finished();
+        // 唤醒所有等待共享下载结束的调用方
+        self.progress.broadcast_done();
     }
 }
 
@@ -176,6 +207,9 @@ impl std::io::Seek for GrowingFile {
 }
 
 /// 异步下载任务句柄
+///
+/// 必须被驱动（`await` 或 `spawn`）：否则传输根本不会开始。
+#[must_use = "下载任务必须被 await 或 spawn，否则传输不会开始"]
 pub struct Download {
     inner: Pin<Box<dyn Future<Output = ()> + Send>>,
 }
@@ -187,10 +221,23 @@ impl std::fmt::Debug for Download {
 }
 
 impl Download {
-    /// 创建空操作占位任务（缓存命中或复用在途任务时使用）
+    /// 创建空操作占位任务（缓存命中时使用）
     fn idle() -> Self {
         Self {
             inner: Box::pin(async {}),
+        }
+    }
+
+    /// 创建“等待共享下载结束”的任务（复用在途下载时使用）
+    ///
+    /// 必须等到共享下载真正结束（临时文件已改名）才算完成，
+    /// 否则调用方会在文件就绪前就去读它。
+    fn wait_for(progress: &Arc<Progress>) -> Self {
+        let rx = progress.subscribe();
+        Self {
+            inner: Box::pin(async move {
+                let _ = rx.recv().await;
+            }),
         }
     }
 }
@@ -250,39 +297,89 @@ impl BlobCache {
     /// 设置容量上限并触发超额淘汰
     pub fn set_max_bytes(&self, bytes: u64) {
         self.max_bytes.store(bytes, Ordering::Relaxed);
-        if self.total_bytes() > bytes {
-            self.evict_lru(bytes);
+        if self.quota_bytes() > bytes {
+            self.evict_oldest_first(bytes);
         }
     }
 
+    /// 校验路径片段字符安全性
+    fn is_safe_path_component(value: &str) -> bool {
+        !value.is_empty()
+            && value.len() <= 64
+            && value != "."
+            && value != ".."
+            && value
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'-' | b'_'))
+    }
+
+    /// 校验缓存键
+    ///
+    /// 键不得以点开头：否则分桶目录会变成 `..` 或空目录名。
+    fn validate_key(key: &str) -> Result<()> {
+        if !Self::is_safe_path_component(key) || key.starts_with('.') {
+            return Err(Error::InvalidCacheKey(format!(
+                "非法的缓存标识：key={key:?}（只允许字母数字与 . - _，且不得以点开头）"
+            )));
+        }
+        Ok(())
+    }
+
+    /// 校验缓存扩展名
+    fn validate_ext(ext: &str) -> Result<()> {
+        if !Self::is_safe_path_component(ext) {
+            return Err(Error::InvalidCacheKey(format!(
+                "非法的缓存标识：ext={ext:?}（只允许字母数字与 . - _）"
+            )));
+        }
+        Ok(())
+    }
+
     /// 获取已完成缓存文件的绝对路径
-    #[must_use]
-    pub fn path_for(&self, key: &str, ext: &str) -> PathBuf {
+    ///
+    /// key / ext 在此统一校验：这是缓存路径的唯一入口，
+    /// 非法字符一律拒绝，避免路径穿越逃出缓存根目录。
+    pub fn path_for(&self, key: &str, ext: &str) -> Result<PathBuf> {
+        Self::validate_key(key)?;
+        Self::validate_ext(ext)?;
         // 分桶前两位防目录穿越
         let bucket = key
             .get(0..2)
             .filter(|bucket| *bucket != "." && *bucket != "..")
             .unwrap_or("00");
-        self.root.join(bucket).join(format!("{key}.{ext}"))
+        Ok(self.root.join(bucket).join(format!("{key}.{ext}")))
     }
 
     /// 获取下载临时文件路径
-    #[must_use]
-    pub fn part_path(&self, key: &str, ext: &str) -> PathBuf {
-        self.root.join(format!("{key}.{ext}.part"))
+    pub fn part_path(&self, key: &str, ext: &str) -> Result<PathBuf> {
+        Self::validate_key(key)?;
+        Self::validate_ext(ext)?;
+        Ok(self.root.join(format!("{key}.{ext}.part")))
     }
 
     /// 检查指定资源是否已完整缓存
     #[must_use]
     pub fn is_cached(&self, key: &str, ext: &str) -> bool {
-        self.path_for(key, ext).is_file()
+        self.path_for(key, ext).is_ok_and(|path| path.is_file())
     }
 
-    /// 获取缓存占用总字节数
+    /// 获取缓存占用总字节数（含在途下载的临时文件）
     #[must_use]
     pub fn total_bytes(&self) -> u64 {
         walk_files(&self.root)
             .into_iter()
+            .filter_map(|path| std::fs::metadata(&path).ok())
+            .map(|meta| meta.len())
+            .sum()
+    }
+
+    /// 获取参与容量配额的字节数（不含 `.part` 临时文件）
+    ///
+    /// 临时文件随时会被改名或删除，计入配额会误伤已缓存的完整文件。
+    fn quota_bytes(&self) -> u64 {
+        walk_files(&self.root)
+            .into_iter()
+            .filter(|path| !is_part_file(path))
             .filter_map(|path| std::fs::metadata(&path).ok())
             .map(|meta| meta.len())
             .sum()
@@ -296,8 +393,11 @@ impl BlobCache {
             .is_some_and(|flight_key| self.inflight.contains_key(flight_key))
     }
 
-    /// 按 LRU 淘汰旧缓存至目标大小，返回释放的字节数
-    pub fn evict_lru(&self, target_bytes: u64) -> u64 {
+    /// 按修改时间淘汰最旧的缓存文件至目标大小，返回释放的字节数
+    ///
+    /// 这里的“旧”指文件修改时间（下载时间）：先下载的先被淘汰。
+    /// 本缓存不记录访问时间，因此不是按最近访问排序的 LRU。
+    pub fn evict_oldest_first(&self, target_bytes: u64) -> u64 {
         let mut files: Vec<(std::time::SystemTime, u64, PathBuf)> = walk_files(&self.root)
             .into_iter()
             .filter(|path| !self.is_being_written(path))
@@ -323,26 +423,11 @@ impl BlobCache {
         freed
     }
 
-    /// 校验路径片段字符安全性
-    fn is_safe_path_component(value: &str) -> bool {
-        !value.is_empty()
-            && value.len() <= 64
-            && value != "."
-            && value != ".."
-            && value
-                .bytes()
-                .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'-' | b'_'))
-    }
-
     /// 打开流式读取句柄（并发请求自动复用在途任务）
     pub fn open_stream(&self, url: &str, key: &str, ext: &str) -> Result<(GrowingFile, Download)> {
-        // 拒绝非法路径字符与前导点
-        if !Self::is_safe_path_component(key) || key.starts_with('.') || !Self::is_safe_path_component(ext) {
-            return Err(Error::Io(format!(
-                "非法的缓存标识：key={key:?} ext={ext:?}（只允许字母数字与 . - _）"
-            )));
-        }
-        let final_path = self.path_for(key, ext);
+        // 拒绝非法路径字符与前导点（校验集中在 path_for / part_path）
+        let final_path = self.path_for(key, ext)?;
+        let part_path = self.part_path(key, ext)?;
         if final_path.is_file() {
             return self.finished(key, ext);
         }
@@ -353,7 +438,7 @@ impl BlobCache {
             MapEntry::Occupied(occupied) => {
                 let progress = occupied.get().clone();
                 drop(occupied);
-                let file = match std::fs::File::open(self.part_path(key, ext)) {
+                let file = match std::fs::File::open(&part_path) {
                     Ok(file) => file,
                     // 临时文件已完成重命名时直接读取正式文件
                     Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
@@ -364,14 +449,21 @@ impl BlobCache {
                     }
                     Err(error) => return Err(error.into()),
                 };
-                Ok((GrowingFile { file, progress, pos: 0 }, Download::idle()))
+                // 跟随者必须等共享下载真正结束（临时文件已改名）
+                Ok((
+                    GrowingFile {
+                        file,
+                        progress: progress.clone(),
+                        pos: 0,
+                    },
+                    Download::wait_for(&progress),
+                ))
             }
             MapEntry::Vacant(vacant) => {
                 std::fs::create_dir_all(&self.root)?;
                 if let Some(parent) = final_path.parent() {
                     std::fs::create_dir_all(parent)?;
                 }
-                let part_path = self.part_path(key, ext);
                 // 创建或截断临时文件
                 std::fs::OpenOptions::new()
                     .create(true)
@@ -400,26 +492,23 @@ impl BlobCache {
                 let task = Download {
                     inner: Box::pin(async move {
                         let mut guard = guard;
-                        let outcome = stream_to_file(cache.transport.clone(), &url, &part_path, &progress).await;
-                        match outcome {
-                            Ok(()) => {
-                                if let Err(error) = std::fs::rename(&part_path, &final_path) {
-                                    *progress.error.lock() = Some(format!("rename 失败: {error}"));
-                                    let _ = std::fs::remove_file(&part_path);
-                                }
-                            }
-                            Err(error) => {
-                                *progress.error.lock() = Some(error.to_string());
-                                let _ = std::fs::remove_file(&part_path);
-                            }
+                        // 传输与落盘（含改名与容量淘汰）全部交给写盘线程：
+                        // 异步运行时的工作线程不得执行阻塞的文件 I/O。
+                        if let Err(error) = stream_to_file(
+                            cache.transport.clone(),
+                            &url,
+                            &part_path,
+                            &final_path,
+                            &cache,
+                            &progress,
+                        )
+                        .await
+                        {
+                            // 写盘线程已经记录了更具体的原因，不要覆盖它
+                            progress.error.lock().get_or_insert_with(|| error.to_string());
                         }
                         // 标记成功
                         guard.finished = true;
-                        // 超限淘汰
-                        let limit = cache.max_bytes();
-                        if cache.total_bytes() > limit {
-                            cache.evict_lru(limit);
-                        }
                     }),
                 };
                 Ok((view, task))
@@ -429,7 +518,7 @@ impl BlobCache {
 
     /// 打开已完成缓存文件的只读视图
     fn finished(&self, key: &str, ext: &str) -> Result<(GrowingFile, Download)> {
-        let file = std::fs::File::open(self.path_for(key, ext))?;
+        let file = std::fs::File::open(self.path_for(key, ext)?)?;
         let len = file.metadata()?.len();
         Ok((
             GrowingFile {
@@ -451,11 +540,11 @@ impl BlobCache {
         if !self.is_cached(key, ext) {
             return Err(Error::Transport("下载尚未完成".to_owned()));
         }
-        Ok(self.path_for(key, ext))
+        self.path_for(key, ext)
     }
 }
 
-/// 递归收集目录下所有文件
+/// 递归收集目录下所有文件（跳过符号链接）
 fn walk_files(root: &Path) -> Vec<PathBuf> {
     let mut out = Vec::new();
     let mut stack = vec![root.to_path_buf()];
@@ -465,7 +554,14 @@ fn walk_files(root: &Path) -> Vec<PathBuf> {
         };
         for entry in entries.flatten() {
             let path = entry.path();
-            if path.is_dir() {
+            // 用 symlink_metadata：不跟随符号链接，否则链接环会让遍历永不结束
+            let Ok(meta) = std::fs::symlink_metadata(&path) else {
+                continue;
+            };
+            if meta.file_type().is_symlink() {
+                continue;
+            }
+            if meta.is_dir() {
                 stack.push(path);
             } else {
                 out.push(path);
@@ -475,86 +571,194 @@ fn walk_files(root: &Path) -> Vec<PathBuf> {
     out
 }
 
-/// 流式写入 HTTP 响应至临时文件
+/// 判断路径是否为下载临时文件
+fn is_part_file(path: &Path) -> bool {
+    path.extension().is_some_and(|ext| ext == "part")
+}
+
+/// 写盘线程指令
+enum WriterMsg {
+    /// 数据分块
+    Chunk(Vec<u8>),
+    /// 收尾指令：声明长度与错误描述
+    Finish {
+        /// 上游声明的内容总长度
+        expected: Option<u64>,
+        /// 传输或写入过程中的错误描述
+        error: Option<String>,
+    },
+}
+
+/// 写盘线程：承担全部阻塞的文件 I/O（写入、同步、改名、容量淘汰）
+///
+/// 异步运行时的工作线程不得执行阻塞 I/O，因此下载的落盘过程整体搬到独立线程。
+fn writer_loop(
+    part_path: &Path,
+    final_path: &Path,
+    cache: &BlobCache,
+    progress: &Progress,
+    rx: &std::sync::mpsc::Receiver<WriterMsg>,
+) {
+    let mut file = match std::fs::OpenOptions::new()
+        .create(true)
+        .write(true)
+        .truncate(true)
+        .open(part_path)
+    {
+        Ok(file) => file,
+        Err(error) => {
+            *progress.error.lock() = Some(error.to_string());
+            return;
+        }
+    };
+    let mut written: u64 = 0;
+    let mut failure: Option<String> = None;
+    loop {
+        match rx.recv() {
+            Ok(WriterMsg::Chunk(bytes)) => {
+                if failure.is_some() {
+                    continue;
+                }
+                match file.write_all(&bytes) {
+                    Ok(()) => {
+                        written += bytes.len() as u64;
+                        progress.downloaded.store(written, Ordering::Release);
+                        progress.touch();
+                        progress.notify_finished();
+                    }
+                    Err(error) => {
+                        failure = Some(error.to_string());
+                    }
+                }
+            }
+            Ok(WriterMsg::Finish { expected, error }) => {
+                failure = error.or(failure);
+                if failure.is_none()
+                    && let Err(error) = verify_length(written, expected)
+                {
+                    failure = Some(error.to_string());
+                }
+                break;
+            }
+            // 通道关闭：下载被取消，半成品直接丢弃
+            Err(_) => {
+                failure = Some("下载被取消".to_owned());
+                break;
+            }
+        }
+    }
+
+    if let Some(message) = failure {
+        *progress.error.lock() = Some(message);
+        let _ = std::fs::remove_file(part_path);
+    } else {
+        // 强制同步落盘后再改名，保证最终文件是完整的
+        if let Err(error) = file.sync_data() {
+            *progress.error.lock() = Some(error.to_string());
+            let _ = std::fs::remove_file(part_path);
+            return;
+        }
+        if let Err(error) = std::fs::rename(part_path, final_path) {
+            *progress.error.lock() = Some(format!("rename 失败: {error}"));
+            let _ = std::fs::remove_file(part_path);
+            return;
+        }
+        // 超限淘汰：一次遍历即可（淘汰过程内部会重算总量）
+        cache.evict_oldest_first(cache.max_bytes());
+    }
+}
+
+/// 分块转发接收器：把字节转交给写盘线程，不在异步路径上做文件 I/O
+struct StreamSink {
+    tx: std::sync::mpsc::Sender<WriterMsg>,
+    expected: Option<u64>,
+    failure: Option<String>,
+}
+
+impl ChunkSink for StreamSink {
+    fn expected_len(&mut self, len: Option<u64>) {
+        self.expected = len;
+    }
+
+    fn chunk(&mut self, bytes: &[u8]) {
+        if self.failure.is_some() {
+            return;
+        }
+        if self.tx.send(WriterMsg::Chunk(bytes.to_vec())).is_err() {
+            // 写盘线程已退出：不再接收数据
+            self.failure = Some("写盘线程已退出".to_owned());
+        }
+    }
+}
+
+/// 流式下载并落盘（阻塞的文件 I/O 全部在写盘线程内完成）
 async fn stream_to_file(
     transport: Arc<dyn Transport>,
     url: &str,
     part_path: &Path,
+    final_path: &Path,
+    cache: &BlobCache,
     progress: &Arc<Progress>,
 ) -> Result<()> {
     let mut request = Request::new(Method::Get, url.to_owned());
     // 流式传输依赖读超时与停滞检测
     request.timeout = None;
-    let mut file = std::fs::OpenOptions::new()
-        .create(true)
-        .write(true)
-        .truncate(true)
-        .open(part_path)?;
 
-    let (written, expected, failure) = {
-        let mut sink = FileSink {
-            file: &mut file,
-            written: 0,
-            expected: None,
-            progress: progress.clone(),
-            failure: None,
-        };
-        transport.execute_streaming(request, &mut sink).await?;
-        (sink.written, sink.expected, sink.failure.take())
+    // 写盘线程：异步运行时的工作线程不得执行阻塞的文件 I/O
+    let (tx, rx) = std::sync::mpsc::channel::<WriterMsg>();
+    let (done_tx, done_rx) = async_channel::bounded::<()>(1);
+    let _writer = std::thread::Builder::new()
+        .name("lyra-blob-writer".to_owned())
+        .spawn({
+            let part_path = part_path.to_path_buf();
+            let final_path = final_path.to_path_buf();
+            let cache = cache.clone();
+            let progress = progress.clone();
+            move || {
+                writer_loop(&part_path, &final_path, &cache, &progress, &rx);
+                // 通知等待方：写盘线程已收尾
+                let _ = done_tx.try_send(());
+            }
+        })
+        .map_err(|error| Error::Io(Arc::new(std::io::Error::other(format!("写盘线程启动失败: {error}")))))?;
+
+    let mut sink = StreamSink {
+        tx: tx.clone(),
+        expected: None,
+        failure: None,
     };
-    if let Some(message) = failure {
-        return Err(Error::Io(message));
+    let transport_result = transport.execute_streaming(request, &mut sink).await;
+    let expected = sink.expected;
+    let failure = sink.failure.take();
+    drop(sink);
+
+    // 通知写盘线程收尾：改名 / 清理 / 容量淘汰都在线程内完成
+    let error = transport_result.err().map(|error| error.to_string()).or(failure);
+    let _ = tx.send(WriterMsg::Finish { expected, error });
+    drop(tx);
+
+    // 等待写盘线程结束（用通道等待，不阻塞异步运行时）
+    if done_rx.recv().await.is_err() {
+        return Err(Error::Transport("写盘线程异常退出".to_owned()));
     }
-    verify_length(written, expected)?;
-    // 强制同步落盘
-    file.sync_data()?;
+    if let Some(message) = progress.error.lock().clone() {
+        return Err(Error::Transport(message));
+    }
     Ok(())
 }
 
 /// 校验下载字节数与预设长度
 fn verify_length(written: u64, expected: Option<u64>) -> Result<()> {
     if written == 0 {
-        return Err(Error::Io("下载不完整：上游返回 0 字节".to_owned()));
+        return Err(Error::Io(Arc::new(std::io::Error::other(
+            "下载不完整：上游返回 0 字节",
+        ))));
     }
     match expected {
-        Some(expected) if written != expected => Err(Error::Io(format!(
+        Some(expected) if written != expected => Err(Error::Io(Arc::new(std::io::Error::other(format!(
             "下载不完整：收到 {written} 字节，上游声明 {expected} 字节"
-        ))),
+        ))))),
         _ => Ok(()),
-    }
-}
-
-/// 文件写入接收器
-struct FileSink<'a> {
-    file: &'a mut std::fs::File,
-    written: u64,
-    expected: Option<u64>,
-    progress: Arc<Progress>,
-    failure: Option<String>,
-}
-
-impl ChunkSink for FileSink<'_> {
-    fn expected_len(&mut self, len: Option<u64>) {
-        self.expected = len;
-    }
-
-    fn chunk(&mut self, bytes: &[u8]) {
-        use std::io::Write as _;
-        if self.failure.is_some() {
-            return;
-        }
-        match self.file.write_all(bytes) {
-            Ok(()) => {
-                self.written += bytes.len() as u64;
-                self.progress.downloaded.store(self.written, Ordering::Release);
-                self.progress.touch();
-                self.progress.notify_finished();
-            }
-            Err(error) => {
-                self.failure = Some(error.to_string());
-                self.progress.error.lock().replace(error.to_string());
-            }
-        }
     }
 }
 
@@ -562,7 +766,7 @@ impl ChunkSink for FileSink<'_> {
 mod tests {
     #![allow(clippy::unwrap_used)]
 
-    use std::io::{Read as _, Seek as _, Write as _};
+    use std::io::{Read as _, Seek as _};
 
     use super::*;
 
@@ -587,12 +791,13 @@ mod tests {
     #[test]
     fn paths_are_content_addressed_and_bucketed() {
         let cache = BlobCache::new(temp_root(), 1024, transport_with(vec![]));
-        let path = cache.path_for("abcdef1234", "flac");
+        let path = cache.path_for("abcdef1234", "flac").unwrap();
         let normalised = path.to_string_lossy().replace('\\', "/");
         assert!(normalised.ends_with("ab/abcdef1234.flac"), "{normalised}");
         assert!(
             cache
                 .part_path("abcdef1234", "flac")
+                .unwrap()
                 .to_string_lossy()
                 .ends_with("abcdef1234.flac.part")
         );
@@ -605,7 +810,10 @@ mod tests {
         let cache = BlobCache::new(root.clone(), 1024, transport_with(body.clone()));
         let path = cache.ensure("http://cdn/audio", "aabbccdd", "flac").await.unwrap();
         assert!(path.is_file());
-        assert!(!cache.part_path("aabbccdd", "flac").exists(), "临时文件应已改名");
+        assert!(
+            !cache.part_path("aabbccdd", "flac").unwrap().exists(),
+            "临时文件应已改名"
+        );
         let mut read = Vec::new();
         std::fs::File::open(&path).unwrap().read_to_end(&mut read).unwrap();
         assert_eq!(read, body);
@@ -659,12 +867,12 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn evict_lru_frees_oldest_files_first() {
+    async fn evict_oldest_first_frees_the_oldest_files_first() {
         let root = temp_root();
         let cache = BlobCache::new(root.clone(), 1024, transport_with(vec![]));
         for (index, name) in ["aaa", "bbb", "ccc"].iter().enumerate() {
             #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
-            let path = cache.path_for(name, "flac");
+            let path = cache.path_for(name, "flac").unwrap();
             std::fs::create_dir_all(path.parent().unwrap()).unwrap();
             let mut file = std::fs::File::create(&path).unwrap();
             file.write_all(&[0_u8; 100]).unwrap();
@@ -674,7 +882,7 @@ mod tests {
             file.set_modified(stamp).unwrap();
         }
         assert_eq!(cache.total_bytes(), 300);
-        let freed = cache.evict_lru(150);
+        let freed = cache.evict_oldest_first(150);
         assert_eq!(freed, 200, "应删掉最旧的两个");
         assert!(cache.is_cached("ccc", "flac"), "最新的应保留");
         assert!(!cache.is_cached("aaa", "flac"));
@@ -689,17 +897,21 @@ mod tests {
         cache
             .inflight
             .insert("aabbccdd.flac".to_owned(), Arc::new(Progress::new(10, false)));
-        let part = cache.part_path("aabbccdd", "flac");
+        let part = cache.part_path("aabbccdd", "flac").unwrap();
         std::fs::write(&part, [b'x'; 10]).unwrap();
         assert_eq!(cache.total_bytes(), 10);
 
         // 淘汰不能碰正在写的文件，否则它随后的 rename 会失败。
-        assert_eq!(cache.evict_lru(0), 0, "不得淘汰在途下载的 .part");
+        assert_eq!(cache.evict_oldest_first(0), 0, "不得淘汰在途下载的 .part");
         assert!(part.is_file());
 
         // 登记消失（硬杀进程 / 下载已结束）后，残片就是孤儿，必须照常回收。
         cache.inflight.clear();
-        assert_eq!(cache.evict_lru(0), 10, "孤儿 .part 必须被回收，否则磁盘只涨不落");
+        assert_eq!(
+            cache.evict_oldest_first(0),
+            10,
+            "孤儿 .part 必须被回收，否则磁盘只涨不落"
+        );
         assert!(!part.exists());
         let _ = std::fs::remove_dir_all(&root);
     }
@@ -752,6 +964,18 @@ mod tests {
         // 正常值不受影响（含合法的点号扩展名）。
         assert!(cache.open_stream("http://cdn/audio", "aabbccdd", "flac").is_ok());
         assert!(cache.open_stream("http://cdn/audio", "aabbccdd", ".flac").is_ok());
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn path_helpers_reject_traversal_as_well() {
+        // 路径辅助函数是公开入口：它们必须与 open_stream 一样拒绝穿越。
+        let root = temp_root();
+        let cache = BlobCache::new(root.clone(), 1024, transport_with(vec![]));
+        assert!(cache.path_for("../../evil", "flac").is_err());
+        assert!(cache.part_path("../../evil", "flac").is_err());
+        assert!(cache.path_for("aabb", "../../../evil").is_err());
+        assert!(!cache.is_cached("../../evil", "flac"));
         let _ = std::fs::remove_dir_all(&root);
     }
 
@@ -867,6 +1091,98 @@ mod tests {
             "改小上限后应立即淘汰：{}",
             cache.total_bytes()
         );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// 可控的慢速传输：等测试放行后才交付数据。
+    struct GatedTransport {
+        gate: async_channel::Receiver<()>,
+        body: Vec<u8>,
+        calls: Arc<std::sync::atomic::AtomicU64>,
+    }
+
+    #[async_trait::async_trait]
+    impl Transport for GatedTransport {
+        async fn execute(&self, _request: Request) -> Result<crate::transport::Response> {
+            unreachable!("只走流式路径")
+        }
+
+        async fn execute_streaming(&self, _request: Request, sink: &mut (dyn ChunkSink + Send)) -> Result<()> {
+            self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            let _ = self.gate.recv().await;
+            sink.expected_len(Some(self.body.len() as u64));
+            sink.chunk(&self.body);
+            Ok(())
+        }
+    }
+
+    #[tokio::test]
+    async fn concurrent_ensure_calls_share_one_download() {
+        // 回归：第二个调用方复用同一份在途下载时，必须等到下载真正结束，
+        // 否则它会在临时文件改名之前就判定“下载尚未完成”。
+        let root = temp_root();
+        let (gate_tx, gate_rx) = async_channel::bounded(1);
+        let calls = Arc::new(std::sync::atomic::AtomicU64::new(0));
+        let cache = BlobCache::new(
+            root.clone(),
+            1024,
+            Arc::new(GatedTransport {
+                gate: gate_rx,
+                body: b"0123456789".to_vec(),
+                calls: calls.clone(),
+            }),
+        );
+
+        let task_cache = cache.clone();
+        let handle = tokio::spawn(async move {
+            let first = task_cache.ensure("http://cdn/audio", "ddeeff00", "flac");
+            let second = task_cache.ensure("http://cdn/audio", "ddeeff00", "flac");
+            futures::future::join(first, second).await
+        });
+        // 让两个调用都进入在途状态后再放行下载
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        gate_tx.send(()).await.unwrap();
+
+        let (first, second) = handle.await.unwrap();
+        let first = first.unwrap();
+        let second = second.unwrap();
+        assert_eq!(first, second, "并发调用必须拿到同一个文件");
+        assert!(first.is_file());
+        assert_eq!(
+            calls.load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "同一首歌并发下载只应请求一次"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[tokio::test]
+    async fn quota_ignores_in_flight_part_files() {
+        // 在途临时文件随时会被改名，不应计入容量配额。
+        let root = temp_root();
+        let cache = BlobCache::new(root.clone(), 1024, transport_with(vec![]));
+        cache
+            .inflight
+            .insert("aabbccdd.flac".to_owned(), Arc::new(Progress::new(10, false)));
+        let part = cache.part_path("aabbccdd", "flac").unwrap();
+        std::fs::write(&part, [b'x'; 10]).unwrap();
+        assert_eq!(cache.total_bytes(), 10, "总占用仍包含临时文件");
+        assert_eq!(cache.quota_bytes(), 0, "配额统计必须排除临时文件");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[tokio::test]
+    async fn symlinks_in_the_cache_root_are_skipped() {
+        // 符号链接不得被跟随：链接环会让目录遍历永不结束。
+        let root = temp_root();
+        let cache = BlobCache::new(root.clone(), 1024, transport_with(vec![]));
+        let target = root.join("real");
+        std::fs::create_dir_all(&target).unwrap();
+        std::fs::write(target.join("a.flac"), [b'x'; 4]).unwrap();
+        // 指向自身的链接：跟随它就会无限递归
+        if std::os::windows::fs::symlink_dir(&target, target.join("loop")).is_ok() {
+            assert_eq!(cache.total_bytes(), 4, "链接不得被计入占用");
+        }
         let _ = std::fs::remove_dir_all(&root);
     }
 }

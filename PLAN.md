@@ -154,7 +154,7 @@ D:\YZB\Kugou\
    │  └─ tests/              # 用 MockTransport 的集成测试
    ├─ store/                  # lyra-store  —— redb 持久化（schema / 迁移 / 仓库）
    ├─ audio/                  # lyra-audio  —— 音频引擎（自有 OS 线程，不依赖 GPUI）
-   ├─ app/                    # lyra-app    —— 状态机 / 用例 / GPUI Entity  ★唯一接触 GPUI 运行时处
+   ├─ app/                    # lyra-app    —— 状态机 / 用例（运行时句柄由入口注入，应用层不自建运行时）
    ├─ ui/                     # lyra-ui     —— 视图与组件（gpui-kit）
    ├─ desktop/                # lyra        —— 二进制 crate：薄 main.rs + 资源嵌入
    └─ xtask/                  # xtask       —— 构建自动化（跨平台，替代 shell 脚本）
@@ -166,7 +166,7 @@ D:\YZB\Kugou\
 |---|---|
 | `proto` 零 IO、零 async | 签名/指纹是**最容易出错**的部分，必须能用纯函数单测对拍 JS，不需要任何 mock |
 | `api` 不依赖 GPUI | 通过 `trait Transport` 反转依赖 → 可无头跑全部端点测试；`MockTransport` 支持离线回归 |
-| `app` 是唯一接触 GPUI 运行时的库 | tokio/reqwest/executor 配置收敛在一处，将来换框架只动这里和 `ui` |
+| `app` 不接触 GPUI 运行时，只接收注入的运行时句柄 | 运行时由进程入口（`ui` / `desktop` / `xtask`）创建**一次**并注入 `lyra-app`，应用层不自建运行时；将来换框架只动入口和 `ui` |
 | `audio` 独立于 `app` | 音频是 OS 线程 + 实时约束，与 GPUI 生命周期无关，必须能脱离 UI 测试 |
 | `desktop` 是**薄**二进制 | 惯例：`src/main.rs` 只做装配与启动，逻辑全在 lib，便于集成测试 |
 | `xtask` 用 Rust 而非 shell | Rust 项目惯例，跨平台一致，不依赖 PowerShell/bash |
@@ -178,7 +178,8 @@ D:\YZB\Kugou\
 ```toml
 # 根 Cargo.toml
 [workspace]
-resolver = "2"
+# Rust 2024 版虚拟工作区必须显式声明解析器；resolver 3 启用 MSRV 感知的依赖解析
+resolver = "3"
 members = ["crates/*"]
 
 [workspace.package]
@@ -282,6 +283,8 @@ md5(format!("1014{sorted_values}1014"))   // 只取值、排序、拼接
 
 **性能**：`sorted_kv` 是热路径 —— 用 `SmallVec<[(&str,&str);16]>` 就地排序；用 `md5::Md5` **流式三段 `update`**（盐 / 参数 / body），不构造完整中间字符串。
 
+⚠️ **两种排序规则的差异**：实现里保留了「按 key 排序」（Android，默认）与「先拼 `k=v` 再整串排序」（Web）两条规则。二者**只在某个 key 是另一个 key 的严格前缀且后一位是数字**时不同（`hash` 与 `hash2`：整串排序时 `'2'(0x32) < '='(0x3D)`，于是 `hash2=…` 在前）。既有黄金向量的参数集都没有这种键对，**无法**区分两条规则；现已为两条规则各补一个黄金向量（`crates/proto/tests/vectors.rs` 的 `signature_android_prefix_keys_pins_the_sort_by_key_rule` / `signature_web_prefix_keys_pins_the_sort_by_whole_string_rule`）把当前行为钉死。在拿到参考实现的确凿证据之前不改行为。
+
 ### 5.2 密码学原语
 
 | 原语 | 用途 | 关键参数 |
@@ -302,7 +305,7 @@ md5(format!("1014{sorted_values}1014"))   // 只取值、排序、拼接
 
 | 字段 | 生成 |
 |---|---|
-| `guid` | UUID v4 |
+| `guid` | UUID **形状**的随机标识（**非 RFC 4122 v4**，版本位/变体位仍是随机值；原始串立即取 MD5，从不发往服务端，落盘的是 32 位十六进制 MD5） |
 | `mid` | `md5(guid)` 的 hex 视为 16 进制大整数 → **十进制字符串** |
 | `mac` / `dev` | `02:00:00:00:00:00` / 10 位大写字母数字 |
 | `webgl` | 随机 uint64 十进制串 |
@@ -639,7 +642,7 @@ KRC：跳过 4 字节 → 16 字节密钥循环 XOR → zlib inflate → UTF-8
 | # | 决策 | 理由 |
 |---|---|---|
 | B1 | **只用 `gpui-kit`，不再单独依赖 `gpui-pre` / `gpui-pre-platform` / `gpui-pre-macros` / `gpui-pre-reqwest-client`** | `gpui-kit` 是官方门面：`use gpui_kit::*` 就是 GPUI，各层走 `gpui_kit::base/platform/component/assets`。上游注释明确写着「用户不应需要知道是哪个 GPUI crate 实现它」。这样 §4.3 的「整组同步 bump」风险从源头消失 |
-| B2 | **HTTP 传输统一用 `reqwest`，不做 GPUI `HttpClient` 适配层** | ① 音频必须**流式落盘**，我们的 `Transport::execute_streaming` 已实现，GPUI 客户端要另写一条；② `BlobFetcher` 必须 spawn 下载任务，本来就依赖 tokio 运行时；③ 按 §3.3 自己的发现，gpui-pre 的 reqwest fork 内部也是 tokio。**结论修正：tokio 作为库进入依赖树，我们显式建一个多线程运行时并全进程复用**，这是「一个运行时」而不是「两个」 |
+| B2 | **HTTP 传输统一用 `reqwest`，不做 GPUI `HttpClient` 适配层** | ① 音频必须**流式落盘**，我们的 `Transport::execute_streaming` 已实现，GPUI 客户端要另写一条；② `BlobFetcher` 必须 spawn 下载任务，本来就依赖 tokio 运行时；③ 按 §3.3 自己的发现，gpui-pre 的 reqwest fork 内部也是 tokio。**结论修正：tokio 作为库进入依赖树，运行时由进程入口（`ui` / `desktop` / `xtask`）创建**一次**并把句柄注入 `lyra-app`，这是「一个运行时」而不是「两个」；`lyra-app` 自己不创建运行时，也不再依赖环境里的隐式句柄** |
 | B3 | 单飞、L1 缓存都在 `lyra-api` 内部，L2（redb）只管设备/登录态/设置/历史 | §7.3 本来就把 L2 的职责写成「歌单元数据、历史、设置、登录态」，API 响应缓存留在 L1 |
 | B4 | `lyra-api` **不依赖** `lyra-store` | 保持 `api` 可无头测试、无持久化副作用；两者在 `lyra-app` 汇合 |
 | B5 | `Transport` 增加 `execute_streaming`（默认退化实现） | 边下边播的前提；`MockTransport` 等实现无需改动 |
@@ -650,7 +653,7 @@ KRC：跳过 4 字节 → 16 字节密钥循环 XOR → zlib inflate → UTF-8
 
 | 结论 | 证据 |
 |---|---|
-| **`ring` 是依赖树里唯一的非 Rust 工件** | `cargo xtask audit`：451 个 crate，非 Rust 清单只有 `ring`。§3.2 成立 |
+| **`ring` 是依赖树里唯一的非 Rust 工件** | `cargo xtask audit`：依赖树共 **1299 个节点 / 447 个不同的 crate**，非 Rust 清单只有 `ring`（其余全部命中纯 Rust 白名单，未分类项为 0）。§3.2 成立 |
 | `schannel` 会出现在 Windows 依赖树里，但**不是 TLS 后端** | 由 `rustls-native-certs` 引入，仅用于**枚举** Windows 受信任根证书；纯 Rust FFI，不编译 C。审计里因此不把它当违规，而是断言 `native-tls` 必须缺席 |
 | `freetype-sys`（C 库）**不在 Windows 构建图里** | `cargo fetch` 会下载全平台依赖造成误判；`cargo tree`（host target）里没有它。font-kit 的 freetype 后端只在 Linux/macOS 生效 |
 | 行为指纹可以逐字节对拍 | 用 mulberry32 同时替换 Rust 与 JS 的随机源后，**整条轨迹串（3000+ 字符）、EDT、t1/t2、cloudlist body、RSA 无填充输出、KRC 解码、mid 十进制** 全部逐字节一致 |
@@ -822,3 +825,107 @@ cargo test --workspace
 cargo run -p xtask -- audit
 cargo run -p lyra          # 无参数 → 图形界面
 ```
+
+## 第五轮修复（会话一致性 + 依赖审计可验证化）
+
+| # | 问题 | 影响 | 修法 |
+|---|---|---|---|
+| 1 | `register_device` 用 `Api::set_session` **整体写回**会话快照 | 并发登出时会把已登出的账号**复活**（内存登录态与存储不一致）；并发新登录也会被旧快照覆盖 | `Api` 新增 `update_device(f)`：同一把写锁内**只改设备字段**、保留登录态；`register_device` 改用它 |
+| 2 | `lyra url <hash> 320` 把音质当专辑 id 静默使用 | PLAN 声称已修，实际只改了帮助文本 | `song_stub` 识别音质标记（128/320/flac/viper_*）并报错提示写空占位符；`rights`/`download` 同样受益 |
+| 3 | 换源失败一律报「暂无版权」 | 上游超时 / 20028 / 传输失败被误诊为下架 | 换源后的错误**原样透传**，原始原因记 `warn!` |
+| 4 | `album_id.parse().unwrap_or(0)` 静默吞掉非数字 ID | 上游坏数据被当成 0 发出去 | 显式解析：空串按 0，非数字记 `warn!` 后按 0 |
+| 5 | `lyra-app` 声称「唯一配置运行时的库」，实际用的是环境里的隐式句柄 | §B2 的「一个运行时」只是口号，行为依赖调用上下文 | `Kugou` 改为**注入** `tokio::runtime::Handle`（`with_transport` / `open` 都显式传参），三个创建运行时的入口（`ui`/`desktop`/`xtask`）负责注入；应用层不自建运行时 |
+| 6 | `xtask audit` 用「非 Rust 白名单」求交集 | 没人预料到的 C 依赖（如 `libz-sys`）根本不会出现，清单是**打印**出来的而不是**验证**出来的 | 反转逻辑：维护 `KNOWN_PURE_RUST` 白名单，不在白名单的依赖一律记为「未分类」并让审计**失败**；`cc`/`blake3` 归入纯 Rust |
+| 7 | `xtask audit` 报的是去重后的 crate 数 | 「451 个 crate」实际是名字去重数，树有 1300+ 节点 | 同时打印**节点数**与**去重 crate 数** |
+| 8 | `xtask smoke` 无条件打印「全部端点存活」 | 上游静默返回空列表时结论是错的 | 区分「端点存活且返回数据」与「端点可达但 N 个返回空表（不算通过）」 |
+| 9 | `xtask package` 用 CWD 相对路径且硬编码 Windows | 从任意目录运行都会找错地方 | 路径改为相对 `CARGO_MANIFEST_DIR` 上两级的工作区根目录；非 Windows 平台直接报错说明 |
+| 10 | 根 `Cargo.toml` 用 `resolver = "2"` | Rust 2024 虚拟工作区应为 resolver 3（MSRV 感知的依赖解析） | 改为 `resolver = "3"`（本次未触发任何版本变化） |
+| 11 | 8 个内部 crate 缺 `publish = false` / 继承字段 | 内部 crate 可能被误发布 | 统一补 `publish = false` + `authors.workspace` / `repository.workspace` |
+| 12 | `xtask` 默认拖着整个 `lyra-app`（含 reqwest/tokio/凭据存储） | CI 常用的 audit / package 任务被迫编译整棵 HTTP 依赖树 | `lyra-app` / `tokio` / `tracing-subscriber` 改为可选依赖，挂到 `smoke` feature 上 |
+
+### 本轮新增的回归测试
+
+| 测试 | 守住的行为 |
+|---|---|
+| `app::cli::song_stub_rejects_a_quality_token_in_the_album_id_slot` | 音质出现在专辑 id 位置必须报错 |
+| `app::cli::song_stub_accepts_an_empty_album_id_slot_before_the_quality` | 空占位符 → `album_id == ""`，音质取自下一槽位 |
+| `app::cli::unknown_commands_are_rejected_before_touching_the_store` | 非法命令不创建数据目录 |
+| `app::cli::masks_tokens` | ≤8 位的令牌整体打码 |
+| `app::error::api_errors_keep_their_source_chain` | 应用层错误保留上游 `source()` 链 |
+| `app::service::optional_ids_fall_back_to_zero_but_warn_on_garbage` | 非数字 ID 不再被静默当成 0 |
+| `app::end_to_end::patching_the_device_never_resurrects_a_logged_out_account` | 设备信息更新不得复活登录态 |
+| `app::end_to_end::concurrent_device_registration_and_logout_keep_the_session_consistent` | 并发注册设备 + 登出后，内存会话与存储必须一致 |
+| `xtask::unknown_crates_are_reported_as_unclassified` | 未知 crate（如 `libz-sys`）必须被审计报出来 |
+| `xtask::known_pure_rust_crates_are_not_reported` | 已知纯 Rust crate 不误报 |
+| `xtask::duplicates_are_collapsed_but_nodes_are_counted` | 节点数与去重 crate 数分别统计 |
+| `xtask::workspace_root_is_resolved_from_the_manifest_not_the_cwd` | 打包路径不依赖当前工作目录 |
+
+---
+
+# 第六轮修复（音频实时层 + GPUI 渲染层）
+
+> 本轮针对**实时音频管线**与 **GPUI 渲染路径**做专项审查。依据是 `gpui-pre 0.3.9` / `gpui-kit 0.7.3`
+> 的本地源码（不是记忆），以及 Rust 2024 / tokio / cpal / rubato 官方文档。
+
+## 音频层（`lyra-audio`）
+
+| # | 问题 | 影响 | 修法 |
+|---|---|---|---|
+| 1 | **环形缓冲清空无握手**：刷新只是"请求"，回调在任意时刻消费，与解码线程写入**无顺序保证** | 每首歌开头约 25ms（MP3）/ 90ms（FLAC）被静默删掉；seek 后旧位置音频还会先播 200ms | `Shared::flush_pending()` 让**生产者观察**挂起标志；`pump()` 在标志未清空前不写入。PLAN 第二轮声称已修的 bug #4 其实只修了一半 |
+| 2 | `Engine` 的 `Drop` 在**调用方线程**（即 UI 线程）最多阻塞 2 秒；解码线程卡在网络读时 `JoinHandle` 被丢弃 → **线程泄漏** | 退出时窗口卡死 2 秒；解码线程最多多活 30 秒 | `Drop` 只发 `Shutdown` 不 join；新增显式 `Engine::close()` 供需要同步收尾时调用 |
+| 3 | 解码线程 `panic` 无保护，而 release 构建开了 `panic = "abort"` | 一次解码异常**终止整个应用**；debug 下线程静默死亡且状态永远停在 `Playing` | 线程体包 `catch_unwind`；`send` 失败立刻把状态拉回 `Idle` |
+| 4 | `tracing::error!` 出现在 cpal **错误回调**里 —— 它与数据回调同线程且该线程是 `THREAD_PRIORITY_TIME_CRITICAL` | 实时线程上抢全局订阅锁 + 分配 → 优先级反转 | 错误写入 `Shared` 的槽位，由解码线程（非实时）打日志 |
+| 5 | 定位命令进无界队列且**逐个执行**（每个都是完整重开解码器 + 快进解码） | 拖动进度条会把引擎卡死数分钟 | 合并定位命令，只执行**最新**的一个 |
+| 6 | 解码线程在缓冲未满时**满速自旋**（一个核 100%） | 无谓占用 CPU | `Progress` 分支加 1ms 休眠 |
+| 7 | `Ended` 等待 ring 排空超时后**残留样本仍在 ring 里** | 残留尾音留到下一首歌开头才被丢弃 | 超时后显式 `request_flush()` |
+| 8 | cpal 能渲染的 `I24` / `i64` / `u64` 采样格式**未覆盖** | 遇到这些设备整个引擎**拒绝启动** | 补齐三个分支 |
+| 9 | 重采样器尾部从不 flush，`output_delay()` 未计入位置 | 结尾约 3.3ms 音频丢失；进度条比实际声音超前约 1.7ms | 新增 `Resampler::flush()` 与 `output_delay_frames()`，位置减去延迟 |
+| 10 | 单帧解码错误被吞；若**每帧**都失败会一路走到 EOF | 损坏音频被误判成"正常播完"并切下一首 | 连续 32 帧失败即报错 |
+| 11 | 声道数/采样率信**容器**的 `codec_params`，而交织按**解码器** spec 排布 | 容器少报声道数时音频失真 | 以实际解码结果为准，不一致时重建重采样器 |
+| 12 | `Hint::with_extension` 在 symphonia 0.5 里**完全无效**（`Probe::format` 忽略 hint） | 注释与实现不符，误导后续维护 | 删除该参数，格式探测纯按内容 |
+| 13 | `f32::clamp` 会**传播 NaN** | 损坏的音量设置会把 NaN 样本送进声卡 | 入口处挡掉非有限值 |
+| 14 | `State` / `Event` 是公开枚举且未 `#[non_exhaustive]` | 加变体即破坏下游穷尽匹配 | 加 `#[non_exhaustive]`，`lyra-ui` 补通配臂 |
+
+## GPUI 渲染层（`lyra-ui`）
+
+| # | 问题 | 影响 | 修法 |
+|---|---|---|---|
+| 1 | 曲目行**渲染期克隆整首 `Song`**（10 个 String 字段） | 50 行 × 10 次分配 × 5.5 次/秒 ≈ **每秒 2750 次堆分配**，全部只为给按钮准备闭包捕获 | 渲染期只克隆 `Arc`（引用计数递增）；曲目本体等到点击「收藏」时再克隆 |
+| 2 | 电台页 `filtered_stations()` **每次渲染深拷贝整个频道目录** | 播放时页面每 180ms 深拷贝一遍目录 | 缓存过滤后的下标；分类标签文本在数据层预格式化 |
+| 3 | `PlayerModel::current_labels()` **每次 180ms 轮询都重建标题** | 即使歌没变也持续分配 | 先零分配地比对哈希，确认换歌才重建 |
+| 4 | 播放器进度条文本每帧 `format!` | 每帧一次分配 | 复用缓冲区 + `SharedString`（短文本走内联存储，不占堆） |
+| 5 | 搜索框只订阅 `PressEnter`，**忽略 `InputEvent::Change`** | 输入框只让自己失效，父实体不重绘 → 「清空输入」按钮**永远不出现** | 订阅里转发 `Change`/`Focus`/`Blur` → `cx.notify()` |
+| 6 | `LyricsView::render` **在渲染中改状态**（`follow_lyrics`） | 违反 GPUI「render 是纯函数」契约 | 跟随计算依赖上一帧布局，改到 `cx.on_next_frame` 执行；仅在状态真的变化时才重绘 |
+| 7 | 主壳用 `std::sync::mpsc` + **每 50ms 轮询**收消息 | 每秒 20 次无谓唤醒 | 换 `async_channel`（无界），UI 线程 `await` 接收，事件驱动 |
+| 8 | 轻提示靠同一个 50ms 轮询检查过期 | 与消息处理耦合 | 独立的一次性计时任务，重复提示时自动取消前一个 |
+| 9 | 每渲染一行就 `player.read(cx)` 一次 | 每帧 N 次实体读取 | 虚拟列表回调里整批读取一次 |
+| 10 | 侧边栏歌单列表每次渲染新建 `Vec` 并克隆歌单名/数量 | 每帧一次集合分配 + 每行两次克隆 | 条目在 `PlaylistsView` 里按标签页过滤并预格式化 |
+| 11 | `SettingsView::ensure(&mut self)` **签名里没有 `cx`**，无法通知 | 未登录提示可能不显示（未置脏的实体会复用上一帧渲染结果） | 加 `cx` 参数并显式 `cx.notify()` |
+| 12 | 电台页 `ensure()` 被 `loaded` 闩死，且没有 `reload()` | 顶栏「刷新当前数据」在电台页**永远无效** | 新增 `reload()`，主壳改用 `reload_current()` |
+| 13 | 随机播放用**纳秒时间戳**当种子；`prev_index` 取的是**向前**的偏移 | 相邻两次调用可能同纳秒 → 结果重复；「上一首」实际跳向后面的歌 | 换成 xorshift64\* 伪随机状态；上一首改为向后偏移 |
+| 14 | 验证码输入框缺 `.w_full()` | 与手机号输入框宽度不一致 | 补 `.w_full()` |
+| 15 | `cover_box()` 每次调用分配一个 `String` | 每行每帧一次分配 | 单字符走 `SharedString` 内联存储，零堆分配 |
+| 16 | 追加分页时深拷贝整张歌单 | 102 首 × 10 String 的一次性大拷贝 | 先用 `Arc::try_unwrap` 尝试零拷贝接管 |
+
+## 本轮新增的回归测试
+
+| 测试 | 守住的行为 |
+|---|---|
+| `audio::state::a_pending_flush_is_visible_to_the_producer` | 刷新握手：生产者必须能观察到待处理的刷新请求 |
+| `audio::state::stream_errors_are_recorded_once_and_taken_out` | 输出流错误只记录一次、取出后不重复上报 |
+| `audio::engine::a_non_finite_volume_is_ignored` | NaN 音量被忽略，不会写进引擎 |
+| `audio::resample::flush_recovers_the_tail_that_would_otherwise_be_dropped` | 不足一整块的尾部必须被补零处理出来 |
+| `audio::resample::flushing_an_empty_resampler_is_a_no_op` | 空重采样器 flush 无副作用 |
+| `audio::resample::the_resampler_reports_its_intrinsic_delay` | 重采样器固有延迟可被读取（用于修正进度） |
+| `ui::format::index_labels_are_two_digits_and_cached` | 序号标签缓存复用，不每帧格式化 |
+| `ui::format::duration_is_written_into_a_reusable_buffer` | 时长格式化可写入复用缓冲区 |
+| `ui::views::tracks::rows_are_preformatted_so_render_does_not_allocate` | 展示模型在数据层预格式化，渲染期零分配 |
+| `ui::views::tracks::the_row_model_does_not_clone_the_song` | 展示模型不复制曲目本体 |
+
+## 本轮**驳回**的审查意见
+
+| 意见 | 驳回理由 |
+|---|---|
+| `v_virtual_list` 的竖向分支把行的**可用宽度**设成了行**高度**（52px），列表行会渲染成 52px 宽 | **不成立**。`gpui-base-0.7.3/src/virtual_list.rs` 实际代码是 `AvailableSpace::Definite(content_bounds.size.width)`，宽度取的是内容区宽度，与 `gpui-pre/src/elements/uniform_list.rs` 的参考实现一致。行高固定用 `v_virtual_list` 是正确的 |
+| `notice_with_icon` 的旋转动画 id 是常量，多个 spinner 会共享动画状态 | 影响可忽略：那是**连续循环**动画，共享与独立在视觉上完全相同，且它不需要重播。保留原实现 |
+| `logo.rs` 的 SVG 每次渲染重新哈希 + 拷贝 1.4KB | `gpui-pre` 的 `Svg` 没有提供预置 `data_path` 的公开 API，无法在不改动上游的前提下消除；且该 Logo 只在**视图重绘**时渲染（不是每帧），实测成本可忽略。保留原实现并在此说明 |

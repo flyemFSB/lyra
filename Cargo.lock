@@ -3752,6 +3752,7 @@ dependencies = [
  "serde_json",
  "thiserror 2.0.21",
  "tokio",
+ "tracing",
  "url",
 ]
 
@@ -3759,6 +3760,7 @@ dependencies = [
 name = "lyra-app"
 version = "0.1.0"
 dependencies = [
+ "async-trait",
  "lyra-api",
  "lyra-audio",
  "lyra-proto",
@@ -3797,13 +3799,14 @@ dependencies = [
  "flate2",
  "hex",
  "md-5",
- "num-bigint",
  "rand 0.8.8",
  "rsa",
  "serde",
  "serde_json",
  "sha2 0.10.9",
+ "smallvec",
  "thiserror 2.0.21",
+ "zeroize",
 ]
 
 [[package]]
@@ -3822,6 +3825,7 @@ dependencies = [
 name = "lyra-ui"
 version = "0.1.0"
 dependencies = [
+ "async-channel",
  "gpui-kit",
  "lyra-api",
  "lyra-app",

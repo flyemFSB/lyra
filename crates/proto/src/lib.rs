@@ -16,7 +16,7 @@ pub use cipher::{
     random_string, rsa_oaep_sha256_base64, rsa_pkcs1_encrypt_hex, rsa_raw_encrypt_hex, secret_decrypt_base64,
     secret_decrypt_bytes, secret_encrypt, secret_encrypt_bytes, secret_encrypt_with, sha256_hex,
 };
-pub use error::{Error, Result};
+pub use error::{CryptoError, Error, Result};
 pub use fingerprint::{Draw, SimInputs, Simulate, edt_events, simulate, simulate_now};
 pub use identity::{Device, mid_from_guid};
 pub use params::{Params, Val};

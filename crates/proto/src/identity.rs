@@ -1,16 +1,22 @@
 //! 设备标识生成与转换（GUID、MID、WebGL、DFID）。
 
-use num_bigint::BigUint;
+// 大整数：与 cipher.rs 统一使用 rsa 0.9 转出的 num-bigint-dig 类型
+use rsa::BigUint;
 use serde::{Deserialize, Serialize};
 
 use crate::cipher::{md5_hex, random_string};
 use crate::rng::{JsRng, OsRng};
 
 /// 根据 GUID 的 MD5 计算十进制大数 MID
+///
+/// `md5_hex` 恒定输出 32 位小写十六进制，`BigUint::parse_bytes` 不会失败；
+/// 该不变量由 `debug_assert!` 在开发期钉住。
 #[must_use]
 pub fn mid_from_guid(guid: &str) -> String {
     let digest = md5_hex(guid.as_bytes());
-    BigUint::parse_bytes(digest.as_bytes(), 16).map_or_else(|| "0".to_owned(), |v| v.to_str_radix(10))
+    let parsed = BigUint::parse_bytes(digest.as_bytes(), 16);
+    debug_assert!(parsed.is_some(), "md5 十六进制串必须可解析为大整数");
+    parsed.map_or_else(|| "0".to_owned(), |v| v.to_str_radix(10))
 }
 
 /// 生成 GUID 单段十六进制随机串
@@ -20,7 +26,10 @@ fn guid_segment(rng: &mut impl JsRng) -> String {
     format!("{v:x}").chars().skip(1).collect()
 }
 
-/// 生成随机 UUID 字符串
+/// 生成 UUID **形状**的随机标识串
+///
+/// ⚠️ 不是 RFC 4122 v4：版本号与变体位仍是随机值。该串只作为 MD5 的输入，
+/// 落盘的 `guid` 是它的 MD5，原始 UUID 从不发给服务端，因此无需改成标准 v4。
 #[must_use]
 pub fn random_uuid(rng: &mut impl JsRng) -> String {
     format!(
@@ -47,19 +56,28 @@ pub fn random_webgl(rng: &mut impl JsRng) -> String {
 }
 
 /// 设备标识集合（首次生成后持久化）
+///
+/// 所有字段都带 `#[serde(default)]`：设备身份**必须**持久化且跨版本稳定，
+/// 新增字段时旧记录仍要能读回来，否则会触发风控（方案 §5.3「随机化会导致风控命中」）。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Device {
-    /// GUID 哈希（32 位十六进制，兼作 uuid 与 imei）
+    /// GUID 哈希（32 位十六进制，兼作 uuid 与 imei；源串是 UUID 形状的随机标识，非 RFC 4122）
+    #[serde(default)]
     pub guid: String,
     /// 十进制 MID 字符串
+    #[serde(default)]
     pub mid: String,
     /// MAC 地址（固定为 02:00:00:00:00:00）
+    #[serde(default)]
     pub mac: String,
     /// 10 位设备标识码
+    #[serde(default)]
     pub dev: String,
     /// WebGL 指纹
+    #[serde(default)]
     pub webgl: String,
     /// 设备指纹 DFID（未注册时为 "-"）
+    #[serde(default)]
     pub dfid: String,
 }
 
@@ -137,6 +155,19 @@ mod tests {
         let u = random_uuid(&mut rng);
         let parts: Vec<usize> = u.split('-').map(str::len).collect();
         assert_eq!(parts, vec![8, 4, 4, 4, 12]);
+    }
+
+    #[test]
+    fn legacy_device_without_new_fields_still_deserializes() {
+        // 旧版本落盘的设备记录缺少后加的字段，必须能读回来而不是整条反序列化失败
+        // （失败会让上层重新生成身份，方案 §5.3：随机化会导致风控命中）
+        let legacy = br#"{"guid":"e8456cee7fd2348cfa239342b10a23bd","mid":"12345678901234567890","mac":"02:00:00:00:00:00","dev":"ABCDEFGHIJ"}"#;
+        let device: Device = serde_json::from_slice(legacy).unwrap();
+        assert_eq!(device.guid, "e8456cee7fd2348cfa239342b10a23bd");
+        assert_eq!(device.mid, "12345678901234567890");
+        assert_eq!(device.dev, "ABCDEFGHIJ");
+        assert_eq!(device.webgl, "");
+        assert_eq!(device.dfid, "");
     }
 
     #[test]

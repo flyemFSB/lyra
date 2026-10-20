@@ -10,8 +10,6 @@ mod shell;
 mod theme;
 mod views;
 
-use std::sync::mpsc;
-
 use gpui_kit::*;
 
 use crate::bridge::Backend;
@@ -21,19 +19,22 @@ pub fn run() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let runtime = tokio::runtime::Builder::new_multi_thread().enable_all().build()?;
     let handle = runtime.handle().clone();
     let data_dir = lyra_app::cli::default_data_dir();
-    let (tx, rx) = mpsc::channel::<bridge::Msg>();
+    // 无界异步通道：UI 线程可以 await 接收，不必轮询
+    let (tx, rx) = async_channel::unbounded::<bridge::Msg>();
 
     // 初始化应用服务并挂载音频引擎
     let backend = runtime.block_on(async {
-        let mut kugou = lyra_app::Kugou::open(&data_dir)?;
+        let mut kugou = lyra_app::Kugou::open(&data_dir, handle.clone())?;
         // 监听音频引擎事件并转发至 UI 消息通道
         let events_tx = tx.clone();
         let events = Box::new(move |event: lyra_audio::Event| {
             let msg = match event {
                 lyra_audio::Event::Ended => bridge::Msg::AudioEnded,
                 lyra_audio::Event::Failed { message } => bridge::Msg::EngineFailed(message),
+                // 引擎事件枚举是 non_exhaustive：将来新增变体时不能漏掉处理
+                _ => return,
             };
-            let _ = events_tx.send(msg);
+            let _ = events_tx.try_send(msg);
         });
         let _ = kugou.attach_audio(events)?;
         Ok::<_, lyra_app::Error>(Backend::new(kugou, handle.clone(), tx.clone()))

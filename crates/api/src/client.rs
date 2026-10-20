@@ -57,6 +57,19 @@ impl Api {
         self.session.write().set_account(account);
     }
 
+    /// 在同一把写锁内原地更新会话的设备信息
+    ///
+    /// 与 [`Api::set_session`] 的区别：这里**只**改设备字段，登录态在回调前后保持不变。
+    /// 因此并发的登出（[`Api::set_account`]）不会被迟到的写回复活，
+    /// 并发的新登录也不会被覆盖成旧快照。
+    pub fn update_device(&self, f: impl FnOnce(&mut Session)) {
+        let mut guard = self.session.write();
+        // 回调只应修改设备字段；这里显式保留登录态，杜绝误改与并发写回复活账号。
+        let account = guard.account.clone();
+        f(&mut guard);
+        guard.account = account;
+    }
+
     /// 获取底层传输实现句柄
     #[must_use]
     pub fn transport(&self) -> &Arc<dyn Transport> {
@@ -77,8 +90,8 @@ impl Api {
 
     /// 执行 API 请求（整合缓存、单飞与自动重试）
     pub async fn call(&self, spec: RequestSpec, freshness: Freshness) -> Result<Value> {
-        let session = self.session();
-        if spec.requires_login() && !session.is_logged_in() {
+        // 只读取登录态，不克隆整个会话（会话含设备指纹，克隆代价随请求数放大）
+        if spec.requires_login() && !self.session.read().is_logged_in() {
             return Err(Error::NotLoggedIn);
         }
 
@@ -89,7 +102,7 @@ impl Api {
             spec
         };
 
-        match self.dispatch(&spec, &session, freshness).await {
+        match self.dispatch(&spec, freshness).await {
             Err(error) if needs_verify(&error) => {
                 // 上游要求行为验证时生成指纹重试
                 let (edt, sid) = self.fingerprint()?;
@@ -98,7 +111,7 @@ impl Api {
                     .param("edt", edt)
                     .param("sid", sid)
                     .timeout(std::time::Duration::from_secs(20));
-                self.dispatch(&retry, &session, Freshness::NoStore).await
+                self.dispatch(&retry, Freshness::NoStore).await
             }
             other => other,
         }
@@ -111,7 +124,7 @@ impl Api {
 
     /// 生成设备行为指纹元组 (edt, sid)
     pub fn fingerprint(&self) -> Result<(String, String)> {
-        let session = self.session.read().clone();
+        let session = self.session.read();
         let sim = lyra_proto::simulate_now(&lyra_proto::SimInputs {
             mid: &session.device.mid,
             userid: &session.userid().to_string(),
@@ -122,11 +135,18 @@ impl Api {
         Ok((sim.edt, sim.sid))
     }
 
-    async fn dispatch(&self, spec: &RequestSpec, session: &Session, freshness: Freshness) -> Result<Value> {
-        let request = spec.build(session)?;
+    async fn dispatch(&self, spec: &RequestSpec, freshness: Freshness) -> Result<Value> {
+        // 只在装配请求时持锁：会话快照按需读取，不做整份克隆
+        let request = {
+            let session = self.session.read();
+            spec.build(&session)
+        };
         let cache_key = format!("{}::{}", spec.path, request.cache_key());
 
         if let Some(body) = freshness.ttl().and_then(|_| self.cache.get(&cache_key)) {
+            // 缓存里存的是原始字节：命中时需要重新解析一次 JSON。
+            // 这是刻意的取舍——存解析后的 Value 会让每次返回都深拷贝整棵 JSON 树，
+            // 而命中路径只解析、不拷贝。
             return codec::check_response(200, &body);
         }
 
@@ -157,15 +177,29 @@ impl Api {
 }
 
 /// 根据 ssa-code 响应头附加验证错误
+///
+/// 保留上游原始错误（业务码、描述），不再用验证错误顶掉它：
+/// 否则 `Error::code()` 会退化成 `None`，调用方拿不到 20028 / 20010 等真实原因。
 fn attach_ssa(error: Error, ssa: Option<String>) -> Error {
-    ssa.map_or(error, Error::NeedsVerify)
+    let Some(ssa) = ssa else {
+        return error;
+    };
+    let code = match &error {
+        Error::Upstream { code, .. } => Some(*code),
+        _ => None,
+    };
+    Error::NeedsVerify {
+        ssa,
+        code,
+        source: Box::new(error),
+    }
 }
 
 /// 判断错误是否要求二次行为验证
 #[must_use]
 pub fn needs_verify(error: &Error) -> bool {
     // 匹配验证错误变体或对应业务错误码
-    matches!(error, Error::NeedsVerify(_)) || error.code() == Some(Code::NeedVerify)
+    matches!(error, Error::NeedsVerify { .. }) || error.code() == Some(Code::NeedVerify)
 }
 
 #[cfg(test)]
@@ -256,6 +290,26 @@ mod tests {
         let names: Vec<&str> = retry.query.iter().map(|(k, _)| k.as_str()).collect();
         assert!(names.contains(&"sid"), "{names:?}");
         assert!(names.contains(&"edt"), "{names:?}");
+    }
+
+    #[tokio::test]
+    async fn ssa_error_keeps_the_upstream_business_code() {
+        // 二次验证错误必须携带上游原始业务码，不能把它顶成“没有错误码”。
+        let mock = Arc::new(MockTransport::new());
+        mock.on_ssa(
+            "/v1/verify",
+            "SSA123",
+            &serde_json::json!({"status": 0, "error_code": 20028, "error": "验证"}),
+        );
+        let api = Api::new(mock.clone(), session(), 64);
+        let error = api
+            .call(RequestSpec::get("/v1/verify"), Freshness::NoStore)
+            .await
+            .unwrap_err();
+        assert_eq!(error.code(), Some(Code::NeedVerify), "{error:?}");
+        assert!(needs_verify(&error));
+        // 上游原始错误仍在原因链里
+        assert!(std::error::Error::source(&error).is_some(), "原始错误必须留在原因链中");
     }
 
     #[tokio::test]

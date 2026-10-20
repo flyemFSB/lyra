@@ -37,6 +37,7 @@ pub trait Fetcher: Send + Sync + 'static {
 
 /// 播放状态
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum State {
     /// 空闲（未加载曲目）
     Idle,
@@ -65,6 +66,7 @@ pub struct Snapshot {
 
 /// 音频引擎异步通知事件
 #[derive(Debug, Clone)]
+#[non_exhaustive]
 pub enum Event {
     /// 曲目正常播放结束
     Ended,

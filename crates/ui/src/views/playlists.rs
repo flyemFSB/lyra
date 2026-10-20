@@ -14,7 +14,7 @@ use crate::bridge::{Backend, Msg};
 use crate::shell::AppShell;
 use crate::theme::{CARD_BORDER, TEXT_MUTED, cover_box, notice_with_icon, row_sizes, title};
 use crate::views::player::PlayerModel;
-use crate::views::tracks::track_row;
+use crate::views::tracks::{TrackRow, build_rows, track_row};
 
 /// 歌单分类标签页
 #[derive(Clone, Copy, PartialEq, Eq, Default)]
@@ -22,6 +22,18 @@ pub(crate) enum PlaylistTab {
     #[default]
     Created,
     Collected,
+}
+
+/// 侧边栏歌单条目的展示模型（预格式化，渲染期零分配）
+pub(crate) struct PlaylistEntry {
+    /// 在原始列表中的下标
+    pub(crate) index: usize,
+    /// 歌单名称
+    pub(crate) name: SharedString,
+    /// 曲目数量文本
+    pub(crate) count: SharedString,
+    /// 是否为「我喜欢」
+    pub(crate) liked: bool,
 }
 
 /// 歌单详情视图
@@ -34,6 +46,10 @@ pub(crate) struct PlaylistsView {
     pub(crate) selected: Option<usize>,
     pub(crate) scroll_handle: VirtualListScrollHandle,
     songs: Arc<Vec<Song>>,
+    /// 预格式化的曲目展示模型
+    rows: Arc<Vec<TrackRow>>,
+    /// 侧边栏可见歌单条目（预格式化，随标签页过滤）
+    pub(crate) entries: Arc<Vec<PlaylistEntry>>,
     sizes: Rc<Vec<Size<Pixels>>>,
     pub(crate) loading_playlists: bool,
     loading_tracks: bool,
@@ -72,6 +88,8 @@ impl PlaylistsView {
             selected: None,
             scroll_handle: VirtualListScrollHandle::new(),
             songs: Arc::new(Vec::new()),
+            rows: Arc::new(Vec::new()),
+            entries: Arc::new(Vec::new()),
             sizes: row_sizes(0),
             loading_playlists: false,
             loading_tracks: false,
@@ -87,6 +105,27 @@ impl PlaylistsView {
         }
     }
 
+    /// 重建侧边栏可见歌单条目（预格式化，渲染期零分配）
+    fn rebuild_entries(&mut self) {
+        let tab = self.tab;
+        self.entries = Arc::new(
+            self.playlists
+                .iter()
+                .enumerate()
+                .filter(|(_, list)| match tab {
+                    PlaylistTab::Created => list.is_liked() || list.kind != 1,
+                    PlaylistTab::Collected => !list.is_liked() && list.kind == 1,
+                })
+                .map(|(index, list)| PlaylistEntry {
+                    index,
+                    name: SharedString::from(list.name.as_str()),
+                    count: SharedString::from(list.count.to_string()),
+                    liked: list.is_liked(),
+                })
+                .collect(),
+        );
+    }
+
     /// 重置视图状态并废弃在途请求
     pub(crate) fn reset(&mut self, cx: &mut Context<Self>) {
         self.playlists = Arc::new(Vec::new());
@@ -95,6 +134,8 @@ impl PlaylistsView {
         self.tab_seq = 1;
         self.scroll_handle = VirtualListScrollHandle::new();
         self.songs = Arc::new(Vec::new());
+        self.rows = Arc::new(Vec::new());
+        self.entries = Arc::new(Vec::new());
         self.sizes = row_sizes(0);
         self.loading_playlists = false;
         self.loading_tracks = false;
@@ -133,6 +174,7 @@ impl PlaylistsView {
             Ok(lists) => {
                 self.playlists = Arc::new(lists);
                 self.error = None;
+                self.rebuild_entries();
                 if self.selected.is_none() && !self.playlists.is_empty() {
                     let first = self
                         .playlists
@@ -155,16 +197,8 @@ impl PlaylistsView {
         }
         self.tab = tab;
         self.tab_seq += 1;
-        let first_in_tab = self
-            .playlists
-            .iter()
-            .enumerate()
-            .find(|(_, list)| match self.tab {
-                PlaylistTab::Created => list.is_liked() || list.kind != 1,
-                PlaylistTab::Collected => !list.is_liked() && list.kind == 1,
-            })
-            .map(|(idx, _)| idx);
-
+        self.rebuild_entries();
+        let first_in_tab = self.entries.first().map(|entry| entry.index);
         if let Some(idx) = first_in_tab {
             self.select(idx, cx);
         }
@@ -203,8 +237,16 @@ impl PlaylistsView {
         match result {
             Ok(page) => {
                 self.next_page = page.cursor.as_deref().and_then(|cursor| cursor.parse().ok());
-                let mut songs = if appending { (*self.songs).clone() } else { Vec::new() };
+                // 追加时优先零拷贝接管旧列表；队列仍持有引用时才退化为深拷贝
+                let mut songs = match Arc::try_unwrap(self.songs.clone()) {
+                    Ok(owned) => owned,
+                    Err(shared) => (*shared).clone(),
+                };
+                if !appending {
+                    songs.clear();
+                }
                 songs.extend(page.items);
+                self.rows = Arc::new(build_rows(&songs));
                 self.songs = Arc::new(songs);
                 self.sizes = row_sizes(self.songs.len());
                 self.error = None;
@@ -257,29 +299,26 @@ impl PlaylistsView {
     }
 
     /// 渲染单首曲目行
-    fn row(&self, index: usize, cx: &App) -> AnyElement {
-        let removable = self.listid.as_ref().and_then(|listid| {
-            self.songs
-                .get(index)
-                .map(|song| (SharedString::from(listid.as_str()), song.fileid))
-        });
-
-        let (is_current, is_playing) = {
-            let model = self.player.read(cx);
-            let cur_hash = model.current_song().map(|s| &s.hash);
-            let this_hash = self.songs.get(index).map(|s| &s.hash);
-            (
-                cur_hash.is_some() && cur_hash == this_hash,
-                model.snapshot.state == lyra_audio::State::Playing,
-            )
+    fn row(
+        &self,
+        index: usize,
+        cur_hash: Option<&str>,
+        is_playing: bool,
+        listid: Option<&SharedString>,
+        cx: &App,
+    ) -> AnyElement {
+        let this_hash = self.songs.get(index).map(|s| s.hash.as_str());
+        let is_current = cur_hash.is_some() && cur_hash == this_hash;
+        let Some(row) = self.rows.get(index) else {
+            return div().into_any_element();
         };
-
         track_row(
             index,
+            row,
             &self.songs,
             &self.shell,
             &self.backend,
-            removable,
+            listid,
             is_current,
             is_playing,
             cx,
@@ -336,6 +375,9 @@ impl PlaylistsView {
             );
         }
 
+        // 移除按钮需要的歌单 ID：整个列表共用一份，不在每行重新构造
+        let listid = self.listid.as_deref().map(SharedString::from);
+
         let body = if self.loading_tracks {
             notice_with_icon(IconName::RefreshCw, "正在加载曲目…", cx)
         } else if let Some(error) = &self.error {
@@ -345,13 +387,24 @@ impl PlaylistsView {
         } else {
             let this = cx.entity();
             let sizes = self.sizes.clone();
+            let listid = listid.clone();
             v_virtual_list(
                 this,
                 ElementId::Name(SharedString::new_static("playlist-tracks")),
                 sizes,
                 move |view, range, _window, cx| {
                     let app: &App = cx;
-                    range.map(|index| view.row(index, app)).collect::<Vec<_>>()
+                    // 播放器状态整批读取一次，避免每行都做一次实体读取
+                    let (cur_hash, is_playing) = {
+                        let model = view.player.read(app);
+                        (
+                            model.current_song().map(|s| s.hash.clone()),
+                            model.snapshot.state == lyra_audio::State::Playing,
+                        )
+                    };
+                    range
+                        .map(|index| view.row(index, cur_hash.as_deref(), is_playing, listid.as_ref(), app))
+                        .collect::<Vec<_>>()
                 },
             )
             .track_scroll(&self.scroll_handle)

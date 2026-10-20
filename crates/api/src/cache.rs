@@ -83,11 +83,12 @@ impl TtlCache {
 
     /// 按键前缀批量失效缓存
     pub fn invalidate_prefix(&self, prefix: &str) {
+        // 先过滤再克隆：命中的键通常远少于全部键
         let keys: Vec<String> = self
             .inner
             .iter()
-            .map(|(k, _)| k.to_string())
-            .filter(|k| k.starts_with(prefix))
+            .filter(|(key, _)| key.starts_with(prefix))
+            .map(|(key, _)| key.to_string())
             .collect();
         for key in keys {
             self.inner.invalidate(&key);

@@ -1,15 +1,13 @@
 [package]
 name        = "lyra-app"
-description = "Lyra音乐用例与状态机；唯一配置运行时的库"
+description = "Lyra音乐用例与状态机；运行时句柄由调用方注入，应用层不自建运行时"
 version.workspace      = true
 edition.workspace      = true
 rust-version.workspace = true
 license.workspace      = true
-
-[features]
-default = []
-# 启用 GPUI 界面支持
-gui = []
+authors.workspace      = true
+repository.workspace   = true
+publish    = false
 
 [dependencies]
 lyra-proto = { workspace = true }
@@ -23,7 +21,8 @@ tokio        = { version = "1", features = ["rt-multi-thread", "macros", "time"]
 
 [dev-dependencies]
 tempfile = { workspace = true }
-lyra-store = { workspace = true }
+# 实现自定义 Transport 需要 async_trait
+async-trait = { workspace = true }
 # test-util 提供虚拟时钟，加速测试重试等待
 tokio = { version = "1", features = ["test-util"] }
 

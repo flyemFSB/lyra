@@ -25,33 +25,28 @@ pub struct KeyringSecrets;
 
 impl Secrets for KeyringSecrets {
     fn set(&self, user: &str, secret: &str) -> Result<()> {
-        entry(user)?.set_password(secret).map_err(|e| secret_err(&e))
+        entry(user)?.set_password(secret).map_err(Error::Secret)
     }
 
     fn get(&self, user: &str) -> Result<Option<String>> {
         match entry(user)?.get_password() {
             Ok(secret) => Ok(Some(secret)),
             Err(keyring::Error::NoEntry) => Ok(None),
-            Err(e) => Err(secret_err(&e)),
+            Err(e) => Err(Error::Secret(e)),
         }
     }
 
     fn delete(&self, user: &str) -> Result<()> {
         match entry(user)?.delete_credential() {
             Ok(()) | Err(keyring::Error::NoEntry) => Ok(()),
-            Err(e) => Err(secret_err(&e)),
+            Err(e) => Err(Error::Secret(e)),
         }
     }
 }
 
 /// 获取指定用户的凭据条目
 fn entry(user: &str) -> Result<keyring::Entry> {
-    keyring::Entry::new(KEYRING_SERVICE, user).map_err(|e| secret_err(&e))
-}
-
-/// 转换凭据错误，防止敏感信息泄漏到日志
-fn secret_err(e: &keyring::Error) -> Error {
-    Error::Secret(e.to_string())
+    keyring::Entry::new(KEYRING_SERVICE, user).map_err(Error::Secret)
 }
 
 /// 内存凭据存储实现（用于测试）
@@ -89,5 +84,53 @@ impl Secrets for MemorySecrets {
 
 /// 互斥锁中毒错误转换
 fn poisoned() -> Error {
-    Error::Secret("内存凭据锁已中毒".to_owned())
+    Error::SecretState("内存凭据锁已中毒".to_owned())
+}
+
+#[cfg(test)]
+mod tests {
+    #![allow(clippy::unwrap_used, clippy::expect_used)]
+
+    use super::*;
+
+    /// 真实密钥环后端的跨实例持久化测试。
+    ///
+    /// 第三轮修复记录过：`keyring` 3.x 不显式开 `windows-native` 时会在 Windows 上
+    /// 静默退化成进程内 mock（跨进程即丢）。本测试直接打到真实的 Windows 凭据管理器，
+    /// 因此默认不随 `cargo test` 执行，需要时显式跑：
+    ///
+    /// ```text
+    /// cargo test -p lyra-store -- --ignored
+    /// ```
+    ///
+    /// 它会在凭据管理器里创建 `lyra.kugou` / `lyra-store-keyring-test` 条目并在结束时清理。
+    #[test]
+    #[ignore = "需要真实的 Windows 凭据管理器；用 cargo test -p lyra-store -- --ignored 显式执行"]
+    fn keyring_backend_persists_across_instances() {
+        let user = "lyra-store-keyring-test";
+        let secrets = KeyringSecrets;
+        // 清理可能残留的旧条目
+        secrets.delete(user).unwrap();
+
+        secrets.set(user, "CROSS-INSTANCE-SECRET").unwrap();
+        // 换一个实例（新的 KeyringSecrets）读取，验证不是进程内 mock
+        let other = KeyringSecrets;
+        assert_eq!(
+            other.get(user).unwrap().as_deref(),
+            Some("CROSS-INSTANCE-SECRET"),
+            "凭据必须跨实例可见（真实 Windows 凭据管理器）"
+        );
+        other.delete(user).unwrap();
+        assert!(other.get(user).unwrap().is_none());
+    }
+
+    #[test]
+    fn memory_backend_round_trips() {
+        let secrets = MemorySecrets::new();
+        assert!(secrets.get("u").unwrap().is_none());
+        secrets.set("u", "s").unwrap();
+        assert_eq!(secrets.get("u").unwrap().as_deref(), Some("s"));
+        secrets.delete("u").unwrap();
+        assert!(secrets.get("u").unwrap().is_none());
+    }
 }

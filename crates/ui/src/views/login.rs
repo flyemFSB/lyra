@@ -223,7 +223,7 @@ impl Render for LoginView {
                                     .gap(px(8.0))
                                     .items_center()
                                     .child(Icon::new(IconName::KeyRound).size(px(16.0)).text_color(ACCENT_GREEN))
-                                    .child(div().flex_1().child(Input::new(&self.code))),
+                                    .child(div().flex_1().child(Input::new(&self.code).w_full())),
                             )
                             .child(
                                 Button::new("send_code")

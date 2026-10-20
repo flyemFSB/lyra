@@ -17,7 +17,7 @@ use crate::theme::{
     hex_rgb, notice_with_icon, row_sizes, title,
 };
 use crate::views::player::PlayerModel;
-use crate::views::tracks::track_row;
+use crate::views::tracks::{TrackRow, build_rows, track_row};
 
 /// 获取当前时段问候语（UTC+8）
 fn get_greeting() -> &'static str {
@@ -42,6 +42,8 @@ pub(crate) struct DailyView {
     shell: WeakEntity<AppShell>,
     player: Entity<PlayerModel>,
     songs: Arc<Vec<Song>>,
+    /// 预格式化的曲目展示模型
+    rows: Arc<Vec<TrackRow>>,
     sizes: Rc<Vec<Size<Pixels>>>,
     scroll_handle: VirtualListScrollHandle,
     loading: bool,
@@ -66,6 +68,7 @@ impl DailyView {
             shell,
             player,
             songs: Arc::new(Vec::new()),
+            rows: Arc::new(Vec::new()),
             sizes: row_sizes(0),
             scroll_handle: VirtualListScrollHandle::new(),
             loading: false,
@@ -78,6 +81,7 @@ impl DailyView {
     /// 重置视图状态
     pub(crate) fn reset(&mut self, cx: &mut Context<Self>) {
         self.songs = Arc::new(Vec::new());
+        self.rows = Arc::new(Vec::new());
         self.sizes = row_sizes(0);
         self.scroll_handle = VirtualListScrollHandle::new();
         self.loading = false;
@@ -108,6 +112,7 @@ impl DailyView {
         self.loading = false;
         match result {
             Ok(songs) => {
+                self.rows = Arc::new(build_rows(&songs));
                 self.songs = Arc::new(songs);
                 self.sizes = row_sizes(self.songs.len());
                 self.loaded = true;
@@ -119,18 +124,15 @@ impl DailyView {
     }
 
     /// 渲染单首曲目行
-    fn row(&self, index: usize, cx: &App) -> AnyElement {
-        let (is_current, is_playing) = {
-            let model = self.player.read(cx);
-            let cur_hash = model.current_song().map(|s| &s.hash);
-            let this_hash = self.songs.get(index).map(|s| &s.hash);
-            (
-                cur_hash.is_some() && cur_hash == this_hash,
-                model.snapshot.state == lyra_audio::State::Playing,
-            )
+    fn row(&self, index: usize, cur_hash: Option<&str>, is_playing: bool, cx: &App) -> AnyElement {
+        let this_hash = self.songs.get(index).map(|s| s.hash.as_str());
+        let is_current = cur_hash.is_some() && cur_hash == this_hash;
+        let Some(row) = self.rows.get(index) else {
+            return div().into_any_element();
         };
         track_row(
             index,
+            row,
             &self.songs,
             &self.shell,
             &self.backend,
@@ -145,10 +147,16 @@ impl DailyView {
 impl Render for DailyView {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let greeting = get_greeting();
-        let first_song = self.songs.first().cloned();
-        let (first_song_name, first_song_singer) = match &first_song {
-            Some(s) => (s.display_title().to_owned(), s.display_singer().to_owned()),
-            None => ("暂无推荐曲目".to_owned(), "猜你喜欢".to_owned()),
+        // 展示文本在数据层已经预格式化，渲染期不再克隆整首曲目
+        let (first_song_name, first_song_singer) = match self.songs.first() {
+            Some(song) => (
+                SharedString::from(song.display_title()),
+                SharedString::from(song.display_singer()),
+            ),
+            None => (
+                SharedString::new_static("暂无推荐曲目"),
+                SharedString::new_static("猜你喜欢"),
+            ),
         };
 
         let songs_for_play = self.songs.clone();
@@ -300,8 +308,9 @@ impl Render for DailyView {
             let Some(song) = self.songs.get(song_idx) else {
                 continue;
             };
-            let song_title = song.display_title().to_owned();
-            let song_singer = song.display_singer().to_owned();
+            // 直接借用展示文本，不构造中间 String
+            let song_title = SharedString::from(song.display_title());
+            let song_singer = SharedString::from(song.display_singer());
             let shell = self.shell.clone();
             let songs = self.songs.clone();
 
@@ -406,7 +415,17 @@ impl Render for DailyView {
                 sizes,
                 move |view, range, _window, cx| {
                     let app: &App = cx;
-                    range.map(|index| view.row(index, app)).collect::<Vec<_>>()
+                    // 播放器状态整批读取一次，避免每行都做一次实体读取
+                    let (cur_hash, is_playing) = {
+                        let model = view.player.read(app);
+                        (
+                            model.current_song().map(|s| s.hash.clone()),
+                            model.snapshot.state == lyra_audio::State::Playing,
+                        )
+                    };
+                    range
+                        .map(|index| view.row(index, cur_hash.as_deref(), is_playing, app))
+                        .collect::<Vec<_>>()
                 },
             )
             .track_scroll(&self.scroll_handle)

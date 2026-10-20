@@ -7,6 +7,7 @@ use gpui_kit::component::button::{Button, ButtonVariants};
 use gpui_kit::component::{Icon, Sizable as _, h_flex, v_flex};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
+use lyra_api::model::Song;
 
 use crate::bridge::{Backend, Msg};
 use crate::format::format_duration;
@@ -16,14 +17,44 @@ use crate::theme::{
     TEXT_MUTED, TEXT_PRIMARY, badge, cover_box,
 };
 
+/// 曲目行的展示模型
+///
+/// GPUI 的 `render` 每帧都会重跑，因此不能在渲染期构造字符串。
+/// 所有展示文本在数据到达时一次性预格式化，渲染时只做引用计数克隆。
+pub(crate) struct TrackRow {
+    /// 主标题（歌名）
+    pub(crate) title: SharedString,
+    /// 副标题（歌手名）
+    pub(crate) singer: SharedString,
+    /// 时长文本
+    pub(crate) duration: SharedString,
+    /// 序号文本（01、02…）
+    pub(crate) index: SharedString,
+}
+
+/// 为一组歌曲预构建展示模型
+pub(crate) fn build_rows(songs: &[Song]) -> Vec<TrackRow> {
+    songs
+        .iter()
+        .enumerate()
+        .map(|(index, song)| TrackRow {
+            title: SharedString::from(song.display_title()),
+            singer: SharedString::from(song.display_singer()),
+            duration: format_duration(song.duration_ms),
+            index: SharedString::from(format!("{:02}", index + 1)),
+        })
+        .collect()
+}
+
 /// 渲染单首曲目行
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn track_row(
     index: usize,
-    queue: &Arc<Vec<lyra_api::model::Song>>,
+    row: &TrackRow,
+    queue: &Arc<Vec<Song>>,
     shell: &WeakEntity<AppShell>,
     backend: &Backend,
-    removable: Option<(SharedString, i64)>,
+    removable_listid: Option<&SharedString>,
     is_current: bool,
     is_playing: bool,
     cx: &App,
@@ -32,15 +63,14 @@ pub(crate) fn track_row(
         return div().into_any_element();
     };
 
+    // 队列是 `Arc`，克隆只是引用计数递增；曲目本体等到真正点击「收藏」时再克隆，
+    // 避免渲染期把整首曲目（10 个 String 字段）复制一遍。
     let play_queue = queue.clone();
     let play_shell = shell.clone();
+    let like_queue = queue.clone();
     let like_backend = backend.clone();
-    let like_song = song.clone();
 
-    let title = song.display_title();
-    let singer = song.display_singer();
-
-    let mut row = h_flex()
+    let mut track = h_flex()
         .id(("track", index))
         .role(Role::Button)
         .h(px(ROW_HEIGHT))
@@ -80,12 +110,7 @@ pub(crate) fn track_row(
                     }
                 })
                 .when(!is_current, |this| {
-                    this.child(
-                        div()
-                            .text_sm()
-                            .text_color(TEXT_FAINT)
-                            .child(SharedString::from(format!("{:02}", index + 1))),
-                    )
+                    this.child(div().text_sm().text_color(TEXT_FAINT).child(row.index.clone()))
                 }),
         )
         .child(
@@ -95,7 +120,7 @@ pub(crate) fn track_row(
                         .border_1()
                         .border_color(ACCENT_GREEN_BORDER)
                 })
-                .child(cover_box(title, 36.0, cx)),
+                .child(cover_box(row.title.as_ref(), 36.0, cx)),
         )
         // 主标题：歌名；副标题：歌手名
         .child(
@@ -121,7 +146,7 @@ pub(crate) fn track_row(
                                     TEXT_PRIMARY
                                 })
                                 .truncate()
-                                .child(SharedString::from(title.to_owned())),
+                                .child(row.title.clone()),
                         )
                         .child(badge("SQ", ACCENT_GREEN_LIGHT, ACCENT_GREEN)),
                 )
@@ -134,16 +159,10 @@ pub(crate) fn track_row(
                             TEXT_MUTED
                         })
                         .truncate()
-                        .child(SharedString::from(singer.to_owned())),
+                        .child(row.singer.clone()),
                 ),
         )
-        .child(
-            div()
-                .w(px(56.0))
-                .text_xs()
-                .text_color(TEXT_FAINT)
-                .child(SharedString::from(format_duration(song.duration_ms))),
-        )
+        .child(div().w(px(56.0)).text_xs().text_color(TEXT_FAINT).child(row.duration.clone()))
         .child(
             Button::new(("like", index))
                 .ghost()
@@ -152,8 +171,11 @@ pub(crate) fn track_row(
                 .tooltip("收藏到我喜欢")
                 .block_mouse_except_scroll()
                 .on_click(move |_event, _window, _cx| {
+                    let Some(song) = like_queue.get(index) else {
+                        return;
+                    };
+                    let song = song.clone();
                     let app = like_backend.app();
-                    let song = like_song.clone();
                     like_backend.spawn(async move {
                         Msg::Toast(match app.like(&song).await {
                             Ok(()) => "已加入「我喜欢」".to_owned(),
@@ -164,9 +186,11 @@ pub(crate) fn track_row(
         );
 
     // 移除按钮（仅自建歌单可用）
-    if let Some((listid, fileid)) = removable {
+    if let Some(listid) = removable_listid {
         let remove_backend = backend.clone();
-        row = row.child(
+        let listid = listid.clone();
+        let fileid = song.fileid;
+        track = track.child(
             Button::new(("remove", index))
                 .ghost()
                 .small()
@@ -182,5 +206,52 @@ pub(crate) fn track_row(
         );
     }
 
-    row.into_any_element()
+    track.into_any_element()
+}
+
+#[cfg(test)]
+mod tests {
+    #![allow(clippy::unwrap_used, clippy::expect_used, clippy::pedantic)]
+
+    use super::{TrackRow, build_rows};
+    use lyra_api::model::Song;
+
+    fn song(hash: &str, name: &str, singer: &str, duration_ms: u64) -> Song {
+        Song {
+            hash: hash.to_owned(),
+            name: name.to_owned(),
+            singer: singer.to_owned(),
+            duration_ms,
+            ..Song::default()
+        }
+    }
+
+    #[test]
+    fn rows_are_preformatted_so_render_does_not_allocate() {
+        // 展示模型必须在数据层就把文本准备好：
+        // 渲染期只做引用计数克隆，不再构造字符串。
+        let songs = vec![
+            song("a", "夜曲", "周杰伦", 226_000),
+            song("b", "晴天", "周杰伦", 269_000),
+        ];
+        let rows: Vec<TrackRow> = build_rows(&songs);
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0].title.as_ref(), "夜曲");
+        assert_eq!(rows[0].singer.as_ref(), "周杰伦");
+        assert_eq!(rows[0].duration.as_ref(), "3:46");
+        assert_eq!(rows[0].index.as_ref(), "01");
+        assert_eq!(rows[1].index.as_ref(), "02");
+        assert_eq!(rows[1].duration.as_ref(), "4:29");
+    }
+
+    #[test]
+    fn the_row_model_does_not_clone_the_song() {
+        // 展示模型只持有预格式化的文本与索引，不复制曲目本体：
+        // 曲目克隆留给「收藏」按钮点击时按需进行。
+        let songs = vec![song("a", "夜曲", "周杰伦", 226_000)];
+        let rows = build_rows(&songs);
+        assert_eq!(rows[0].title.as_ref(), "夜曲");
+        // 原始曲目仍在，模型构建没有把它搬走
+        assert_eq!(songs[0].hash, "a");
+    }
 }

@@ -190,17 +190,26 @@ pub async fn privilege(api: &Api, items: &[RightRequest], qualities: Option<&str
     let value = api.call(spec, Freshness::PLAYLIST).await?;
     let data = value.get("data").and_then(Value::as_array).cloned().unwrap_or_default();
 
+    // 一次性建立 hash → 权益条目的查找表：逐项扫描是 O(n²)，且每次比较都要分配字符串
+    let mut by_hash: std::collections::HashMap<String, Value> = std::collections::HashMap::new();
+    for candidate in &data {
+        let hash = codec::pick_str_cow(candidate, &["hash"]);
+        if hash.is_empty() {
+            continue;
+        }
+        by_hash.entry(hash.to_lowercase()).or_insert_with(|| candidate.clone());
+    }
+
     Ok(items
         .iter()
         .enumerate()
         .map(|(index, item)| {
             let hash = item.hash.to_lowercase();
             // 依据 Hash 进行结果关联匹配
-            let entry = data
-                .iter()
-                .find(|candidate| codec::pick_str(candidate, &["hash"]).to_lowercase() == hash)
-                .or_else(|| data.get(index))
+            let entry = by_hash
+                .get(&hash)
                 .cloned()
+                .or_else(|| data.get(index).cloned())
                 .unwrap_or(Value::Null);
             build_quality_vip(&hash, item.album_id, &entry, &wanted)
         })
@@ -222,7 +231,7 @@ fn build_quality_vip(hash: &str, _album_id: i64, resource: &Value, qualities: &[
     // 概念版下架或无版权标记：资源级 privilege=5 或响应提示 Deny
     // 注意：不能依 status=0 判定，VIP 音源条目的 status 亦为 0
     let denied_resource = codec::pick_i64(resource, &["privilege"]) == 5
-        || codec::pick_str(resource, &["_msg"]).to_lowercase().contains("deny");
+        || codec::pick_str_cow(resource, &["_msg"]).to_lowercase().contains("deny");
 
     let list: Vec<QualityRight> = qualities
         .iter()
@@ -257,9 +266,9 @@ fn build_quality_vip(hash: &str, _album_id: i64, resource: &Value, qualities: &[
                 "ogg".to_owned()
             };
             let resolved_hash = if ogg_hash.is_empty() {
-                relate
-                    .map_or(String::new(), |item| codec::pick_str(item, &["hash"]))
-                    .to_lowercase()
+                relate.map_or(String::new(), |item| {
+                    codec::pick_str_cow(item, &["hash"]).to_lowercase()
+                })
             } else {
                 ogg_hash.clone()
             };

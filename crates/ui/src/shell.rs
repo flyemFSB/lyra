@@ -1,16 +1,16 @@
 //! 应用主外壳：导航、内容承载、播放模式调度与播放队列抽屉
 
 use std::sync::Arc;
-use std::sync::mpsc::Receiver;
 use std::time::{Duration, Instant};
 
+use async_channel::Receiver;
 use gpui_kit::assets::IconName;
 use gpui_kit::component::button::{Button, ButtonVariants};
 use gpui_kit::component::scroll::ScrollableElement as _;
 use gpui_kit::component::{Disableable as _, Icon, Sizable as _, h_flex, v_flex};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
-use lyra_api::model::{Playlist, Song};
+use lyra_api::model::Song;
 
 use crate::bridge::{Backend, Msg, Nav};
 use crate::format::format_duration;
@@ -79,6 +79,8 @@ pub(crate) struct AppShell {
     lyrics_seq: u64,
     /// 连续自动跳过的曲目计数
     auto_skips: usize,
+    /// 轻提示过期计时任务（重复提示时自动取消前一个）
+    toast_task: Option<Task<()>>,
     _drain: Task<()>,
 }
 
@@ -90,15 +92,13 @@ impl AppShell {
         // 恢复持久化的播放模式设置
         let mode = backend.app().play_mode();
         let player = cx.new(|_| PlayerModel::new(has_engine, mode));
+        // 事件驱动收取后台消息：通道为空时任务挂起，不占用 CPU，
+        // 也不需要用固定间隔去轮询。
         let drain = cx.spawn(async move |this, cx| {
-            loop {
-                cx.background_executor().timer(Duration::from_millis(50)).await;
-                for msg in receiver.try_iter() {
-                    if this.update(cx, |shell, cx| shell.apply(msg, cx)).is_err() {
-                        return;
-                    }
+            while let Ok(msg) = receiver.recv().await {
+                if this.update(cx, |shell, cx| shell.apply(msg, cx)).is_err() {
+                    return;
                 }
-                let _ = this.update(cx, AppShell::expire_toast);
             }
         });
         let initial_nav = if logged_in { Nav::Daily } else { Nav::Login };
@@ -121,6 +121,7 @@ impl AppShell {
             queue_seq: 1,
             lyrics_seq: 0,
             auto_skips: 0,
+            toast_task: None,
             _drain: drain,
         }
     }
@@ -314,7 +315,24 @@ impl AppShell {
             Nav::Playlists => views.playlists.update(cx, PlaylistsView::ensure),
             Nav::Daily => views.daily.update(cx, DailyView::ensure),
             Nav::Radio => views.radio.update(cx, RadioView::ensure),
-            Nav::Settings => views.settings.update(cx, |view, _cx| view.ensure()),
+            Nav::Settings => views.settings.update(cx, SettingsView::ensure),
+            Nav::Login | Nav::Search | Nav::Lyrics => {}
+        }
+    }
+
+    /// 重新加载当前页面的数据（顶栏「刷新当前数据」）
+    ///
+    /// 与 `ensure_loaded` 的区别：这里无条件重新拉取，
+    /// 否则电台页因为 `loaded` 闩锁会让刷新按钮永远无效。
+    pub(crate) fn reload_current(&mut self, cx: &mut Context<Self>) {
+        let Some(views) = self.views.as_ref() else {
+            return;
+        };
+        match self.nav {
+            Nav::Playlists => views.playlists.update(cx, PlaylistsView::reload),
+            Nav::Daily => views.daily.update(cx, DailyView::reload),
+            Nav::Radio => views.radio.update(cx, RadioView::reload),
+            Nav::Settings => views.settings.update(cx, SettingsView::ensure),
             Nav::Login | Nav::Search | Nav::Lyrics => {}
         }
     }
@@ -447,7 +465,7 @@ impl AppShell {
             views.login.update(cx, LoginView::reset);
             views.playlists.update(cx, PlaylistsView::reload);
             views.daily.update(cx, DailyView::reload);
-            views.settings.update(cx, |view, _cx| view.ensure());
+            views.settings.update(cx, SettingsView::ensure);
         }
         self.nav = Nav::Playlists;
         self.nav_seq += 1;
@@ -476,15 +494,16 @@ impl AppShell {
         self.toast = Some(SharedString::from(text));
         self.toast_deadline = Some(Instant::now() + TOAST_TTL);
         cx.notify();
-    }
-
-    /// 清除已过期的轻提示
-    fn expire_toast(&mut self, cx: &mut Context<Self>) {
-        if self.toast_deadline.is_some_and(|deadline| Instant::now() >= deadline) {
-            self.toast = None;
-            self.toast_deadline = None;
-            cx.notify();
-        }
+        // 到期后再收一次提示：一次性计时任务，重复提示时会自动取消上一个
+        self.toast_task = Some(cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(TOAST_TTL).await;
+            let _ = this.update(cx, |shell, cx| {
+                shell.toast = None;
+                shell.toast_deadline = None;
+                shell.toast_task = None;
+                cx.notify();
+            });
+        }));
     }
 
     /// 渲染主内容区顶栏
@@ -567,7 +586,7 @@ impl AppShell {
                             .small()
                             .icon(IconName::RefreshCw)
                             .tooltip("刷新当前数据")
-                            .on_click(cx.listener(|shell, _event, _window, cx| shell.ensure_loaded(cx))),
+                            .on_click(cx.listener(|shell, _event, _window, cx| shell.reload_current(cx))),
                     ),
             )
     }
@@ -702,9 +721,10 @@ impl AppShell {
         column = column.child(quick_row);
 
         // 歌单胶囊切换器与侧边栏歌单列表
-        let (tab, tab_seq, playlists, selected, loading_playlists) = if let Some(views) = self.views.as_ref() {
+        // 条目已在 PlaylistsView 里按标签页过滤并预格式化，渲染期不再重新过滤
+        let (tab, tab_seq, entries, selected, loading_playlists) = if let Some(views) = self.views.as_ref() {
             let p = views.playlists.read(cx);
-            (p.tab, p.tab_seq, p.playlists.clone(), p.selected, p.loading_playlists)
+            (p.tab, p.tab_seq, p.entries.clone(), p.selected, p.loading_playlists)
         } else {
             (PlaylistTab::Created, 1, Arc::new(Vec::new()), None, false)
         };
@@ -814,20 +834,11 @@ impl AppShell {
 
         let mut playlist_list = v_flex().w_full().gap(px(3.0));
 
-        if loading_playlists && playlists.is_empty() {
+        if loading_playlists && entries.is_empty() {
             playlist_list = playlist_list.child(notice_with_icon(IconName::RefreshCw, "加载歌单中…", cx));
         }
 
-        let filtered_playlists: Vec<(usize, &Playlist)> = playlists
-            .iter()
-            .enumerate()
-            .filter(|(_, list)| match tab {
-                PlaylistTab::Created => list.is_liked() || list.kind != 1,
-                PlaylistTab::Collected => !list.is_liked() && list.kind == 1,
-            })
-            .collect();
-
-        if !loading_playlists && filtered_playlists.is_empty() {
+        if !loading_playlists && entries.is_empty() {
             playlist_list = playlist_list.child(div().py_6().child(notice_with_icon(
                 IconName::ListMusic,
                 if tab == PlaylistTab::Created {
@@ -839,11 +850,11 @@ impl AppShell {
             )));
         }
 
-        for (index, list) in filtered_playlists {
+        for entry in entries.iter() {
+            let index = entry.index;
             let active = self.nav == Nav::Playlists && selected == Some(index);
-            let name = list.name.clone();
-            let count_str = format!("{}", list.count);
-            let is_liked = list.is_liked();
+            let name = entry.name.clone();
+            let is_liked = entry.liked;
 
             playlist_list = playlist_list.child(
                 div()
@@ -897,7 +908,7 @@ impl AppShell {
                             .truncate()
                             .child(name),
                     )
-                    .child(badge(count_str, hex_rgb(0xeef1f5), TEXT_MUTED)),
+                    .child(badge(entry.count.clone(), hex_rgb(0xeef1f5), TEXT_MUTED)),
             );
         }
 
@@ -1071,7 +1082,12 @@ impl AppShell {
                                     }
                                 })
                                 .when(!is_current, |this| {
-                                    this.child(div().text_xs().text_color(TEXT_FAINT).child(format!("{:02}", idx + 1)))
+                                    this.child(
+                                        div()
+                                            .text_xs()
+                                            .text_color(TEXT_FAINT)
+                                            .child(crate::format::index_label(idx)),
+                                    )
                                 }),
                         )
                         .child(
@@ -1089,21 +1105,21 @@ impl AppShell {
                                         })
                                         .text_color(if is_current { ACCENT_GREEN_HOVER } else { TEXT_PRIMARY })
                                         .truncate()
-                                        .child(SharedString::from(song.display_title().to_owned())),
+                                        .child(SharedString::from(song.display_title())),
                                 )
                                 .child(
                                     div()
                                         .text_xs()
                                         .text_color(TEXT_MUTED)
                                         .truncate()
-                                        .child(SharedString::from(song.display_singer().to_owned())),
+                                        .child(SharedString::from(song.display_singer())),
                                 ),
                         )
                         .child(
                             div()
                                 .text_xs()
                                 .text_color(TEXT_FAINT)
-                                .child(SharedString::from(format_duration(song.duration_ms))),
+                                .child(format_duration(song.duration_ms)),
                         ),
                 );
             }

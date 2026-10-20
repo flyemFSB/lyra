@@ -3,8 +3,10 @@
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::Duration;
 
-use lyra_api::transport::{MockTransport, Response};
+use lyra_api::transport::{MockTransport, Request, Response, Transport};
 use lyra_app::{Kugou, PlayMode};
 
 // 构造测试登录响应桩
@@ -63,7 +65,7 @@ fn playback_stubs(mock: &MockTransport) {
 fn app(mock: Arc<MockTransport>) -> (Kugou, tempfile::TempDir) {
     let dir = tempfile::tempdir().unwrap();
     let store = lyra_store::open_temp_with_secrets(Box::new(lyra_store::MemorySecrets::new())).unwrap();
-    let app = Kugou::with_transport(mock, store, dir.path()).unwrap();
+    let app = Kugou::with_transport(mock, store, dir.path(), tokio::runtime::Handle::current()).unwrap();
     (app, dir)
 }
 
@@ -190,7 +192,7 @@ async fn device_identity_is_generated_once_and_reused() {
     let first = {
         let store =
             lyra_store::open_with_secrets(path.join("lyra.redb"), Box::new(lyra_store::MemorySecrets::new())).unwrap();
-        Kugou::with_transport(mock.clone(), store, &path).unwrap()
+        Kugou::with_transport(mock.clone(), store, &path, tokio::runtime::Handle::current()).unwrap()
     };
     let mid = first.session().device.mid.clone();
     let guid = first.session().device.guid.clone();
@@ -200,7 +202,7 @@ async fn device_identity_is_generated_once_and_reused() {
     let second = {
         let store =
             lyra_store::open_with_secrets(path.join("lyra.redb"), Box::new(lyra_store::MemorySecrets::new())).unwrap();
-        Kugou::with_transport(mock, store, &path).unwrap()
+        Kugou::with_transport(mock, store, &path, tokio::runtime::Handle::current()).unwrap()
     };
     assert_eq!(second.session().device.mid, mid);
     assert_eq!(second.session().device.guid, guid);
@@ -215,7 +217,7 @@ fn registered_app(mock: Arc<MockTransport>) -> (Kugou, tempfile::TempDir) {
         ..lyra_proto::Device::generate()
     };
     store.set_device(&device).unwrap();
-    let app = Kugou::with_transport(mock, store, dir.path()).unwrap();
+    let app = Kugou::with_transport(mock, store, dir.path(), tokio::runtime::Handle::current()).unwrap();
     (app, dir)
 }
 
@@ -263,7 +265,7 @@ async fn play_mode_survives_a_restart() {
 
     {
         let store = lyra_store::open_with_secrets(&path, Box::new(lyra_store::MemorySecrets::new())).unwrap();
-        let app = Kugou::with_transport(mock.clone(), store, dir.path()).unwrap();
+        let app = Kugou::with_transport(mock.clone(), store, dir.path(), tokio::runtime::Handle::current()).unwrap();
         assert_eq!(app.play_mode(), PlayMode::ListLoop, "默认列表循环");
         app.set_settings(&lyra_store::Settings {
             play_mode: PlayMode::Shuffle,
@@ -277,6 +279,7 @@ async fn play_mode_survives_a_restart() {
         mock,
         lyra_store::open_with_secrets(&path, Box::new(lyra_store::MemorySecrets::new())).unwrap(),
         dir.path(),
+        tokio::runtime::Handle::current(),
     )
     .unwrap();
     assert_eq!(reopened.play_mode(), PlayMode::Shuffle);
@@ -417,4 +420,118 @@ async fn trial_only_tracks_expose_the_preview_clip_length() {
         "cliphash_preview",
         "试听片段不能污染完整曲缓存"
     );
+}
+
+// ---------------------------------------------------------------------------
+// 回归：会话与登录态的一致性（设备注册不得复活已登出的账号）
+// ---------------------------------------------------------------------------
+
+/// 可控的传输实现：注册设备请求会被闸门拦住，直到测试放行
+struct GatedTransport {
+    inner: Arc<MockTransport>,
+    /// 是否拦截注册设备请求
+    block: Arc<AtomicBool>,
+    /// 请求是否已经到达闸门
+    entered: Arc<AtomicBool>,
+    /// 是否放行
+    release: Arc<AtomicBool>,
+}
+
+#[async_trait::async_trait]
+impl Transport for GatedTransport {
+    async fn execute(&self, request: Request) -> Result<Response, lyra_api::Error> {
+        if request.url.contains("/risk/v2/r_register_dev") && self.block.load(Ordering::Acquire) {
+            self.entered.store(true, Ordering::Release);
+            while !self.release.load(Ordering::Acquire) {
+                tokio::time::sleep(Duration::from_millis(1)).await;
+            }
+        }
+        self.inner.execute(request).await
+    }
+}
+
+/// 构造带闸门的应用门面
+fn gated_app() -> (Kugou, Arc<AtomicBool>, Arc<AtomicBool>, Arc<AtomicBool>) {
+    let mock = Arc::new(MockTransport::new());
+    mock.on_json(
+        "/risk/v2/r_register_dev",
+        &serde_json::json!({"status": 1, "error_code": 0, "data": {"dfid": "DFID-NEW"}}),
+    );
+    login_stub(&mock);
+    let block = Arc::new(AtomicBool::new(false));
+    let entered = Arc::new(AtomicBool::new(false));
+    let release = Arc::new(AtomicBool::new(false));
+    let transport = Arc::new(GatedTransport {
+        inner: mock,
+        block: block.clone(),
+        entered: entered.clone(),
+        release: release.clone(),
+    });
+    let dir = tempfile::tempdir().unwrap();
+    let store = lyra_store::open_temp_with_secrets(Box::new(lyra_store::MemorySecrets::new())).unwrap();
+    let app = Kugou::with_transport(transport, store, dir.path(), tokio::runtime::Handle::current()).unwrap();
+    (app, block, entered, release)
+}
+
+/// 设备注册只改设备字段，绝不整体写回会话（否则会复活已登出的账号）
+#[tokio::test]
+async fn patching_the_device_never_resurrects_a_logged_out_account() {
+    let mock = Arc::new(MockTransport::new());
+    let api = lyra_api::Api::new(mock, lyra_api::Session::new(lyra_proto::Device::generate()), 64);
+    api.set_account(Some(lyra_api::Account {
+        userid: 2043841403,
+        token: "TOKEN".to_owned(),
+        vip_type: 0,
+        vip_token: String::new(),
+    }));
+    assert!(api.session().is_logged_in());
+
+    // 模拟并发登出先落地
+    api.set_account(None);
+
+    // 迟到的设备注册只能改设备字段
+    api.update_device(|session| {
+        session.device.dfid = "DFID-NEW".to_owned();
+    });
+
+    assert!(!api.session().is_logged_in(), "设备注册不得复活已登出的账号");
+    assert_eq!(api.session().dfid(), "DFID-NEW", "设备指纹必须更新成功");
+}
+
+/// 并发的设备注册与登出不得让内存会话与持久化登录态互相矛盾
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn concurrent_device_registration_and_logout_keep_the_session_consistent() {
+    let (app, block, entered, release) = gated_app();
+    // 先登录（此时闸门是放行的）
+    app.login("13800138000", "123456").await.ok();
+    assert!(app.is_logged_in(), "前置条件：应处于登录态");
+
+    // 拦住下一次设备注册
+    block.store(true, Ordering::Release);
+    let worker = app.clone();
+    let register = tokio::spawn(async move { worker.register_device().await });
+
+    // 等待请求到达闸门
+    for _ in 0..500 {
+        if entered.load(Ordering::Acquire) {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+    assert!(entered.load(Ordering::Acquire), "设备注册请求应当到达闸门");
+
+    // 并发登出
+    app.logout().unwrap();
+    release.store(true, Ordering::Release);
+    register.await.unwrap().unwrap();
+
+    // 内存会话与存储必须一致：要么都登录，要么都登出
+    let stored = app.store().account().unwrap().is_some();
+    assert_eq!(
+        app.is_logged_in(),
+        stored,
+        "内存会话与持久化登录态必须一致（设备注册只应改设备字段）"
+    );
+    assert!(!app.is_logged_in(), "登出后不得被设备注册复活");
+    assert!(!stored, "存储层应保持登出状态");
 }

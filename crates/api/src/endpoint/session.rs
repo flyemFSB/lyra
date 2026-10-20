@@ -219,12 +219,13 @@ pub async fn register_dev(api: &Api, extra: Option<Value>) -> Result<String> {
         .raw_body(encrypted.base64.clone().into_bytes())
         .header("x-router", "userservice.kugou.com")
         .timeout(std::time::Duration::from_secs(30));
-    let request = spec.build(&session)?;
+    let request = spec.build(&session);
     let response = api.transport().execute(request).await?;
     if !(200..300).contains(&response.status) {
         return Err(Error::Http {
             status: response.status,
-            body: response.text(),
+            // 截断上游异常响应体，与其它端点保持一致
+            body: crate::codec::truncate(&response.text(), 512),
         });
     }
     // 上游仅在成功时加密，报错时返回明文 JSON

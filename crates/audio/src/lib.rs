@@ -10,7 +10,7 @@ mod ring;
 mod state;
 mod types;
 
-pub use decoder::{Decoded, Decoder, decode_all};
+pub use decoder::{Decoded, DecodedChunk, Decoder, decode_all};
 pub use engine::{AudioConfig, Engine, spawn, spawn_with};
 pub use error::Error;
 pub use resample::{Resampler, resample_all};

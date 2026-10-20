@@ -4,9 +4,11 @@
 pub const APPID: u32 = 3116;
 /// 客户端版本号
 pub const CLIENTVER: u32 = 11440;
-/// H5 侧应用 ID
+/// H5 侧应用 ID（预留常量，方案 §2.1；当前工作区未使用）
+#[allow(dead_code)]
 pub const SRAPPID: u32 = 2919;
-/// 接口版本
+/// 接口版本（预留常量，方案 §2.1；当前工作区未使用）
+#[allow(dead_code)]
 pub const APIVER: u32 = 20;
 
 /// Android 签名盐值（兼用于云歌单 appkey 与 signParamsKey）
@@ -23,9 +25,11 @@ pub const RSA_PUBLIC: &str = include_str!("../keys/lite_public.pem");
 /// 指纹 RSA 公钥（OAEP-SHA256）
 pub const FP_RSA_PUBLIC: &str = include_str!("../keys/lite_fingerprint.pem");
 
-/// 微信开放平台 AppID
+/// 微信开放平台 AppID（预留常量，方案 §2.1；当前工作区未使用）
+#[allow(dead_code)]
 pub const WX_APPID: &str = "wx72b795aca60ad321";
-/// QQ 互联 AppID
+/// QQ 互联 AppID（预留常量，方案 §2.1；当前工作区未使用）
+#[allow(dead_code)]
 pub const QQ_APPID: &str = "101706348";
 
 /// 取址 page_id

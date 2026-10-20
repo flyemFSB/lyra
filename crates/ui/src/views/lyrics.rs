@@ -40,6 +40,8 @@ pub(crate) struct LyricsView {
     scroll_target: f32,
     /// 本次滚动是否已落位，落位后不再接管偏移，让用户自由滚动
     scroll_settled: Rc<Cell<bool>>,
+    /// 是否已安排下一帧的跟随回调（避免重复排队）
+    follow_scheduled: bool,
     _sub: Subscription,
 }
 
@@ -88,6 +90,7 @@ impl LyricsView {
             scroll_from: 0.0,
             scroll_target: 0.0,
             scroll_settled: Rc::new(Cell::new(true)),
+            follow_scheduled: false,
             _sub: sub,
         }
     }
@@ -129,21 +132,25 @@ impl LyricsView {
     }
 
     /// 跟随当前行：行号变化时重新开始一次居中滚动，目标偏移逐帧按最新布局校正
-    fn follow_lyrics(&mut self, current: Option<usize>) {
+    ///
+    /// 返回值表示状态是否发生变化（用于决定要不要重绘）。
+    fn follow_lyrics(&mut self, current: Option<usize>) -> bool {
         if self.followed != current {
             let Some(index) = current else {
                 self.followed = None;
-                return;
+                return true;
             };
             // 子元素边界来自上一帧布局，首帧或换歌当帧还没有，下一帧再跟随
             let Some(item) = self.scroll.bounds_for_item(index) else {
-                return;
+                return false;
             };
             self.scroll_from = self.scroll.offset().y.into();
             self.scroll_target = center_offset(self.scroll.bounds(), item).into();
             self.followed = current;
             self.scroll_settled.set(false);
-        } else if let Some(index) = current
+            return true;
+        }
+        if let Some(index) = current
             && let Some(item) = self.scroll.bounds_for_item(index)
         {
             // 行边界来自上一帧：当前行放大、窗口缩放都会让目标偏移变，变了就再滚一次
@@ -152,8 +159,27 @@ impl LyricsView {
             if (target - self.scroll_target).abs() > 0.5 {
                 self.scroll_target = target;
                 self.scroll_settled.set(false);
+                return true;
             }
         }
+        false
+    }
+
+    /// 安排下一帧执行跟随计算
+    ///
+    /// 跟随依赖上一帧的布局结果，属于「渲染之后的测量」，
+    /// 必须在 render 之外进行（GPUI 要求 render 不改动自身状态）。
+    fn schedule_follow(&mut self, current: Option<usize>, window: &mut Window, cx: &mut Context<Self>) {
+        if self.follow_scheduled {
+            return;
+        }
+        self.follow_scheduled = true;
+        cx.on_next_frame(window, move |this, _window, cx| {
+            this.follow_scheduled = false;
+            if this.follow_lyrics(current) {
+                cx.notify();
+            }
+        });
     }
 
     /// 跳转至指定播放进度（毫秒）
@@ -165,10 +191,16 @@ impl LyricsView {
 
     /// 刷新当前曲目标题与歌手
     fn refresh_title(&mut self, cx: &Context<Self>) {
-        let (hash, title, singer) = self.player.read(cx).current_labels();
-        if hash == self.current_hash {
+        // 播放器每 180ms 通知一次（进度在变），但歌名几乎不变：
+        // 先零分配地比对哈希，确认换歌了才重新格式化标题。
+        let changed = {
+            let model = self.player.read(cx);
+            model.current_hash() != self.current_hash.as_deref()
+        };
+        if !changed {
             return;
         }
+        let (hash, title, singer) = self.player.read(cx).current_labels();
         self.current_hash = hash;
         self.title = title;
         self.singer = singer;
@@ -463,7 +495,7 @@ impl LyricsView {
 }
 
 impl Render for LyricsView {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let (position, is_playing) = {
             let model = self.player.read(cx);
             (
@@ -472,7 +504,8 @@ impl Render for LyricsView {
             )
         };
         let current = lyric_index(&self.lines, position);
-        self.follow_lyrics(current);
+        // 跟随计算依赖上一帧的布局，放到下一帧执行（render 内不改状态）
+        self.schedule_follow(current, window, cx);
         let shell_exit = self.shell.clone();
 
         // 唱片区域

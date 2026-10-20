@@ -1,7 +1,10 @@
 //! 持久化层错误定义。
 
 /// 持久化层错误枚举
+///
+/// 标记为 `#[non_exhaustive]`：新增变体对下游是向后兼容的破坏性变更。
 #[derive(Debug, thiserror::Error)]
+#[non_exhaustive]
 pub enum Error {
     /// 打开或初始化数据库失败
     #[error("打开数据库失败: {0}")]
@@ -9,9 +12,9 @@ pub enum Error {
     /// 数据库已被其他实例占用
     #[error("数据目录已被另一个 lyra 实例占用（GUI 正在运行？）：{0}")]
     Busy(String),
-    /// 事务执行失败
+    /// 事务执行失败（保留底层错误链，`Error::source()` 可追到 redb 原因）
     #[error("事务失败: {0}")]
-    Transaction(Box<redb::TransactionError>),
+    Transaction(#[from] Box<redb::TransactionError>),
     /// 表操作失败
     #[error("表操作失败: {0}")]
     Table(#[from] redb::TableError),
@@ -29,14 +32,22 @@ pub enum Error {
     Io(#[from] std::io::Error),
     /// 系统凭据存储失败
     #[error("凭据存储失败: {0}")]
-    Secret(String),
+    Secret(#[source] keyring::Error),
+    /// 凭据存储内部状态异常（如内存实现的锁中毒）
+    #[error("凭据存储状态异常: {0}")]
+    SecretState(String),
+    /// 数据库 schema 版本高于当前程序支持的版本
+    #[error("数据库 schema 版本 {found} 高于当前程序支持的 {supported}")]
+    SchemaVersion {
+        /// 数据库中记录的版本
+        found: u64,
+        /// 当前程序支持的版本
+        supported: u64,
+    },
+    /// 调用方传入的参数非法
+    #[error("参数非法: {0}")]
+    Invalid(String),
 }
 
 /// 持久化层 Result 别名
-pub type Result<T> = std::result::Result<T, Error>;
-
-impl From<redb::TransactionError> for Error {
-    fn from(e: redb::TransactionError) -> Self {
-        Self::Transaction(Box::new(e))
-    }
-}
+pub type Result<T, E = Error> = core::result::Result<T, E>;

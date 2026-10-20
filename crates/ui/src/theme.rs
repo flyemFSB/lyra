@@ -132,7 +132,12 @@ pub(crate) fn notice(text: impl Into<SharedString>, cx: &App) -> AnyElement {
 
 /// 构造专辑封面占位组件
 pub(crate) fn cover_box(label: &str, edge: f32, _cx: &App) -> AnyElement {
-    let initial = label.chars().next().map_or_else(|| "♪".to_owned(), |c| c.to_string());
+    // 封面占位会在每一行曲目里渲染，必须零分配：
+    // 单字符走 SmolStr 的内联存储，不占堆。
+    let initial = label
+        .chars()
+        .next()
+        .map_or_else(|| SharedString::new_static("♪"), SharedString::from);
 
     // 根据歌名哈希计算稳定的柔和色相
     let hash = label.bytes().fold(0u32, |acc, b| acc.wrapping_add(b as u32));

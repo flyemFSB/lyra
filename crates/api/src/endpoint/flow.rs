@@ -19,7 +19,8 @@ pub const DISCOVER_CLIENTVER: u32 = 20_809;
 pub async fn daily(api: &Api, platform: &str) -> Result<Page<Song>> {
     let body = serde_json::json!({
         "platform": if platform.is_empty() { "android" } else { platform },
-        "userid": api.session().userid().to_string(),
+        // 上游要求 int64：字符串会被判为类型错误（20002）
+        "userid": api.session().userid(),
     });
     let spec = RequestSpec::post("/everyday_song_recommend")
         .body(body)
@@ -167,6 +168,22 @@ mod tests {
             mock.last_request().unwrap().get_header("x-router"),
             Some("everydayrec.service.kugou.com")
         );
+    }
+
+    #[tokio::test]
+    async fn daily_forces_post_numeric_userid() {
+        // 上游把请求体的 userid 解析为 int64：传字符串会被判类型错误（20002）。
+        let mock = Arc::new(MockTransport::new());
+        mock.on_json(
+            "/everyday_song_recommend",
+            &serde_json::json!({"status": 1, "data": {"song_list": []}}),
+        );
+        let api = api(mock.clone());
+        daily(&api, "").await.unwrap();
+        let request = mock.last_request().unwrap();
+        let body: Value = serde_json::from_slice(request.body.as_deref().unwrap()).unwrap();
+        assert!(body["userid"].is_number(), "userid 必须是数字，不能是字符串");
+        assert_eq!(body["userid"], 2_043_841_403);
     }
 
     #[tokio::test]

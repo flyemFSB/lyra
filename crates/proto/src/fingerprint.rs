@@ -2,7 +2,7 @@
 
 use crate::cipher::{fingerprint_edt, md5_hex, random_string_with, rsa_oaep_sha256_base64};
 use crate::consts::FP_RSA_PUBLIC;
-use crate::error::Result;
+use crate::error::{Error, Result};
 use crate::rng::{JsRng, OsRng, js_round, ri};
 
 /// 模拟移动端 WebView 视口尺寸
@@ -74,7 +74,13 @@ impl Draw {
 }
 
 /// 生成指纹数据（支持自定义随机源）
+///
+/// `webgl` 必填：参考实现的 `generate_simulate.js` 没有 import `generateWebGLHash`，
+/// 缺失时会抛 `ReferenceError`，因此 Rust 侧把它定为硬性前置。
 pub fn simulate(rng: &mut impl JsRng, inputs: &SimInputs<'_>) -> Result<Simulate> {
+    if inputs.webgl.is_empty() {
+        return Err(Error::Invalid("webgl 指纹不可为空".to_owned()));
+    }
     let draw = Draw::take(rng);
     let data = edt_events(rng, draw.sentinel, draw.start, draw.end, draw.points);
 
@@ -252,5 +258,23 @@ mod tests {
         .unwrap();
         assert_ne!(s.edt, "");
         assert_ne!(s.sid, "");
+    }
+
+    #[test]
+    fn simulate_rejects_an_empty_webgl() {
+        // webgl 必填（参考实现缺失时抛 ReferenceError）
+        let mut rng = Mulberry32::new(4);
+        let error = simulate(
+            &mut rng,
+            &SimInputs {
+                mid: "123",
+                userid: "456",
+                dfid: "789",
+                webgl: "",
+                ts_millis: 1,
+            },
+        )
+        .unwrap_err();
+        assert!(matches!(error, Error::Invalid(_)), "{error:?}");
     }
 }

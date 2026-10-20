@@ -12,12 +12,7 @@ use lyra_store::{Account as StoreAccount, PlayMode, Settings, Store};
 
 use crate::error::{Error, Result};
 use crate::fetcher::BlobFetcher;
-
-/// 默认音质回落优先级（从高到低）
-const QUALITY_FALLBACK: &[&str] = &["flac", "320", "128"];
-
-/// 换源时容许的时长偏差（毫秒，兼容转码或重传误差）
-const REPLACEMENT_DRIFT_MS: u64 = 8_000;
+use crate::policy::{is_replacement, pick_quality};
 
 /// 换源搜索候选上限
 const REPLACEMENT_CANDIDATES: u32 = 10;
@@ -37,6 +32,8 @@ pub struct Kugou {
     blobs: lyra_api::blob::BlobCache,
     engine: Option<Engine>,
     data_dir: PathBuf,
+    /// 进程内唯一的 tokio 运行时句柄（由调用方注入，应用层不自建运行时）
+    runtime: tokio::runtime::Handle,
 }
 
 impl std::fmt::Debug for Kugou {
@@ -50,8 +47,16 @@ impl std::fmt::Debug for Kugou {
 }
 
 impl Kugou {
-    /// 注入自定义传输实现创建门面实例
-    pub fn with_transport(transport: Arc<dyn Transport>, store: Store, data_dir: impl Into<PathBuf>) -> Result<Self> {
+    /// 注入自定义传输实现与运行时句柄创建门面实例
+    ///
+    /// 运行时句柄必须由调用方提供：应用层**不创建**运行时，
+    /// 全进程只应存在一个 tokio 运行时（见 PLAN §B2）。
+    pub fn with_transport(
+        transport: Arc<dyn Transport>,
+        store: Store,
+        data_dir: impl Into<PathBuf>,
+        runtime: tokio::runtime::Handle,
+    ) -> Result<Self> {
         let data_dir = data_dir.into();
         std::fs::create_dir_all(&data_dir)?;
         let settings = store.settings()?;
@@ -89,22 +94,26 @@ impl Kugou {
             blobs,
             engine: None,
             data_dir,
+            runtime,
         })
     }
 
     /// 打开本地数据目录并创建实例
-    pub fn open(data_dir: impl AsRef<Path>) -> Result<Self> {
+    pub fn open(data_dir: impl AsRef<Path>, runtime: tokio::runtime::Handle) -> Result<Self> {
         let data_dir = data_dir.as_ref();
         std::fs::create_dir_all(data_dir)?;
         let store = lyra_store::open(data_dir.join("lyra.redb"))?;
-        Self::with_transport(Arc::new(lyra_api::http::ReqwestTransport::new()), store, data_dir)
+        Self::with_transport(
+            Arc::new(lyra_api::http::ReqwestTransport::new()),
+            store,
+            data_dir,
+            runtime,
+        )
     }
 
     /// 挂载音频引擎并注册事件监听回调
     pub fn attach_audio(&mut self, events: Box<dyn Fn(Event) + Send + Sync>) -> Result<bool> {
-        let runtime = tokio::runtime::Handle::try_current()
-            .map_err(|_| Error::Audio("attach_audio 必须在 tokio 运行时内调用".to_owned()))?;
-        let fetcher = Arc::new(BlobFetcher::new(self.blobs.clone(), runtime));
+        let fetcher = Arc::new(BlobFetcher::new(self.blobs.clone(), self.runtime.clone()));
         match lyra_audio::spawn_with(fetcher, events, AudioConfig::default()) {
             Ok(engine) => {
                 // 同步持久化的音量设置至音频引擎
@@ -170,8 +179,13 @@ impl Kugou {
     /// 获取当前播放模式（缺省时回落为列表循环）
     #[must_use]
     pub fn play_mode(&self) -> PlayMode {
-        self.settings()
-            .map_or_else(|_| PlayMode::default(), |settings| settings.play_mode)
+        match self.settings() {
+            Ok(settings) => settings.play_mode,
+            Err(error) => {
+                tracing::warn!(%error, "读取播放模式失败，回落到默认值");
+                PlayMode::default()
+            }
+        }
     }
 
     /// 保存用户配置并同步音量与缓存上限
@@ -258,9 +272,10 @@ impl Kugou {
                     let mut device = self.api.session().device;
                     device.dfid.clone_from(&dfid);
                     self.store.set_device(&device)?;
-                    let mut session = self.api.session();
-                    session.device = device;
-                    self.api.set_session(session);
+                    // 只在写锁内改设备字段：整体写回会话会把并发的登出/登录覆盖掉
+                    self.api.update_device(|session| {
+                        session.device.dfid.clone_from(&dfid);
+                    });
                     return Ok(dfid);
                 }
                 // 仅在返回空数据时重试，其余错误立即返回
@@ -277,8 +292,8 @@ impl Kugou {
             }
         }
         Err(last_error.map_or_else(
-            || Error::Api("设备注册未返回 dfid".to_owned()),
-            |error| Error::Api(error.to_string()),
+            || Error::Api(lyra_api::Error::EmptyData("设备注册未返回 dfid".to_owned())),
+            Error::Api,
         ))
     }
 
@@ -322,7 +337,11 @@ impl Kugou {
             Err(Error::NoCopyright) => match self.replacement_for(song).await {
                 Some(other) => {
                     tracing::info!(from = %song.hash, to = %other.hash, "无版权歌曲已换源");
-                    self.resolve_url(&other, quality).await.map_err(|_| Error::NoCopyright)
+                    // 换源后的失败要保留真实原因，不能一律报成「无版权」
+                    self.resolve_url(&other, quality).await.map_err(|error| {
+                        tracing::warn!(%error, from = %song.hash, to = %other.hash, "换源后取址失败");
+                        error
+                    })
                 }
                 None => Err(Error::NoCopyright),
             },
@@ -348,16 +367,9 @@ impl Kugou {
         } else {
             entry.hash.clone()
         };
-        let album_id = song.album_id.parse().unwrap_or(0);
-        Ok(audio::song_url(
-            &self.api,
-            &hash,
-            album_id,
-            song.album_audio_id.parse().unwrap_or(0),
-            &chosen,
-            &rights.auth,
-        )
-        .await?)
+        let album_id = parse_optional_id(&song.album_id, "album_id");
+        let album_audio_id = parse_optional_id(&song.album_audio_id, "album_audio_id");
+        Ok(audio::song_url(&self.api, &hash, album_id, album_audio_id, &chosen, &rights.auth).await?)
     }
 
     /// 查找匹配的可用替换音源（同名且时长相近，优先选取免费条目）
@@ -471,69 +483,20 @@ pub fn is_mobile(mobile: &str) -> bool {
     mobile.chars().count() == 11 && mobile.chars().all(|character| character.is_ascii_digit())
 }
 
-/// 判定候选歌曲是否为可用替换源（标题一致且时长相近）
-fn is_replacement(original: &Song, candidate: &Song) -> bool {
-    if candidate.hash.is_empty() || candidate.hash.eq_ignore_ascii_case(&original.hash) {
-        return false;
+/// 解析上游返回的可选数字 ID
+///
+/// 空串按 0 处理；非数字值记录告警后同样按 0 处理（不再静默吞掉）。
+fn parse_optional_id(raw: &str, field: &str) -> i64 {
+    if raw.is_empty() {
+        return 0;
     }
-    let want = squash(&original.name);
-    let got = squash(&candidate.name);
-    // 避免单字等过短标题误匹配
-    if want.chars().count() < 2 || got.is_empty() {
-        return false;
-    }
-    let core_matches = core_title(&got) == core_title(&want);
-    if !(got.contains(&want) || want.contains(&got) || core_matches) {
-        return false;
-    }
-    // 存在有效时长时校验偏差，否则要求核心标题完全一致
-    match (original.duration_ms, candidate.duration_ms) {
-        (a, b) if a > 1_000 && b > 1_000 => a.abs_diff(b) <= REPLACEMENT_DRIFT_MS,
-        _ => core_matches,
-    }
-}
-
-/// 去除空白并转为小写
-fn squash(name: &str) -> String {
-    name.chars()
-        .filter(|ch| !ch.is_whitespace())
-        .flat_map(char::to_lowercase)
-        .collect()
-}
-
-/// 剔除括号说明与版本后缀并归一化
-fn core_title(name: &str) -> String {
-    let mut out = String::with_capacity(name.len());
-    let mut depth = 0_u32;
-    for ch in name.chars() {
-        match ch {
-            '(' | '（' | '《' | '[' | '【' => depth += 1,
-            ')' | '）' | '》' | ']' | '】' => depth = depth.saturating_sub(1),
-            _ if depth == 0 => out.push(ch),
-            _ => {}
+    match raw.parse::<i64>() {
+        Ok(value) => value,
+        Err(error) => {
+            tracing::warn!(%error, value = raw, field, "上游返回的 ID 不是数字，按 0 处理");
+            0
         }
     }
-    squash(&out)
-}
-
-/// 匹配用户偏好且可用的最优音质
-fn pick_quality(rights: &SongRights, requested: &str) -> Result<String> {
-    let preferred = if requested.is_empty() { "flac" } else { requested };
-    if rights.quality(preferred).is_some_and(|q| q.obtainable) {
-        return Ok(preferred.to_owned());
-    }
-    for candidate in QUALITY_FALLBACK {
-        if rights.quality(candidate).is_some_and(|q| q.obtainable) {
-            return Ok((*candidate).to_owned());
-        }
-    }
-    if !rights.best_free_quality.is_empty() {
-        return Ok(rights.best_free_quality.clone());
-    }
-    Err(Error::NoPlayableQuality {
-        requested: preferred.to_owned(),
-        available: rights.free_qualities.clone(),
-    })
 }
 
 // 辅助目录请求封装
@@ -565,60 +528,14 @@ mod tests {
         assert!(!is_mobile(""));
     }
 
-    fn song(name: &str, singer: &str, hash: &str, duration_ms: u64, privilege: i64) -> Song {
-        Song {
-            name: name.to_owned(),
-            singer: singer.to_owned(),
-            hash: hash.to_owned(),
-            duration_ms,
-            privilege,
-            ..Song::default()
-        }
-    }
-
     #[test]
-    fn replacement_accepts_a_reupload_of_the_same_recording() {
-        // 验证官方下架但 UGC 重传版可播的情形（允许 5 秒内偏差）
-        let original = song(
-            "阴天 (2026明日世界巡回演唱会北京站)",
-            "汪苏泷、莫文蔚",
-            "f78de2e4",
-            225_000,
-            5,
-        );
-        let reupload = song(
-            "汪苏泷、莫文蔚《阴天 (2026明日世界巡回演唱会北京站)》",
-            "汪苏泷、莫文蔚",
-            "313c11d5",
-            230_000,
+    fn optional_ids_fall_back_to_zero_but_warn_on_garbage() {
+        assert_eq!(parse_optional_id("", "album_id"), 0, "空串按 0 处理");
+        assert_eq!(parse_optional_id("1234", "album_id"), 1234);
+        assert_eq!(
+            parse_optional_id("not-a-number", "album_id"),
             0,
+            "非数字 ID 必须退化为 0，而不是被静默接受"
         );
-        assert!(is_replacement(&original, &reupload));
-    }
-
-    #[test]
-    fn replacement_rejects_other_versions_other_songs_and_itself() {
-        let original = song("阴天 (2026巡演北京站)", "汪苏泷", "f78de", 225_000, 5);
-        // 时长偏差过大视为不同版本
-        assert!(!is_replacement(
-            &original,
-            &song("阴天 (Live)", "莫文蔚", "a", 247_000, 10)
-        ));
-        // 歌曲完全不匹配
-        assert!(!is_replacement(&original, &song("嘉宾", "皮大大", "b", 225_000, 0)));
-        // 原歌曲不作为替换目标
-        assert!(!is_replacement(&original, &song("阴天", "汪苏泷", "f78de", 225_000, 5)));
-        // 单字标题不参与换源
-        assert!(!is_replacement(
-            &song("雨", "x", "c", 0, 5),
-            &song("雨", "y", "d", 0, 0)
-        ));
-    }
-
-    #[test]
-    fn core_title_drops_version_suffixes() {
-        assert_eq!(core_title("阴天（Live）"), "阴天");
-        assert_eq!(core_title("汪苏泷、莫文蔚《阴天 (2026演唱会)》"), "汪苏泷、莫文蔚");
-        assert_eq!(squash("MiXeD  Case"), "mixedcase");
     }
 }

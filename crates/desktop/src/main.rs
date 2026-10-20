@@ -36,7 +36,7 @@ fn main() -> ExitCode {
         }
     };
 
-    match runtime.block_on(lyra_app::cli::run(&args)) {
+    match runtime.block_on(lyra_app::cli::run(&args, runtime.handle().clone())) {
         Ok(()) => ExitCode::SUCCESS,
         Err(error) => {
             eprintln!("错误: {error}");

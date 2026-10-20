@@ -132,33 +132,51 @@ impl Request {
         "_lyra_t",
     ];
 
+    /// 缓存键分段分隔符（ASCII 单元分隔符）
+    ///
+    /// URL 解析后的路径与百分号编码后的查询值都不会出现该字符，
+    /// 因此分段之间不存在歧义。
+    const KEY_SEP: char = '\u{1f}';
+
     /// 计算规范化请求缓存键
+    ///
+    /// 键由四段组成：HTTP 方法、主机与路径、规范化查询串、请求体摘要。
+    /// 方法必须参与计算：同一路径的 GET 与 POST 不是同一个资源。
     #[must_use]
     pub fn cache_key(&self) -> String {
-        let mut key = match url::Url::parse(&self.url) {
+        let (host_path, query) = match url::Url::parse(&self.url) {
             Ok(parsed) => {
-                let mut key = String::from(parsed.host_str().unwrap_or_default());
-                key.push_str(parsed.path());
-                let mut pairs: Vec<String> = self
-                    .query
-                    .iter()
-                    .filter(|(k, _)| !Self::VOLATILE_QUERY.contains(&k.as_str()))
-                    .map(|(k, v)| format!("{k}={v}"))
-                    .collect();
-                if !pairs.is_empty() {
-                    pairs.sort();
-                    key.push('?');
-                    key.push_str(&pairs.join("&"));
-                }
-                key
+                let mut host_path = String::from(parsed.host_str().unwrap_or_default());
+                host_path.push_str(parsed.path());
+                (host_path, Self::encoded_query(&self.query))
             }
-            Err(_) => self.url.clone(),
+            Err(_) => (self.url.clone(), Self::encoded_query(&self.query)),
         };
-        if let Some(body) = &self.body {
-            key.push('#');
-            key.push_str(&Self::body_digest(body));
+        let digest = self.body.as_deref().map_or_else(String::new, Self::body_digest);
+        [
+            self.method.as_str(),
+            host_path.as_str(),
+            query.as_str(),
+            digest.as_str(),
+        ]
+        .join(&Self::KEY_SEP.to_string())
+    }
+
+    /// 规范化查询串：剔除易变字段、排序、百分号编码
+    ///
+    /// 百分号编码保证参数值里的 `&` / `=` 不会与参数分隔符混淆。
+    fn encoded_query(query: &[(String, String)]) -> String {
+        let mut pairs: Vec<(&str, &str)> = query
+            .iter()
+            .filter(|(k, _)| !Self::VOLATILE_QUERY.contains(&k.as_str()))
+            .map(|(k, v)| (k.as_str(), v.as_str()))
+            .collect();
+        pairs.sort_unstable();
+        let mut serializer = url::form_urlencoded::Serializer::new(String::new());
+        for (key, value) in pairs {
+            serializer.append_pair(key, value);
         }
-        key
+        serializer.finish()
     }
 
     /// 计算请求体 SHA-256 摘要（剔除易变字段）
@@ -276,8 +294,28 @@ mod tests {
             .query("userid", "1")
             .query("clienttime", "1750000999")
             .query("signature", "bbb");
-        assert_eq!(a.cache_key(), b.cache_key());
-        assert_eq!(a.cache_key(), "gateway.kugou.com/v7/get_all_list?userid=1");
+        assert_eq!(a.cache_key(), b.cache_key(), "时间流逝后键必须稳定");
+        // 键的构成：方法 \x1f 主机与路径 \x1f 查询串 \x1f 请求体摘要
+        let expected = ["GET", "gateway.kugou.com/v7/get_all_list", "userid=1", ""].join("\u{1f}");
+        assert_eq!(a.cache_key(), expected);
+    }
+
+    #[test]
+    fn cache_key_distinguishes_ambiguous_query_parameters() {
+        // 旧实现直接拼 `k=v`，参数值里的 `&` / `=` 会与分隔符混淆。
+        let a = Request::new(Method::Get, "https://g.kugou.com/v1/x")
+            .query("a", "1")
+            .query("b", "2");
+        let b = Request::new(Method::Get, "https://g.kugou.com/v1/x").query("a", "1&b=2");
+        assert_ne!(a.cache_key(), b.cache_key(), "参数值不得与参数分隔符混淆");
+    }
+
+    #[test]
+    fn cache_key_includes_the_http_method() {
+        // 同一路径的 GET 与 POST 不是同一个资源，不能共用缓存条目。
+        let get = Request::new(Method::Get, "https://g.kugou.com/v1/x").query("userid", "1");
+        let post = Request::new(Method::Post, "https://g.kugou.com/v1/x").query("userid", "1");
+        assert_ne!(get.cache_key(), post.cache_key(), "方法必须参与缓存键");
     }
 
     #[test]

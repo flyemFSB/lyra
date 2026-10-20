@@ -31,7 +31,7 @@ pub async fn playlists(api: &Api) -> Result<Vec<Playlist>> {
         .param("plat", 1)
         .param("userid", userid)
         .param("token", session.token())
-        .header("x-router", crate::cloud::CLOUD_ROUTER);
+        .header("x-router", crate::spec::CLOUD_ROUTER);
 
     let value = api.call(spec, Freshness::PLAYLIST).await?;
     Ok(codec::find_array(&value, &["info", "info_list", "list", "playlists"])
@@ -61,7 +61,7 @@ pub async fn playlist_tracks(api: &Api, global_collection_id: &str, page: u32, p
     Ok(Page {
         items: songs,
         cursor: if has_next == 1 {
-            Some((page + 1).to_string())
+            Some(page.saturating_add(1).to_string())
         } else {
             None
         },
@@ -128,7 +128,7 @@ mod tests {
         assert_eq!(lists[0].count, 102);
         assert_eq!(lists[1].kind, 1);
         let request = mock.last_request().unwrap();
-        assert_eq!(request.get_header("x-router"), Some(crate::cloud::CLOUD_ROUTER));
+        assert_eq!(request.get_header("x-router"), Some(crate::spec::CLOUD_ROUTER));
         let body: Value = serde_json::from_slice(request.body.as_deref().unwrap()).unwrap();
         assert_eq!(body["total_ver"], 979);
         assert_eq!(body["type"], 2);

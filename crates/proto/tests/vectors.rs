@@ -76,27 +76,88 @@ fn signature_android_renders_object_values_as_json() {
     assert_eq!(sign::signature_android(&p, ""), "54c2b61dd1e9550ed43e3ba1dc63c020");
 }
 
+// 前缀 + 数字键对的签名向量
+//
+// 这组参数里 `hash` 是 `hash2` 的严格前缀且后一位是数字（'2' = 0x32 < '=' = 0x3D），
+// 因此「先拼 k=v 再整串排序」与「按 key 排序」会给出**不同**的拼接顺序。
+// 既有向量（p1 / 关键字 / JSON 值）的参数集都没有这种键对，无法区分两条规则，
+// 于是这里为两条规则各钉一个黄金向量，防止将来被无意互换。
+//
+// 期望值由 Node 独立计算：
+//   md5(SALT + sorted_kv + body + SALT)
+//   sorted_kv(按键) = "hash=ABC123hash2=DEF456page=1pagesize=30"
+//   sorted_kv(整串) = "hash2=DEF456hash=ABC123page=1pagesize=30"
+
+/// 含前缀 + 数字键对的参数集
+fn prefix_params() -> Params {
+    let mut p = Params::new();
+    p.set("hash", "ABC123")
+        .set("hash2", "DEF456")
+        .set("page", 1)
+        .set("pagesize", 30);
+    p
+}
+
+#[test]
+fn signature_android_prefix_keys_pins_the_sort_by_key_rule() {
+    // 钉住「按 key 排序」规则：hash 排在 hash2 之前
+    let body = r#"{"page":1}"#;
+    assert_eq!(
+        prefix_params().sorted_kv_by_key(),
+        "hash=ABC123hash2=DEF456page=1pagesize=30"
+    );
+    assert_eq!(
+        sign::signature_android(&prefix_params(), body),
+        "f7fbed1322f4c151155c63d904048d29"
+    );
+}
+
+#[test]
+fn signature_web_prefix_keys_pins_the_sort_by_whole_string_rule() {
+    // 钉住「整串排序」规则：'2' < '='，因此 hash2 排在 hash 之前
+    let body = r#"{"page":1}"#;
+    assert_eq!(prefix_params().sorted_kv(), "hash2=DEF456hash=ABC123page=1pagesize=30");
+    assert_eq!(
+        sign::signature_web(&prefix_params(), body),
+        "76ec20727c94f736ae2213502fc20eeb"
+    );
+}
+
+#[test]
+fn the_two_signature_rules_cannot_be_interchanged() {
+    // 两条规则在「前缀 + 数字」键对上必须给出不同的签名
+    let body = r#"{"page":1}"#;
+    assert_ne!(
+        sign::signature_android(&prefix_params(), body),
+        sign::signature_web(&prefix_params(), body)
+    );
+}
+
 // 密码学测试
 
 #[test]
 fn aes_derived_matches_reference() {
     // 派生密钥 AES 加密一致性
     let plain = r#"{"mobile":"13800138000","code":"123456"}"#;
-    let hex = cipher::aes_encrypt_with_key_iv_derived(plain, "abcdefghijklmnop").unwrap();
+    let boxed = cipher::aes_encrypt_derived_with(plain, "abcdefghijklmnop").unwrap();
+    let hex = boxed.hex.as_str();
     assert_eq!(
         hex,
         "c6dac6892d9b32a77fc2f9ada5c749b10f7fd9c0bb00920206732a534aaca71c6271382834f86dffa884cd12b1542c24"
     );
     assert_eq!(
-        cipher::aes_decrypt_derived(&hex, "abcdefghijklmnop").unwrap(),
+        cipher::aes_decrypt_derived(hex, "abcdefghijklmnop").unwrap(),
         plain.as_bytes()
     );
 }
 
 #[test]
 fn aes_derived_handles_non_ascii() {
-    let hex = cipher::aes_encrypt_with_key_iv_derived("中文 payload 🎵", "zzzz").unwrap();
-    assert_eq!(hex, "d77e7206d069247370cba753493eb478a91789e8a6deef96f8d7436617a8d563");
+    let boxed = cipher::aes_encrypt_derived_with("中文 payload 🎵", "zzzz").unwrap();
+    assert_eq!(
+        boxed.hex,
+        "d77e7206d069247370cba753493eb478a91789e8a6deef96f8d7436617a8d563"
+    );
 }
 
 #[test]
@@ -173,6 +234,11 @@ fn each_key_has_the_modulus_size_its_padding_path_needs() {
     // PKCS#1 v1.5 与无填充模幂对比
     let pkcs1 = cipher::rsa_pkcs1_encrypt_hex(b"{}", lyra_proto::consts::RSA_PUBLIC).unwrap();
     assert_eq!(pkcs1.len(), 256);
+    // 方案 §5.2 / §5.5：cloudlist 的 p 字段是大写十六进制
+    assert!(
+        pkcs1.bytes().all(|b| b.is_ascii_digit() || b.is_ascii_uppercase()),
+        "PKCS#1 输出必须是大写十六进制：{pkcs1}"
+    );
     assert_ne!(
         pkcs1,
         cipher::rsa_raw_encrypt_hex(b"{}", lyra_proto::consts::RSA_PUBLIC).unwrap()

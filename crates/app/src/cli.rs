@@ -1,9 +1,10 @@
 //! 命令行接口实现
 
+use std::io::Read;
 use std::path::PathBuf;
 
 use crate::error::{Error, Result};
-use crate::service::Kugou;
+use crate::service::{Kugou, is_mobile};
 
 /// 解析默认数据目录（环境变量优先，缺省时使用本地应用数据路径）
 #[must_use]
@@ -47,8 +48,25 @@ pub const fn help() -> &'static str {
 "
 }
 
+/// 音质标记（出现在专辑 id 位置时说明参数写错了）
+const QUALITY_TOKENS: &[&str] = &[
+    "128",
+    "320",
+    "flac",
+    "viper_tape",
+    "viper_clear",
+    "viper_atmos",
+    "viper_guang",
+    "viper_swan",
+    "viper_king",
+    "viper_high",
+    "high",
+    "mp3",
+    "ogg",
+];
+
 /// 解析并分发执行命令行子命令
-pub async fn run(args: &[String]) -> Result<()> {
+pub async fn run(args: &[String], runtime: tokio::runtime::Handle) -> Result<()> {
     let Some(command) = args.first().map(String::as_str) else {
         println!("{}", help());
         return Ok(());
@@ -59,10 +77,12 @@ pub async fn run(args: &[String]) -> Result<()> {
         println!("{}", help());
         return Ok(());
     }
-    let app = Kugou::open(default_data_dir())?;
+    // 先校验参数：非法调用不应创建数据目录、也不应占用数据库
+    validate_args(command, rest)?;
+
+    let app = Kugou::open(default_data_dir(), runtime)?;
 
     match command {
-        "help" | "--help" | "-h" => println!("{}", help()),
         "code" => {
             let mobile = required(rest, 0, "手机号")?;
             let count = app.send_code(mobile).await?;
@@ -144,7 +164,7 @@ pub async fn run(args: &[String]) -> Result<()> {
         }
         "url" => {
             let item = song_stub(rest)?;
-            let quality = rest.get(2).map_or("", String::as_str);
+            let quality = quality_slot(rest);
             let url = app.song_url(&item, quality).await?;
             println!("url: {}", url.url);
             println!(
@@ -173,11 +193,18 @@ pub async fn run(args: &[String]) -> Result<()> {
                 .blobs()
                 // 使用变体哈希隔离不同音质与试听缓存
                 .ensure(&url.url, &url.blob_key(&item.hash), &ext)
-                .await
-                .map_err(|error| Error::Api(error.to_string()))?;
+                .await?;
             // 读取音频文件头魔数校验容器格式
+            let mut file = std::fs::File::open(&path)?;
             let mut head = [0_u8; 4];
-            let read = std::io::Read::read(&mut std::fs::File::open(&path)?, &mut head)?;
+            let read = match file.read_exact(&mut head) {
+                Ok(()) => head.len(),
+                // 短文件：按实际长度截断（read_exact 不会补零，读到的都是有效字节）
+                Err(error) if error.kind() == std::io::ErrorKind::UnexpectedEof => {
+                    std::fs::metadata(&path)?.len().min(head.len() as u64) as usize
+                }
+                Err(error) => return Err(error.into()),
+            };
             let head = &head[..read];
             let magic = String::from_utf8_lossy(head);
             println!("落盘: {}", path.display());
@@ -258,6 +285,47 @@ fn required<'a>(args: &'a [String], index: usize, name: &str) -> Result<&'a str>
         .ok_or_else(|| Error::Invalid(format!("缺少参数 {name}")))
 }
 
+/// 校验子命令与参数（不打开存储，避免非法调用创建数据目录）
+fn validate_args(command: &str, rest: &[String]) -> Result<()> {
+    match command {
+        "code" | "login" => {
+            let mobile = required(rest, 0, "手机号")?;
+            if !is_mobile(mobile) {
+                return Err(Error::Invalid("请输入 11 位手机号".to_owned()));
+            }
+            Ok(())
+        }
+        "tracks" => {
+            required(rest, 0, "global_collection_id")?;
+            optional_number(rest, 1, "页号", 1_u32)?;
+            Ok(())
+        }
+        "rights" | "url" => {
+            song_stub(rest)?;
+            Ok(())
+        }
+        "download" => {
+            song_stub(rest)?;
+            if rest.get(2).is_none() {
+                return Err(Error::Invalid("缺少输出文件路径".to_owned()));
+            }
+            Ok(())
+        }
+        "station" => {
+            required(rest, 0, "fmid")?;
+            optional_number(rest, 1, "offset", -1_i64)?;
+            Ok(())
+        }
+        "whoami" | "playlists" | "daily" | "fm" | "stations" | "classes" | "vip" | "claim" => Ok(()),
+        other => Err(Error::Invalid(format!("未知命令 {other}（试试 lyra help）"))),
+    }
+}
+
+/// 解析音质参数（位于专辑 id 之后的槽位）
+fn quality_slot(args: &[String]) -> &str {
+    args.get(2).map_or("", String::as_str)
+}
+
 /// 解析简要歌曲参数
 fn song_stub(args: &[String]) -> Result<lyra_api::model::Song> {
     let hash = required(args, 0, "hash")?.to_lowercase();
@@ -266,10 +334,20 @@ fn song_stub(args: &[String]) -> Result<lyra_api::model::Song> {
     }
     // 专辑 ID 参数位于音质之前
     let album_id = args.get(1).cloned().unwrap_or_default();
-    if !album_id.is_empty() && !album_id.bytes().all(|b| b.is_ascii_digit()) {
-        return Err(Error::Invalid(format!(
-            "专辑 id 应为数字，得到 {album_id}（音质是下一个参数）"
-        )));
+    if !album_id.is_empty() {
+        // 音质标记出现在专辑 id 位置说明少写了空占位符，必须报错而不是静默当成专辑 id
+        let lowered = album_id.to_ascii_lowercase();
+        if QUALITY_TOKENS.contains(&lowered.as_str()) {
+            return Err(Error::Invalid(format!(
+                "参数位置错误：{album_id} 是音质，不是专辑 id。\
+                 hash 之后的参数按顺序对应，不要专辑 id 时请写空占位符：lyra url <hash> \"\" {album_id}"
+            )));
+        }
+        if !album_id.bytes().all(|b| b.is_ascii_digit()) {
+            return Err(Error::Invalid(format!(
+                "专辑 id 应为数字，得到 {album_id}（音质是下一个参数）"
+            )));
+        }
     }
     Ok(lyra_api::model::Song {
         hash,
@@ -312,10 +390,11 @@ fn clip(text: &str, width: usize) -> String {
     format!("{head}…")
 }
 
-/// 敏感令牌掩码脱敏（保留前后各 3 个字符）
+/// 敏感令牌掩码脱敏（长度足够时才保留前后各 3 个字符）
 fn mask(token: &str) -> String {
     let count = token.chars().count();
-    if count <= 6 {
+    // 短令牌整体打码，避免泄露大部分内容
+    if count <= 8 {
         return "*".repeat(count);
     }
     let head: String = token.chars().take(3).collect();
@@ -325,7 +404,7 @@ fn mask(token: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    #![allow(clippy::unwrap_used)]
+    #![allow(clippy::unwrap_used, clippy::expect_used)]
 
     use super::*;
 
@@ -353,9 +432,36 @@ mod tests {
     }
 
     #[test]
+    fn song_stub_rejects_a_quality_token_in_the_album_id_slot() {
+        for quality in ["128", "320", "flac", "viper_tape", "viper_clear", "viper_atmos"] {
+            let error =
+                song_stub(&["a".repeat(32), quality.to_owned()]).expect_err("音质标记出现在专辑 id 位置必须报错");
+            let message = format!("{error}");
+            assert!(message.contains("音质"), "{message}");
+            assert!(message.contains("空占位符"), "{message}");
+        }
+    }
+
+    #[test]
+    fn song_stub_accepts_an_empty_album_id_slot_before_the_quality() {
+        let args = ["a".repeat(32), String::new(), "320".to_owned()];
+        let song = song_stub(&args).unwrap();
+        assert_eq!(song.album_id, "", "空占位符必须保留为空");
+        assert_eq!(quality_slot(&args), "320", "音质取自专辑 id 之后的槽位");
+    }
+
+    #[test]
+    fn unknown_commands_are_rejected_before_touching_the_store() {
+        let error = validate_args("bogus", &[]).expect_err("未知命令必须报错");
+        assert!(format!("{error}").contains("未知命令"));
+    }
+
+    #[test]
     fn masks_tokens() {
         assert_eq!(mask("abcdef123456"), "abc…456");
         assert_eq!(mask("abc"), "***");
+        assert_eq!(mask("abcdefgh"), "********", "8 位令牌必须整体打码");
+        assert_eq!(mask("abcdefghi"), "abc…ghi");
     }
 
     #[test]

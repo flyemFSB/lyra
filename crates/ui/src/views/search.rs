@@ -19,7 +19,7 @@ use crate::theme::{
     notice_with_icon, row_sizes, title,
 };
 use crate::views::player::PlayerModel;
-use crate::views::tracks::track_row;
+use crate::views::tracks::{TrackRow, build_rows, track_row};
 
 /// 快捷热门搜索词
 const HOT_TAGS: &[&str] = &[
@@ -40,6 +40,8 @@ pub(crate) struct SearchView {
     player: Entity<PlayerModel>,
     input: Entity<InputState>,
     songs: Arc<Vec<Song>>,
+    /// 预格式化的曲目展示模型
+    rows: Arc<Vec<TrackRow>>,
     sizes: Rc<Vec<Size<Pixels>>>,
     scroll_handle: VirtualListScrollHandle,
     loading: bool,
@@ -62,8 +64,11 @@ impl SearchView {
     ) -> Self {
         let input = cx.new(|cx| InputState::new(window, cx).placeholder("搜索歌曲、歌手或专辑，回车检索"));
         let input_sub = cx.subscribe(&input, |this, _state, event: &InputEvent, cx| {
-            if matches!(event, InputEvent::PressEnter { .. }) {
-                this.submit(cx);
+            match event {
+                InputEvent::PressEnter { .. } => this.submit(cx),
+                // 输入框只让自己失效，父实体不会自动重绘；
+                // 不转发 Change 的话「清空输入」按钮永远不出现。
+                InputEvent::Change | InputEvent::Focus | InputEvent::Blur => cx.notify(),
             }
         });
         let player_sub = cx.observe(&player, |_this, _player, cx| {
@@ -76,6 +81,7 @@ impl SearchView {
             player,
             input,
             songs: Arc::new(Vec::new()),
+            rows: Arc::new(Vec::new()),
             sizes: row_sizes(0),
             scroll_handle: VirtualListScrollHandle::new(),
             loading: false,
@@ -89,6 +95,7 @@ impl SearchView {
     /// 重置视图状态并废弃在途请求
     pub(crate) fn reset(&mut self, cx: &mut Context<Self>) {
         self.songs = Arc::new(Vec::new());
+        self.rows = Arc::new(Vec::new());
         self.sizes = row_sizes(0);
         self.scroll_handle = VirtualListScrollHandle::new();
         self.loading = false;
@@ -138,12 +145,14 @@ impl SearchView {
         self.searched = true;
         match result {
             Ok(songs) => {
+                self.rows = Arc::new(build_rows(&songs));
                 self.songs = Arc::new(songs);
                 self.sizes = row_sizes(self.songs.len());
                 self.error = None;
             }
             Err(error) => {
                 self.songs = Arc::new(Vec::new());
+                self.rows = Arc::new(Vec::new());
                 self.sizes = row_sizes(0);
                 self.error = Some(error.into());
             }
@@ -152,18 +161,15 @@ impl SearchView {
     }
 
     /// 渲染单首曲目行
-    fn row(&self, index: usize, cx: &App) -> AnyElement {
-        let (is_current, is_playing) = {
-            let model = self.player.read(cx);
-            let cur_hash = model.current_song().map(|s| &s.hash);
-            let this_hash = self.songs.get(index).map(|s| &s.hash);
-            (
-                cur_hash.is_some() && cur_hash == this_hash,
-                model.snapshot.state == lyra_audio::State::Playing,
-            )
+    fn row(&self, index: usize, cur_hash: Option<&str>, is_playing: bool, cx: &App) -> AnyElement {
+        let this_hash = self.songs.get(index).map(|s| s.hash.as_str());
+        let is_current = cur_hash.is_some() && cur_hash == this_hash;
+        let Some(row) = self.rows.get(index) else {
+            return div().into_any_element();
         };
         track_row(
             index,
+            row,
             &self.songs,
             &self.shell,
             &self.backend,
@@ -274,12 +280,13 @@ impl Render for SearchView {
                 .child("热门搜索："),
         );
         for (index, tag) in HOT_TAGS.iter().enumerate() {
-            let kw = (*tag).to_owned();
+            // 热门词是 'static 字符串，直接借用，不构造中间 String
+            let kw: &'static str = tag;
             hot_row = hot_row.child(
-                chip(*tag, false, Some(IconName::Sparkles))
+                chip(kw, false, Some(IconName::Sparkles))
                     .id(("hot_tag", index))
                     .on_click(cx.listener(move |this, _event, window, cx| {
-                        this.search_keyword(&kw, window, cx);
+                        this.search_keyword(kw, window, cx);
                     })),
             );
         }
@@ -306,7 +313,17 @@ impl Render for SearchView {
                 sizes,
                 move |view, range, _window, cx| {
                     let app: &App = cx;
-                    range.map(|index| view.row(index, app)).collect::<Vec<_>>()
+                    // 播放器状态整批读取一次，避免每行都做一次实体读取
+                    let (cur_hash, is_playing) = {
+                        let model = view.player.read(app);
+                        (
+                            model.current_song().map(|s| s.hash.clone()),
+                            model.snapshot.state == lyra_audio::State::Playing,
+                        )
+                    };
+                    range
+                        .map(|index| view.row(index, cur_hash.as_deref(), is_playing, app))
+                        .collect::<Vec<_>>()
                 },
             )
             .track_scroll(&self.scroll_handle)

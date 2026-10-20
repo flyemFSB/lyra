@@ -26,7 +26,13 @@ impl Fetcher for BlobFetcher {
             .open_stream(&track.url, &track.hash, ext)
             .map_err(|error| FetchError::Message(error.to_string()))?;
         // 启动后台下载任务供流式读取
-        self.runtime.spawn(download);
+        let handle = self.runtime.spawn(download);
+        // 保留 JoinHandle：任务异常结束时至少留下一条日志（panic=abort 时进程直接退出）
+        self.runtime.spawn(async move {
+            if let Err(error) = handle.await {
+                tracing::warn!(%error, "音频下载任务异常结束");
+            }
+        });
         Ok(Box::new(view))
     }
 }

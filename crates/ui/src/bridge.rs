@@ -1,6 +1,6 @@
 //! 异步消息桥接：将 Tokio 运行时任务结果转发回 GPUI 线程
 
-use std::sync::mpsc::Sender;
+use async_channel::Sender;
 
 use lyra_api::model::{LyricLine, Page, Playlist, Song, Station, StationClass, VipStatus};
 use lyra_app::Kugou;
@@ -110,8 +110,10 @@ impl Backend {
     }
 
     /// 发送消息至 UI 主线程
+    ///
+    /// 使用无界通道 + `try_send`：UI 线程上绝不阻塞等待。
     pub(crate) fn send(&self, msg: Msg) {
-        let _ = self.tx.send(msg);
+        let _ = self.tx.try_send(msg);
     }
 
     /// 派发异步任务并将结果回传至 UI
@@ -121,7 +123,7 @@ impl Backend {
     {
         let tx = self.tx.clone();
         self.handle.spawn(async move {
-            let _ = tx.send(future.await);
+            let _ = tx.send(future.await).await;
         });
     }
 }

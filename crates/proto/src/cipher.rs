@@ -1,24 +1,24 @@
 //! 密码学原语：哈希、对称加密（AES-CBC）、非对称加密（RSA）与 KRC 歌词解码。
 
-use aes::cipher::block_padding::Pkcs7;
+use std::fmt;
+use std::sync::OnceLock;
+
+use aes::cipher::block_padding::{Pkcs7, RawPadding};
 use aes::cipher::{BlockDecryptMut, BlockEncryptMut, KeyIvInit, block_padding::NoPadding};
 use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD as B64;
 use md5::{Digest as _, Md5};
 use rand::Rng as _;
 use rsa::RsaPublicKey;
-// 大数模幂计算
+// 大数模幂计算：rsa 0.9 使用 num-bigint-dig，其 `e()` / `n()` 就是这个类型
 use rsa::BigUint;
 use rsa::pkcs8::DecodePublicKey as _;
 use rsa::traits::PublicKeyParts as _;
+use zeroize::Zeroize as _;
 
-use crate::consts::{CHARSET_B62, CHARSET_UPPER, FP_IV, KRC_KEY};
-use crate::error::{Error, Result};
+use crate::consts::{CHARSET_B62, CHARSET_UPPER, FP_IV, FP_RSA_PUBLIC, KRC_KEY, RSA_PUBLIC};
+use crate::error::{CryptoError, Error, Result};
 use crate::rng::JsRng;
-
-fn cerr<E: core::fmt::Display>(e: E) -> Error {
-    Error::Crypto(e.to_string())
-}
 
 /// 计算 MD5 哈希（32 位小写十六进制）
 #[must_use]
@@ -46,22 +46,31 @@ pub fn base64_decode(s: &str) -> Result<Vec<u8>> {
 
 // AES-CBC 加解密
 
+/// 密钥或 IV 长度非法的转换
+fn length_err(_: aes::cipher::InvalidLength) -> Error {
+    Error::Crypto(CryptoError::Length("invalid AES key or iv length".to_owned()))
+}
+
 fn cbc_encrypt(key: &[u8], iv: &[u8], plain: &[u8]) -> Result<Vec<u8>> {
     // 拷贝明文并执行 PKCS7 填充加密
     let mut buf = vec![0_u8; plain.len() + 16];
     buf[..plain.len()].copy_from_slice(plain);
     let ct_len = match key.len() {
         16 => cbc::Encryptor::<aes::Aes128>::new_from_slices(key, iv)
-            .map_err(cerr)?
+            .map_err(length_err)?
             .encrypt_padded_mut::<Pkcs7>(&mut buf, plain.len())
-            .map_err(cerr)?
+            .map_err(|_| Error::Crypto(CryptoError::PadBuffer))?
             .len(),
         32 => cbc::Encryptor::<aes::Aes256>::new_from_slices(key, iv)
-            .map_err(cerr)?
+            .map_err(length_err)?
             .encrypt_padded_mut::<Pkcs7>(&mut buf, plain.len())
-            .map_err(cerr)?
+            .map_err(|_| Error::Crypto(CryptoError::PadBuffer))?
             .len(),
-        n => return Err(Error::Crypto(format!("unsupported AES key length {n}"))),
+        n => {
+            return Err(Error::Crypto(CryptoError::Length(format!(
+                "unsupported AES key length {n}"
+            ))));
+        }
     };
     buf.truncate(ct_len);
     Ok(buf)
@@ -74,34 +83,43 @@ fn cbc_decrypt(key: &[u8], iv: &[u8], data: &[u8]) -> Result<Vec<u8>> {
     let mut buf = data.to_vec();
     let n = match key.len() {
         16 => cbc::Decryptor::<aes::Aes128>::new_from_slices(key, iv)
-            .map_err(cerr)?
+            .map_err(length_err)?
             .decrypt_padded_mut::<NoPadding>(&mut buf)
-            .map_err(cerr)?
+            .map_err(|_| Error::Crypto(CryptoError::BlockSize))?
             .len(),
         32 => cbc::Decryptor::<aes::Aes256>::new_from_slices(key, iv)
-            .map_err(cerr)?
+            .map_err(length_err)?
             .decrypt_padded_mut::<NoPadding>(&mut buf)
-            .map_err(cerr)?
+            .map_err(|_| Error::Crypto(CryptoError::BlockSize))?
             .len(),
-        n => return Err(Error::Crypto(format!("unsupported AES key length {n}"))),
+        n => {
+            return Err(Error::Crypto(CryptoError::Length(format!(
+                "unsupported AES key length {n}"
+            ))));
+        }
     };
     buf.truncate(n);
     unpad_pkcs7(buf)
 }
 
-/// 校验并移除 PKCS7 填充（RFC 5652）
-fn unpad_pkcs7(data: Vec<u8>) -> Result<Vec<u8>> {
+/// 校验并移除 PKCS7 填充（RFC 5652）。
+///
+/// 复用 `block_padding::Pkcs7` 的实现：填充长度只能是 1..=16（AES 分组大小），
+/// 否则视为密文被篡改。
+fn unpad_pkcs7(mut data: Vec<u8>) -> Result<Vec<u8>> {
     let Some(&last) = data.last() else {
         return Ok(data);
     };
-    let n = last as usize;
-    let padding_ok =
-        (1..=16).contains(&n) && n <= data.len() && data[data.len() - n..].iter().all(|byte| usize::from(*byte) == n);
-    if !padding_ok {
-        return Err(Error::Crypto(format!("invalid PKCS7 padding (last byte {n})")));
+    let n = usize::from(last);
+    // 填充长度只能是 1..=16（AES 分组大小），且密文必须是完整分组
+    if !(1..=16).contains(&n) || n > data.len() || !data.len().is_multiple_of(16) {
+        return Err(Error::Crypto(CryptoError::Padding));
     }
-    let mut data = data;
-    data.truncate(data.len() - n);
+    // `raw_unpad` 只接受单个分组（超过 255 字节或空分组会 panic），因此只对最后一个分组调用。
+    let block_start = data.len() - 16;
+    let plain = Pkcs7::raw_unpad(&data[block_start..]).map_err(|_| Error::Crypto(CryptoError::Padding))?;
+    let len = block_start + plain.len();
+    data.truncate(len);
     Ok(data)
 }
 
@@ -132,12 +150,29 @@ pub fn random_aes_secret() -> String {
 }
 
 /// 派生密钥 AES 加密结果
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct AesBox {
     /// 十六进制密文
     pub hex: String,
     /// 临时密钥（用于附加在请求参数中）
     pub key: String,
+}
+
+impl fmt::Debug for AesBox {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        // 密钥不得出现在日志里
+        f.debug_struct("AesBox")
+            .field("hex", &self.hex)
+            .field("key", &"<redacted>")
+            .finish()
+    }
+}
+
+impl Drop for AesBox {
+    fn drop(&mut self) {
+        // 临时密钥不得留在内存里
+        self.key.zeroize();
+    }
 }
 
 /// 随机派生密钥 AES 加密（生成 16 位临时密钥并派生密钥与 IV）
@@ -158,11 +193,6 @@ pub fn aes_encrypt_derived_with(plaintext: &str, temp_key: &str) -> Result<AesBo
     })
 }
 
-/// 基于指定临时密钥派生 AES 加密（仅返回密文）
-pub fn aes_encrypt_with_key_iv_derived(plaintext: &str, temp_key: &str) -> Result<String> {
-    Ok(aes_encrypt_derived_with(plaintext, temp_key)?.hex)
-}
-
 /// 显式 key 与 iv 的 AES 加密
 pub fn aes_encrypt_with_key_iv(plaintext: &str, key: &str, iv: &str) -> Result<String> {
     Ok(hex::encode(cbc_encrypt(
@@ -181,12 +211,29 @@ pub fn aes_decrypt_derived(data_hex: &str, temp_key: &str) -> Result<Vec<u8>> {
 }
 
 /// 会话加密结果
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct SecretBox {
     /// 会话密钥
     pub key: String,
     /// Base64 密文
     pub base64: String,
+}
+
+impl fmt::Debug for SecretBox {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        // 会话密钥不得出现在日志里
+        f.debug_struct("SecretBox")
+            .field("key", &"<redacted>")
+            .field("base64", &self.base64)
+            .finish()
+    }
+}
+
+impl Drop for SecretBox {
+    fn drop(&mut self) {
+        // 会话密钥不得留在内存里
+        self.key.zeroize();
+    }
 }
 
 /// 会话加密（生成 6 位随机密钥并执行 AES-128-CBC 加密）
@@ -237,51 +284,98 @@ pub fn secret_encrypt_bytes(plaintext: &str, secret: &str) -> Result<Vec<u8>> {
 
 // RSA 与指纹加密
 
-/// 业务 RSA 无填充模幂加密（右补零对齐逆向逻辑，输出十六进制）
-pub fn rsa_raw_encrypt_hex(data: &[u8], pem: &str) -> Result<String> {
-    let key = RsaPublicKey::from_public_key_pem(pem).map_err(cerr)?;
-    let key_bytes = key.size();
-    if data.len() > key_bytes {
-        return Err(Error::PayloadTooLong {
-            len: data.len(),
-            key_bytes,
-        });
+/// 业务 RSA 公钥的解析缓存（公钥是编译期常量，只需解析一次）。
+static RSA_KEY_CACHE: OnceLock<RsaPublicKey> = OnceLock::new();
+/// 指纹 RSA 公钥的解析缓存（与业务公钥**分开**缓存）。
+static FP_RSA_KEY_CACHE: OnceLock<RsaPublicKey> = OnceLock::new();
+
+/// 从缓存中取公钥；未命中时解析一次并写入缓存。
+fn cached_key(cache: &'static OnceLock<RsaPublicKey>, pem: &'static str) -> Result<&'static RsaPublicKey> {
+    if let Some(key) = cache.get() {
+        return Ok(key);
     }
-    let mut padded = vec![0_u8; key_bytes];
-    padded[..data.len()].copy_from_slice(data);
-    let c = BigUint::from_bytes_be(&padded).modpow(key.e(), key.n());
-    let mut out = vec![0_u8; key_bytes];
-    let raw = c.to_bytes_be();
-    out[key_bytes - raw.len()..].copy_from_slice(&raw);
-    Ok(hex::encode(out))
+    let key = RsaPublicKey::from_public_key_pem(pem).map_err(CryptoError::Pem)?;
+    // 并发写入时可能已有别的线程写入同一份密钥，忽略失败即可。
+    let _ = cache.set(key);
+    match cache.get() {
+        Some(key) => Ok(key),
+        None => Err(Error::Crypto(CryptoError::Other(
+            "rsa public key cache is unavailable".to_owned(),
+        ))),
+    }
 }
 
-/// RSA PKCS#1 v1.5 加密（输出十六进制）
+/// 取公钥：编译期常量走 `OnceLock` 缓存，其它 PEM 一次性解析。
+fn with_public_key<T>(pem: &str, f: impl FnOnce(&RsaPublicKey) -> Result<T>) -> Result<T> {
+    if pem == RSA_PUBLIC {
+        return f(cached_key(&RSA_KEY_CACHE, RSA_PUBLIC)?);
+    }
+    if pem == FP_RSA_PUBLIC {
+        return f(cached_key(&FP_RSA_KEY_CACHE, FP_RSA_PUBLIC)?);
+    }
+    // 非常量 PEM：无法安全缓存，直接解析一次。
+    let key = RsaPublicKey::from_public_key_pem(pem).map_err(CryptoError::Pem)?;
+    f(&key)
+}
+
+/// 业务 RSA 无填充模幂加密（右补零对齐逆向逻辑，输出小写十六进制）
+pub fn rsa_raw_encrypt_hex(data: &[u8], pem: &str) -> Result<String> {
+    with_public_key(pem, |key| {
+        let key_bytes = key.size();
+        if data.len() > key_bytes {
+            return Err(Error::PayloadTooLong {
+                len: data.len(),
+                key_bytes,
+            });
+        }
+        let mut padded = vec![0_u8; key_bytes];
+        padded[..data.len()].copy_from_slice(data);
+        let c = BigUint::from_bytes_be(&padded).modpow(key.e(), key.n());
+        let mut out = vec![0_u8; key_bytes];
+        let raw = c.to_bytes_be();
+        out[key_bytes - raw.len()..].copy_from_slice(&raw);
+        Ok(hex::encode(out))
+    })
+}
+
+/// RSA PKCS#1 v1.5 加密（输出**大写**十六进制）。
+///
+/// 方案 §5.2 / §5.5 明确要求 cloudlist 的 `p` 字段为大写十六进制。
 pub fn rsa_pkcs1_encrypt_hex(data: &[u8], pem: &str) -> Result<String> {
-    let key = RsaPublicKey::from_public_key_pem(pem).map_err(cerr)?;
-    let mut rng = rand::thread_rng();
-    let ct = key.encrypt(&mut rng, rsa::Pkcs1v15Encrypt, data).map_err(cerr)?;
-    Ok(hex::encode(ct))
+    with_public_key(pem, |key| {
+        let mut rng = rand::thread_rng();
+        let ct = key
+            .encrypt(&mut rng, rsa::Pkcs1v15Encrypt, data)
+            .map_err(CryptoError::Rsa)?;
+        Ok(hex::encode_upper(ct))
+    })
 }
 
 /// 行为指纹 SID 加密（RSA-OAEP-SHA256，输出 Base64）
 pub fn rsa_oaep_sha256_base64(data: &[u8], pem: &str) -> Result<String> {
-    let key = RsaPublicKey::from_public_key_pem(pem).map_err(cerr)?;
-    let mut rng = rand::thread_rng();
-    let ct = key
-        .encrypt(&mut rng, rsa::Oaep::new::<sha2::Sha256>(), data)
-        .map_err(cerr)?;
-    Ok(base64_encode(&ct))
+    with_public_key(pem, |key| {
+        let mut rng = rand::thread_rng();
+        let ct = key
+            .encrypt(&mut rng, rsa::Oaep::new::<sha2::Sha256>(), data)
+            .map_err(CryptoError::Rsa)?;
+        Ok(base64_encode(&ct))
+    })
 }
 
 /// 行为指纹 EDT 加密（AES-128-CBC 固定 IV，输出 Base64）
 pub fn fingerprint_edt(plaintext: &str, key16: &str) -> Result<String> {
     // 校验密钥长度为 16 字节（AES-128）
     if key16.len() != 16 {
-        return Err(Error::Crypto(format!(
+        return Err(Error::Invalid(format!(
             "fingerprint_edt 需要 16 字节密钥，收到 {} 字节",
             key16.len()
         )));
+    }
+    // 密钥必须是 16 位 ASCII 十六进制（上游取 md5 前 16 位）
+    if !key16.bytes().all(|b| b.is_ascii_hexdigit()) {
+        return Err(Error::Invalid(
+            "fingerprint_edt 密钥必须是 16 位 ASCII 十六进制".to_owned(),
+        ));
     }
     Ok(base64_encode(&cbc_encrypt(
         key16.as_bytes(),
@@ -299,7 +393,9 @@ pub fn krc_decode(data: &[u8]) -> Result<String> {
     use std::io::Read as _;
 
     if data.len() < 4 {
-        return Err(Error::Crypto("krc payload shorter than 4 bytes".to_owned()));
+        return Err(Error::Crypto(CryptoError::Other(
+            "krc payload shorter than 4 bytes".to_owned(),
+        )));
     }
     let mut buf = data[4..].to_vec();
     for (i, byte) in buf.iter_mut().enumerate() {
@@ -309,9 +405,11 @@ pub fn krc_decode(data: &[u8]) -> Result<String> {
     flate2::read::ZlibDecoder::new(&buf[..])
         .take(MAX_KRC_BYTES)
         .read_to_end(&mut out)
-        .map_err(|e| Error::Inflate(e.to_string()))?;
+        .map_err(Error::Inflate)?;
     if out.len() as u64 >= MAX_KRC_BYTES {
-        return Err(Error::Inflate(format!("krc 解压结果超过 {MAX_KRC_BYTES} 字节上限")));
+        return Err(Error::Inflate(std::io::Error::other(format!(
+            "krc 解压结果超过 {MAX_KRC_BYTES} 字节上限"
+        ))));
     }
     Ok(String::from_utf8_lossy(&out).into_owned())
 }
@@ -365,6 +463,19 @@ mod tests {
     }
 
     #[test]
+    fn secret_material_is_redacted_in_debug_output() {
+        // 密钥不得出现在 Debug 输出里
+        let boxed = secret_encrypt_with("x", "123456").unwrap();
+        let text = format!("{boxed:?}");
+        assert!(!text.contains("123456"), "{text}");
+        assert!(text.contains("<redacted>"), "{text}");
+
+        let aes = aes_encrypt_derived_with("x", "abcdefghijklmnop").unwrap();
+        let text = format!("{aes:?}");
+        assert!(!text.contains("abcdefghijklmnop"), "{text}");
+    }
+
+    #[test]
     fn rsa_raw_output_is_modulus_sized() {
         let hex = rsa_raw_encrypt_hex(b"{}", crate::consts::RSA_PUBLIC).unwrap();
         assert_eq!(hex.len(), 128 * 2, "1024-bit key → 128 bytes → 256 hex chars");
@@ -374,6 +485,17 @@ mod tests {
     fn rsa_raw_rejects_oversized_payload() {
         let err = rsa_raw_encrypt_hex(&[0_u8; 200], crate::consts::RSA_PUBLIC).unwrap_err();
         assert!(matches!(err, Error::PayloadTooLong { .. }));
+    }
+
+    #[test]
+    fn rsa_pkcs1_output_is_uppercase_hex() {
+        // 方案 §5.2 / §5.5：cloudlist 的 p 字段是大写十六进制
+        let hex = rsa_pkcs1_encrypt_hex(b"{}", crate::consts::RSA_PUBLIC).unwrap();
+        assert_eq!(hex.len(), 256);
+        assert!(
+            hex.bytes().all(|b| b.is_ascii_digit() || b.is_ascii_uppercase()),
+            "p 字段必须是大写十六进制：{hex}"
+        );
     }
 
     #[test]
@@ -413,10 +535,16 @@ mod tests {
     #[test]
     fn pkcs7_padding_must_be_well_formed() {
         // 末字节声明填充 5 字节但前序字节不匹配时必须报错
-        assert!(unpad_pkcs7(b"0123456789abc\x05".to_vec()).is_err());
-        assert_eq!(unpad_pkcs7(b"abc\x05\x05\x05\x05\x05".to_vec()).unwrap(), b"abc");
+        assert!(unpad_pkcs7(b"0123456789abcde\x05".to_vec()).is_err());
+        // 合法填充：11 字节明文 + 5 字节 0x05
+        assert_eq!(
+            unpad_pkcs7(b"0123456789a\x05\x05\x05\x05\x05".to_vec()).unwrap(),
+            b"0123456789a"
+        );
         // 校验非密文输入（末尾全 0 填充）
         assert!(unpad_pkcs7(b"{\"status\":1}\x00\x00\x00".to_vec()).is_err());
+        // 填充长度超出分组大小同样非法
+        assert!(unpad_pkcs7(b"0123456789abcde\x11".to_vec()).is_err());
     }
 
     #[test]
@@ -426,12 +554,7 @@ mod tests {
             fingerprint_edt("x", &"a".repeat(32)).is_err(),
             "32 字节不得静默升级成 AES-256"
         );
-    }
-
-    #[test]
-    fn random_aes_secret_is_six_b62_chars() {
-        let s = random_aes_secret();
-        assert_eq!(s.len(), 6);
-        assert!(s.bytes().all(|b| b.is_ascii_alphanumeric()));
+        // 非十六进制密钥必须被拒绝
+        assert!(fingerprint_edt("x", "zzzzzzzzzzzzzzzz").is_err());
     }
 }

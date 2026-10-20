@@ -9,9 +9,15 @@ use symphonia::core::errors::Error as SymphoniaError;
 use symphonia::core::formats::{FormatOptions, FormatReader};
 use symphonia::core::io::{MediaSource, MediaSourceStream, MediaSourceStreamOptions};
 use symphonia::core::meta::MetadataOptions;
-use symphonia::core::probe::Hint;
 
 use crate::{Error, ReadSeek};
+
+/// 连续解码错误的容忍上限
+///
+/// 单帧损坏是常见的（网络抖动、文件轻微截断），跳过即可；
+/// 但如果**每一帧**都失败，继续"跳过"就会一路走到 EOF，
+/// 引擎会误判为"正常播完"并切到下一首。这里给一个上限把它变成显式失败。
+const MAX_DECODE_ERRORS: u32 = 32;
 
 /// 解码后的 PCM 音频数据
 #[derive(Debug, Clone)]
@@ -76,6 +82,17 @@ impl MediaSource for SharedSource {
     }
 }
 
+/// 解码出的一个音频块
+#[derive(Debug, Clone)]
+pub struct DecodedChunk {
+    /// 交织 PCM 样本
+    pub samples: Vec<f32>,
+    /// 实际声道数（以解码结果为准，不信任容器的声明）
+    pub channels: usize,
+    /// 实际采样率（以解码结果为准）
+    pub sample_rate: u32,
+}
+
 /// 音频流分包解码器
 pub struct Decoder {
     format: Box<dyn FormatReader>,
@@ -83,28 +100,28 @@ pub struct Decoder {
     track_id: u32,
     sample_rate: u32,
     channels: usize,
+    /// 连续解码错误计数
+    decode_errors: u32,
 }
 
 impl Decoder {
     /// 打开音频流并探测格式
+    ///
+    /// symphonia 0.5 的格式探测完全基于内容（`Probe::format` 会忽略 `Hint`），
+    /// 因此这里不接收扩展名参数 —— 传了也没有任何作用。
     pub fn open(reader: Box<dyn ReadSeek + Send>) -> Result<Self, Error> {
-        Self::open_with_hint(reader, None)
-    }
-
-    /// 打开音频流并结合扩展名探测格式
-    pub fn open_with_hint(reader: Box<dyn ReadSeek + Send>, extension: Option<&str>) -> Result<Self, Error> {
         let source = SharedSource {
             inner: Mutex::new(reader),
         };
         let mss = MediaSourceStream::new(Box::new(source), MediaSourceStreamOptions::default());
 
-        let mut hint = Hint::new();
-        if let Some(ext) = extension {
-            hint.with_extension(ext);
-        }
-
         let probed = symphonia::default::get_probe()
-            .format(&hint, mss, &FormatOptions::default(), &MetadataOptions::default())
+            .format(
+                &symphonia::core::probe::Hint::new(),
+                mss,
+                &FormatOptions::default(),
+                &MetadataOptions::default(),
+            )
             .map_err(|e| Error::Decode(e.to_string()))?;
 
         let format = probed.format;
@@ -135,6 +152,7 @@ impl Decoder {
             track_id,
             sample_rate,
             channels,
+            decode_errors: 0,
         })
     }
 
@@ -151,7 +169,7 @@ impl Decoder {
     }
 
     /// 解码下一个音频数据块（到达流末尾返回 Ok(None)）
-    pub fn next_chunk(&mut self) -> Result<Option<Vec<f32>>, Error> {
+    pub fn next_chunk(&mut self) -> Result<Option<DecodedChunk>, Error> {
         loop {
             let packet = match self.format.next_packet() {
                 Ok(p) => p,
@@ -171,13 +189,30 @@ impl Decoder {
 
             match self.codec.decode(&packet) {
                 Ok(audio) => {
-                    if let Some(samples) = interleave(&audio) {
-                        return Ok(Some(samples));
+                    if let Some((samples, channels, sample_rate)) = interleave(&audio) {
+                        self.decode_errors = 0;
+                        // 以实际解码结果为准：个别容器会少报声道数，
+                        // 沿用声明值会让声道映射错乱（音频失真）。
+                        self.channels = channels;
+                        self.sample_rate = sample_rate;
+                        return Ok(Some(DecodedChunk {
+                            samples,
+                            channels,
+                            sample_rate,
+                        }));
                     }
                     // 跳过空帧包
                 }
-                // 忽略单帧损坏错误，继续解码
-                Err(SymphoniaError::DecodeError(_)) => {}
+                // 单帧损坏可以跳过，但连续失败必须报错，
+                // 否则整条音轨损坏时会一路"跳过"到 EOF，被误判成正常播完。
+                Err(SymphoniaError::DecodeError(_)) => {
+                    self.decode_errors += 1;
+                    if self.decode_errors >= MAX_DECODE_ERRORS {
+                        return Err(Error::Decode(format!(
+                            "连续 {MAX_DECODE_ERRORS} 帧解码失败，音频可能已损坏"
+                        )));
+                    }
+                }
                 Err(SymphoniaError::IoError(e)) if e.kind() == IoErrorKind::UnexpectedEof => {
                     return Ok(None);
                 }
@@ -187,14 +222,17 @@ impl Decoder {
     }
 }
 
-/// 提取交织 f32 样本（空帧包返回 None）
-fn interleave(audio: &AudioBufferRef<'_>) -> Option<Vec<f32>> {
+/// 提取交织 f32 样本与实际规格（空帧包返回 None）
+fn interleave(audio: &AudioBufferRef<'_>) -> Option<(Vec<f32>, usize, u32)> {
     if audio.frames() == 0 {
         return None;
     }
-    let mut buf = SampleBuffer::<f32>::new(audio.frames() as u64, *audio.spec());
+    let spec = audio.spec();
+    let channels = spec.channels.count();
+    let sample_rate = spec.rate;
+    let mut buf = SampleBuffer::<f32>::new(audio.frames() as u64, *spec);
     buf.copy_interleaved_ref(audio.clone());
-    Some(buf.samples().to_vec())
+    Some((buf.samples().to_vec(), channels, sample_rate))
 }
 
 /// 一次性解码整条音频流
@@ -204,7 +242,7 @@ pub fn decode_all(reader: Box<dyn ReadSeek + Send>) -> Result<Decoded, Error> {
     let channels = decoder.channels();
     let mut samples = Vec::new();
     while let Some(chunk) = decoder.next_chunk()? {
-        samples.extend_from_slice(&chunk);
+        samples.extend_from_slice(&chunk.samples);
     }
     Ok(Decoded {
         sample_rate,

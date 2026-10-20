@@ -1,5 +1,7 @@
 //! 传输与端点错误定义。
 
+use std::sync::Arc;
+
 use thiserror::Error;
 
 /// 上游业务错误码。
@@ -38,7 +40,11 @@ impl Code {
 }
 
 /// 传输与端点错误
+///
+/// 变体带有 `#[source]`，调用方可用 `std::error::Error::source()` 取到原始原因链；
+/// 底层错误以 `Arc` 装箱，保证本枚举仍可 `Clone`（单飞合并需要克隆错误结果）。
 #[derive(Debug, Clone, Error)]
+#[non_exhaustive]
 pub enum Error {
     /// 传输层失败（网络、超时或连接中断）
     #[error("transport failed: {0}")]
@@ -60,8 +66,19 @@ pub enum Error {
         message: String,
     },
     /// 二次验证重试后仍失败
-    #[error("upstream still requires verification after retry (ssa-code={0})")]
-    NeedsVerify(String),
+    ///
+    /// 保留上游原始错误（`source`）与原始业务码（`code`），
+    /// 避免用验证错误顶掉上游真实错误码（20028 / 20010 / ...）。
+    #[error("upstream still requires verification after retry (ssa-code={ssa})")]
+    NeedsVerify {
+        /// 上游下发的 ssa-code
+        ssa: String,
+        /// 上游原始业务错误码（无则为空）
+        code: Option<i64>,
+        /// 上游原始错误
+        #[source]
+        source: Box<Error>,
+    },
     /// 响应成功但关键数据为空
     #[error("empty data: {0}")]
     EmptyData(String),
@@ -79,21 +96,24 @@ pub enum Error {
     Decode(String),
     /// 协议处理失败
     #[error("protocol: {0}")]
-    Protocol(String),
+    Protocol(#[source] Arc<lyra_proto::Error>),
+    /// 缓存标识非法（路径穿越、非法字符等）
+    #[error("invalid cache key: {0}")]
+    InvalidCacheKey(String),
     /// I/O 错误
     #[error("io: {0}")]
-    Io(String),
+    Io(#[source] Arc<std::io::Error>),
 }
 
 impl From<std::io::Error> for Error {
     fn from(error: std::io::Error) -> Self {
-        Self::Io(error.to_string())
+        Self::Io(Arc::new(error))
     }
 }
 
 impl From<lyra_proto::Error> for Error {
     fn from(error: lyra_proto::Error) -> Self {
-        Self::Protocol(error.to_string())
+        Self::Protocol(Arc::new(error))
     }
 }
 
@@ -103,6 +123,9 @@ impl Error {
     pub fn code(&self) -> Option<Code> {
         match self {
             Self::Upstream { code, .. } => Some(Code::from_i64(*code)),
+            // 二次验证路径必须仍能解析出业务码：上游给了 20028 就是 NeedVerify，
+            // 没给则退化为 NeedVerify，避免把验证错误伪装成“无错误码”。
+            Self::NeedsVerify { code, .. } => Some(code.map_or(Code::NeedVerify, Code::from_i64)),
             _ => None,
         }
     }
@@ -110,3 +133,38 @@ impl Error {
 
 /// 模块通用结果类型
 pub type Result<T> = std::result::Result<T, Error>;
+
+#[cfg(test)]
+mod tests {
+    #![allow(clippy::unwrap_used)]
+
+    use super::*;
+
+    #[test]
+    fn io_errors_keep_their_source_chain() {
+        let error = Error::from(std::io::Error::new(std::io::ErrorKind::NotFound, "缺少文件"));
+        assert!(std::error::Error::source(&error).is_some(), "必须保留原始来源");
+        assert!(error.to_string().contains("缺少文件"), "{error}");
+    }
+
+    #[test]
+    fn protocol_errors_keep_their_source_chain() {
+        let error = Error::from(lyra_proto::base64_decode("!!!").unwrap_err());
+        assert!(std::error::Error::source(&error).is_some(), "必须保留原始来源");
+        assert!(!error.to_string().is_empty(), "{error}");
+    }
+
+    #[test]
+    fn needs_verify_keeps_the_upstream_business_code() {
+        let error = Error::NeedsVerify {
+            ssa: "SSA123".to_owned(),
+            code: Some(20028),
+            source: Box::new(Error::Upstream {
+                code: 20028,
+                message: "验证".to_owned(),
+            }),
+        };
+        assert_eq!(error.code(), Some(Code::NeedVerify));
+        assert!(std::error::Error::source(&error).is_some());
+    }
+}

@@ -69,12 +69,14 @@ impl SettingsView {
     }
 
     /// 确保会员状态已加载
-    pub(crate) fn ensure(&mut self) {
+    pub(crate) fn ensure(&mut self, cx: &mut Context<Self>) {
         if self.loaded {
             return;
         }
         if !self.backend.app().is_logged_in() {
+            // 必须显式通知：未置脏的实体会复用上一帧的渲染结果，提示不会显示
             self.last_action = Some(SharedString::new_static("登录后可查看会员状态"));
+            cx.notify();
             return;
         }
         self.loaded = true;
@@ -99,7 +101,7 @@ impl SettingsView {
                 self.last_action = Some(SharedString::new_static("已成功领取今日畅听 VIP"));
                 self.backend.app().clear_cache();
                 self.loaded = false;
-                self.ensure();
+                self.ensure(cx);
             }
             Err(error) => self.last_action = Some(SharedString::from(format!("领取失败: {error}"))),
         }

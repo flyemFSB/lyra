@@ -26,7 +26,11 @@ fn build_typed<T>(
 where
     T: SizedSample + FromSample<f32> + 'static,
 {
-    let err_fn = |e| tracing::error!("音频输出流错误: {e}");
+    // 实时线程禁止调用 tracing：格式化会分配内存，抢全局订阅锁会造成优先级反转。
+    // 这里只把错误文本放进共享槽位，由解码线程（非实时）负责打日志。
+    // 错误回调与数据回调各自持有一份 Arc，互不抢占所有权。
+    let err_shared = shared.clone();
+    let err_fn = move |e: cpal::StreamError| err_shared.record_stream_error(e.to_string());
     device
         .build_output_stream(
             config,
@@ -74,6 +78,11 @@ pub(crate) fn build_stream(
         SampleFormat::U8 => arm!(u8),
         SampleFormat::U16 => arm!(u16),
         SampleFormat::U32 => arm!(u32),
+        // cpal 为这些格式实现了 SizedSample，必须一并支持，
+        // 否则遇到 I24 / i64 / u64 设备的整个引擎会拒绝启动。
+        SampleFormat::I24 => arm!(cpal::I24),
+        SampleFormat::I64 => arm!(i64),
+        SampleFormat::U64 => arm!(u64),
         other => Err(Error::UnsupportedSampleFormat(other.to_string())),
     }
 }

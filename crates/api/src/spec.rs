@@ -1,5 +1,6 @@
 //! HTTP 请求装配：管理公共参数、协议头与防篡改签名。
 
+use std::borrow::Cow;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use lyra_proto::consts::{APPID, CLIENTVER, KG_RC, KG_REC, KG_RF, KG_THASH, UA_DEFAULT};
@@ -24,6 +25,8 @@ pub const VIP_BASE: &str = "https://kugouvip.kugou.com";
 pub const VERIFY_BASE: &str = "https://verifyservice.kugou.com";
 /// 用户关系服务
 pub const RELATION_BASE: &str = "http://relation.user.kugou.com";
+/// 云歌单服务路由网关
+pub const CLOUD_ROUTER: &str = "cloudlist.service.kugou.com";
 
 /// 签名模式
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -209,15 +212,22 @@ impl RequestSpec {
     }
 
     /// 设置 JSON 请求体
+    ///
+    /// 与 [`RequestSpec::raw_body`] 互斥：二者只能取其一，
+    /// 否则签名用的请求体与实际发出的请求体会不一致。
     #[must_use]
     pub fn body(mut self, body: serde_json::Value) -> Self {
+        self.raw_body = None;
         self.body = Some(body);
         self
     }
 
     /// 设置原始二进制请求体
+    ///
+    /// 与 [`RequestSpec::body`] 互斥：二者只能取其一。
     #[must_use]
     pub fn raw_body(mut self, body: impl Into<Vec<u8>>) -> Self {
+        self.body = None;
         self.raw_body = Some(body.into());
         self
     }
@@ -295,7 +305,14 @@ impl RequestSpec {
     }
 
     /// 装配并生成可发送的 HTTP 请求
-    pub fn build(&self, session: &Session) -> Result<Request> {
+    ///
+    /// 该过程不会失败：签名、参数拼装与请求体序列化都是确定性的。
+    #[must_use]
+    pub fn build(&self, session: &Session) -> Request {
+        debug_assert!(
+            !(self.body.is_some() && self.raw_body.is_some()),
+            "body 与 raw_body 互斥：设置其一必须清除另一个"
+        );
         let mut params = Params::new();
         let dfid = self.dfid_override.as_deref().unwrap_or_else(|| session.dfid());
 
@@ -338,9 +355,8 @@ impl RequestSpec {
             (None, Some(raw)) => Some(raw.clone()),
             (None, None) => None,
         };
-        let body_string = body_bytes
-            .as_ref()
-            .map_or_else(String::new, |bytes| String::from_utf8_lossy(bytes).into_owned());
+        // 借用即可：不必为签名再复制一份请求体
+        let body_string = body_bytes.as_deref().map_or(Cow::Borrowed(""), String::from_utf8_lossy);
 
         if !params.contains("signature") {
             let signature = match self.sign {
@@ -390,7 +406,7 @@ impl RequestSpec {
         request.headers = merge_headers(layers);
         request.body = body_bytes;
         request.timeout = self.timeout;
-        Ok(request)
+        request
     }
 }
 
@@ -471,7 +487,7 @@ mod tests {
 
     #[test]
     fn default_params_and_headers_are_injected() {
-        let request = RequestSpec::get("/v1/x").build(&session()).unwrap();
+        let request = RequestSpec::get("/v1/x").build(&session());
         let names: Vec<&str> = request.query.iter().map(|(k, _)| k.as_str()).collect();
         for expected in [
             "dfid",
@@ -498,8 +514,7 @@ mod tests {
         let request = RequestSpec::post("/risk/v2/r_register_dev")
             .param("part", 1)
             .raw_body(raw.as_bytes().to_vec())
-            .build(&session())
-            .unwrap();
+            .build(&session());
         assert_eq!(request.body.as_deref(), Some(raw.as_bytes()));
         let signature = request
             .query
@@ -531,7 +546,7 @@ mod tests {
             webgl: String::new(),
             dfid: "-".to_owned(),
         });
-        let request = RequestSpec::get("/v1/x").build(&anonymous).unwrap();
+        let request = RequestSpec::get("/v1/x").build(&anonymous);
         assert!(!request.query.iter().any(|(k, _)| k == "token"));
         assert!(!request.query.iter().any(|(k, _)| k == "userid"));
     }
@@ -542,8 +557,7 @@ mod tests {
             .clear_default_params()
             .no_signature()
             .param("hash", "abc")
-            .build(&session())
-            .unwrap();
+            .build(&session());
         let names: Vec<&str> = request.query.iter().map(|(k, _)| k.as_str()).collect();
         assert_eq!(names, vec!["hash"]);
         // 无时间戳参数时请求头中亦不携带 clienttime。
@@ -556,8 +570,7 @@ mod tests {
         let request = RequestSpec::get("/v1/search")
             .clear_default_params()
             .no_signature()
-            .build(&session())
-            .unwrap();
+            .build(&session());
         assert!(!request.query.iter().any(|(k, _)| k == "signature"));
     }
 
@@ -566,8 +579,7 @@ mod tests {
         let request = RequestSpec::get("/v1/x")
             .clear_default_headers()
             .header("x-router", "svc.kugou.com")
-            .build(&session())
-            .unwrap();
+            .build(&session());
         assert_eq!(request.get_header("User-Agent"), None);
         assert_eq!(request.get_header("x-router"), Some("svc.kugou.com"));
     }
@@ -577,8 +589,7 @@ mod tests {
         let request = RequestSpec::get("/v1/x")
             .header("User-Agent", "custom")
             .header("mid", "OVERRIDDEN")
-            .build(&session())
-            .unwrap();
+            .build(&session());
         assert_eq!(request.get_header("User-Agent"), Some("custom"));
         assert_eq!(request.get_header("mid"), Some("12345678901234567890"));
     }
@@ -587,13 +598,11 @@ mod tests {
     fn encrypt_key_injects_sign_key_into_the_signature() {
         let without = RequestSpec::get("/tracker/v5/url")
             .param("hash", "ABC")
-            .build(&session())
-            .unwrap();
+            .build(&session());
         let with = RequestSpec::get("/tracker/v5/url")
             .param("hash", "ABC")
             .encrypt_key()
-            .build(&session())
-            .unwrap();
+            .build(&session());
         let key_of = |r: &Request| r.query.iter().find(|(k, _)| k == "key").map(|(_, v)| v.clone());
         assert!(key_of(&without).is_none());
         assert_eq!(
@@ -612,11 +621,8 @@ mod tests {
 
     #[test]
     fn extra_query_is_not_signed() {
-        let plain = RequestSpec::get("/v1/x").build(&session()).unwrap();
-        let perturbed = RequestSpec::get("/v1/x")
-            .extra_query("_t", "12345")
-            .build(&session())
-            .unwrap();
+        let plain = RequestSpec::get("/v1/x").build(&session());
+        let perturbed = RequestSpec::get("/v1/x").extra_query("_t", "12345").build(&session());
         let sig = |r: &Request| {
             r.query
                 .iter()
@@ -630,13 +636,29 @@ mod tests {
     #[test]
     fn body_is_signed_exactly_as_it_is_sent() {
         let body = serde_json::json!({"listid": 2, "userid": 2043841403});
-        let request = RequestSpec::post("/v1/x").body(body.clone()).build(&session()).unwrap();
+        let request = RequestSpec::post("/v1/x").body(body.clone()).build(&session());
         assert_eq!(request.body.as_deref().unwrap(), body.to_string().as_bytes());
     }
 
     #[test]
+    fn body_and_raw_body_are_mutually_exclusive() {
+        // 二者只能取其一：否则签名用的体与实际发出的体会不一致。
+        // 后设置的胜出，另一个被清空。
+        let raw_first = RequestSpec::post("/v1/x")
+            .raw_body(b"raw".to_vec())
+            .body(serde_json::json!({"a": 1}));
+        assert!(raw_first.body.is_some());
+        assert!(raw_first.raw_body.is_none());
+        let json_first = RequestSpec::post("/v1/x")
+            .body(serde_json::json!({"a": 1}))
+            .raw_body(b"raw".to_vec());
+        assert!(json_first.raw_body.is_some());
+        assert!(json_first.body.is_none());
+    }
+
+    #[test]
     fn login_style_headers_are_the_ones_the_reference_sends() {
-        let request = RequestSpec::get("/v1/x").build(&session()).unwrap();
+        let request = RequestSpec::get("/v1/x").build(&session());
         assert_eq!(request.get_header("kg-rc"), Some("1"));
         assert_eq!(request.get_header("kg-thash"), Some("5d816a0"));
         assert_eq!(request.get_header("kg-rec"), Some("1"));

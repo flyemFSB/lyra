@@ -1,5 +1,6 @@
 //! 响应宽容解码：字段类型归一化与有界键名检索。
 
+use std::borrow::Cow;
 use std::collections::VecDeque;
 
 use serde_json::Value;
@@ -42,6 +43,20 @@ pub fn as_str(value: &Value) -> String {
     }
 }
 
+/// 宽容解析为字符串（借用优先，字符串字段零拷贝）
+///
+/// 热路径（逐首歌曲解析）用它替代 [`as_str`]，避免为每个字段多分配一次 `String`。
+#[must_use]
+pub fn as_str_cow(value: &Value) -> Cow<'_, str> {
+    match value {
+        Value::String(s) => Cow::Borrowed(s.as_str()),
+        Value::Number(n) => Cow::Owned(n.to_string()),
+        Value::Bool(b) => Cow::Owned(b.to_string()),
+        Value::Null => Cow::Borrowed(""),
+        other => Cow::Owned(other.to_string()),
+    }
+}
+
 /// 宽容解析为布尔值
 #[must_use]
 pub fn as_bool(value: &Value) -> bool {
@@ -76,6 +91,12 @@ pub fn pick_str(value: &Value, keys: &[&str]) -> String {
     pick(value, keys).map(as_str).unwrap_or_default()
 }
 
+/// 按候选键名提取字符串（借用优先）
+#[must_use]
+pub fn pick_str_cow<'a>(value: &'a Value, keys: &[&str]) -> Cow<'a, str> {
+    pick(value, keys).map_or(Cow::Borrowed(""), as_str_cow)
+}
+
 /// 按候选键名提取 64 位有符号整数
 #[must_use]
 pub fn pick_i64(value: &Value, keys: &[&str]) -> i64 {
@@ -106,6 +127,15 @@ pub fn pick_str_paths(value: &Value, paths: &[&[&str]]) -> String {
         .find_map(|path| pick_path(value, path))
         .map(as_str)
         .unwrap_or_default()
+}
+
+/// 按候选多级路径列表提取首个匹配字符串（借用优先）
+#[must_use]
+pub fn pick_str_paths_cow<'a>(value: &'a Value, paths: &[&[&str]]) -> Cow<'a, str> {
+    paths
+        .iter()
+        .find_map(|path| pick_path(value, path))
+        .map_or(Cow::Borrowed(""), as_str_cow)
 }
 
 /// 按候选多级路径列表提取首个匹配整数

@@ -4,7 +4,6 @@
 pub mod blob;
 pub mod cache;
 pub mod client;
-pub mod cloud;
 pub mod codec;
 pub mod endpoint;
 pub mod error;

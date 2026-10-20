@@ -60,26 +60,56 @@ impl Resampler {
         let mut out = Vec::new();
 
         while self.stage.len() >= block {
-            for (ch, dst) in self.in_buf.iter_mut().enumerate() {
-                for (frame, slot) in dst.iter_mut().enumerate() {
-                    *slot = self.stage[frame * self.channels + ch];
-                }
-            }
-            self.stage.drain(..block);
-
-            let (_, out_len) = self
-                .inner
-                .process_into_buffer(&self.in_buf, &mut self.out_buf, None)
-                .map_err(|e| Error::Resample(e.to_string()))?;
-
-            for frame in 0..out_len {
-                for ch in 0..self.channels {
-                    out.push(self.out_buf[ch][frame]);
-                }
-            }
+            self.process_block(&mut out)?;
         }
 
         Ok(out)
+    }
+
+    /// 处理一整块输入（块内含全部声道的交织样本）
+    fn process_block(&mut self, out: &mut Vec<f32>) -> Result<(), Error> {
+        let block = self.chunk_in * self.channels;
+        for (ch, dst) in self.in_buf.iter_mut().enumerate() {
+            for (frame, slot) in dst.iter_mut().enumerate() {
+                *slot = self.stage[frame * self.channels + ch];
+            }
+        }
+        self.stage.drain(..block);
+
+        let (_, out_len) = self
+            .inner
+            .process_into_buffer(&self.in_buf, &mut self.out_buf, None)
+            .map_err(|e| Error::Resample(e.to_string()))?;
+
+        for frame in 0..out_len {
+            for ch in 0..self.channels {
+                out.push(self.out_buf[ch][frame]);
+            }
+        }
+        Ok(())
+    }
+
+    /// 冲洗重采样器尾部
+    ///
+    /// 输入不足一整块时补零凑满再处理，把滤波器的收尾部分也输出出来。
+    /// 不调用它会丢掉最多 `chunk_in - 1` 帧（44.1kHz 下约 3.3ms）的结尾音频。
+    pub fn flush(&mut self) -> Result<Vec<f32>, Error> {
+        if self.stage.is_empty() {
+            return Ok(Vec::new());
+        }
+        let block = self.chunk_in * self.channels;
+        self.stage.resize(block, 0.0);
+        let mut out = Vec::new();
+        self.process_block(&mut out)?;
+        Ok(out)
+    }
+
+    /// 重采样器引入的延迟（帧）
+    ///
+    /// FFT 固定块算法有半个输出块的固有延迟，播放位置需要减去它，
+    /// 否则进度条会比实际听到的声音超前。
+    pub fn output_delay_frames(&self) -> usize {
+        self.inner.output_delay()
     }
 }
 
@@ -135,5 +165,29 @@ mod tests {
         assert_eq!(out.len() % 2, 0);
         let expected = frames * 48_000 / 44_100;
         assert!(out.len() / 2 >= expected - 160);
+    }
+
+    #[test]
+    fn flush_recovers_the_tail_that_would_otherwise_be_dropped() {
+        // 100 帧 < 一个输入块（147 帧），process 阶段没有输出，
+        // 剩余的样本必须由 flush 补零处理出来，否则结尾音频会被丢掉。
+        let input = sine(100, 1);
+        let mut resampler = Resampler::new(44_100, 48_000, 1).unwrap();
+        assert!(resampler.process(&input).unwrap().is_empty());
+        let tail = resampler.flush().unwrap();
+        assert!(!tail.is_empty(), "flush 必须把尾部样本补零处理出来");
+    }
+
+    #[test]
+    fn flushing_an_empty_resampler_is_a_no_op() {
+        let mut resampler = Resampler::new(44_100, 48_000, 1).unwrap();
+        assert!(resampler.flush().unwrap().is_empty());
+    }
+
+    #[test]
+    fn the_resampler_reports_its_intrinsic_delay() {
+        // FFT 固定块算法有半个输出块的固有延迟，播放位置需要减去它
+        let resampler = Resampler::new(44_100, 48_000, 1).unwrap();
+        assert!(resampler.output_delay_frames() > 0);
     }
 }

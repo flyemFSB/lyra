@@ -13,7 +13,9 @@ fn md5_concat(parts: &[&[u8]]) -> String {
     hex::encode(h.finalize())
 }
 
-/// Android 端签名：md5(SALT_MD5 + 排序键值对 + 请求体 + SALT_MD5)
+/// Android 端签名：md5(SALT_MD5 + 按 key 排序的键值对 + 请求体 + SALT_MD5)
+///
+/// 排序规则见 [`Params::sorted_kv_by_key`]（方案 §5.1）。
 #[must_use]
 pub fn signature_android(params: &Params, body: &str) -> String {
     md5_concat(&[
@@ -25,6 +27,10 @@ pub fn signature_android(params: &Params, body: &str) -> String {
 }
 
 /// Web 端签名：md5(SALT_WEB + 排序键值对 + 请求体 + SALT_WEB)
+///
+/// ⚠️ 当前工作区**没有**构造 `SignMode::Web` 的地方，
+/// 本函数暂未被生产路径使用；它实现的是「先拼 `k=v` 再整串排序」的 Web 规则
+/// （见 [`Params::sorted_kv`]），与 Android 的按键排序在「前缀 + 数字」键对上不同。
 #[must_use]
 pub fn signature_web(params: &Params, body: &str) -> String {
     md5_concat(&[

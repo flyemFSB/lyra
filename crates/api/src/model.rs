@@ -1,5 +1,7 @@
 //! 领域业务模型：上游多变数据结构的归一化映射。
 
+use std::borrow::Cow;
+
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
@@ -41,7 +43,7 @@ impl Song {
     #[must_use]
     pub fn from_value(value: &Value) -> Option<Self> {
         // 提取并归一化音频哈希
-        let hash = codec::pick_str_paths(
+        let hash = codec::pick_str_paths_cow(
             value,
             &[
                 &["hash"],
@@ -53,7 +55,7 @@ impl Song {
         )
         .to_lowercase();
         // 优先提取纯歌名（songname / song_name），若无则降级提取复合字段（name / filename / audio_name）
-        let mut name = codec::pick_str(value, &["songname", "song_name", "name", "filename", "audio_name"]);
+        let mut name = codec::pick_str_cow(value, &["songname", "song_name", "name", "filename", "audio_name"]);
         if hash.is_empty() && name.is_empty() {
             return None;
         }
@@ -69,10 +71,15 @@ impl Song {
                 "duration_ms",
             ],
         ));
-        let album_id = scalar_of(codec::pick(value, &["album_id", "albumid"]))
-            .or_else_nonempty(|| scalar_of(codec::pick_path(value, &["trans_param", "album_id"])));
+        let album_id = scalar_of(codec::pick(value, &["album_id", "albumid"]));
+        // 专辑 ID 缺失时回退到 trans_param 中的同名字段
+        let album_id = if album_id.is_empty() {
+            scalar_of(codec::pick_path(value, &["trans_param", "album_id"]))
+        } else {
+            album_id
+        };
         // 优先提取 album_audio_id 或 mixsongid，规避 audio_id 命名空间冲突
-        let album_audio_id = codec::pick_str(
+        let album_audio_id = codec::pick_str_cow(
             value,
             &[
                 "album_audio_id",
@@ -82,8 +89,9 @@ impl Song {
                 "add_mixsongid",
                 "emixsongid",
             ],
-        );
-        let cover = codec::pick_str_paths(
+        )
+        .into_owned();
+        let cover = codec::pick_str_paths_cow(
             value,
             &[
                 &["trans_param", "union_cover"],
@@ -94,8 +102,9 @@ impl Song {
                 &["album_image"],
                 &["trans_param", "cdn_pic"],
             ],
-        );
-        let mut singer = codec::pick_str(
+        )
+        .into_owned();
+        let mut singer = codec::pick_str_cow(
             value,
             &[
                 "singername",
@@ -105,7 +114,8 @@ impl Song {
                 "author",
                 "all_audios_singername",
             ],
-        );
+        )
+        .into_owned();
 
         // 如果歌曲名称包含“歌手 - 歌名”格式（常见于 Kugou 歌单 filename / audio_name），将其分离为纯歌名与歌手名
         if let Some((artist_part, title_part)) = name.split_once(" - ") {
@@ -115,23 +125,23 @@ impl Song {
                 if singer.is_empty() {
                     artist_part.clone_into(&mut singer);
                 }
-                name = String::from(title_part);
+                name = Cow::Owned(title_part.to_owned());
             }
         }
 
         Some(Self {
-            name,
+            name: name.into_owned(),
             singer,
             hash,
             album_id,
             album_audio_id,
-            album_name: codec::pick_str(value, &["albumname", "album_name", "album"]),
+            album_name: codec::pick_str_cow(value, &["albumname", "album_name", "album"]).into_owned(),
             duration_ms,
             fileid: codec::pick_i64(value, &["fileid", "file_id"]),
             mixsongid: codec::pick_i64(value, &["mixsongid", "mix_song_id"]),
             privilege: codec::pick_i64(value, &["privilege", "pay_type"]),
             cover,
-            quality: codec::pick_str(value, &["quality", "audio_quality"]),
+            quality: codec::pick_str_cow(value, &["quality", "audio_quality"]).into_owned(),
         })
     }
 
@@ -179,16 +189,6 @@ impl Song {
     }
 }
 
-/// 字符串非空回退扩展
-trait OrElseNonEmpty {
-    fn or_else_nonempty(self, fallback: impl FnOnce() -> String) -> String;
-}
-impl OrElseNonEmpty for String {
-    fn or_else_nonempty(self, fallback: impl FnOnce() -> String) -> String {
-        if self.is_empty() { fallback() } else { self }
-    }
-}
-
 /// 时长归一化为毫秒
 fn normalise_duration(value: i64) -> u64 {
     if value <= 0 {
@@ -204,8 +204,9 @@ fn normalise_duration(value: i64) -> u64 {
 fn scalar_of(value: Option<&Value>) -> String {
     value
         .filter(|v| !v.is_object() && !v.is_array())
-        .map(codec::as_str)
+        .map(codec::as_str_cow)
         .unwrap_or_default()
+        .into_owned()
 }
 
 /// 歌单摘要模型

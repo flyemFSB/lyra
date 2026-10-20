@@ -18,7 +18,7 @@ use crate::theme::{
     TEXT_FAINT, TEXT_MUTED, TEXT_PRIMARY, VIP_GOLD, notice_with_icon, row_sizes, title,
 };
 use crate::views::player::PlayerModel;
-use crate::views::tracks::track_row;
+use crate::views::tracks::{TrackRow, build_rows, track_row};
 
 /// 电台视图
 pub(crate) struct RadioView {
@@ -27,7 +27,13 @@ pub(crate) struct RadioView {
     player: Entity<PlayerModel>,
     classes: Vec<StationClass>,
     stations: Arc<Vec<Station>>,
+    /// 当前分类过滤后的电台下标（缓存，避免渲染期重新过滤）
+    filtered: Vec<usize>,
+    /// 分类标签文本（预格式化，渲染期零分配）
+    class_labels: Vec<SharedString>,
     songs: Arc<Vec<Song>>,
+    /// 预格式化的曲目展示模型
+    rows: Arc<Vec<TrackRow>>,
     sizes: Rc<Vec<Size<Pixels>>>,
     scroll_handle: VirtualListScrollHandle,
     selected_class: Option<String>,
@@ -61,7 +67,10 @@ impl RadioView {
             player,
             classes: Vec::new(),
             stations: Arc::new(Vec::new()),
+            filtered: Vec::new(),
+            class_labels: Vec::new(),
             songs: Arc::new(Vec::new()),
+            rows: Arc::new(Vec::new()),
             sizes: row_sizes(0),
             scroll_handle: VirtualListScrollHandle::new(),
             selected_class: None,
@@ -80,7 +89,10 @@ impl RadioView {
     pub(crate) fn reset(&mut self, cx: &mut Context<Self>) {
         self.classes = Vec::new();
         self.stations = Arc::new(Vec::new());
+        self.filtered = Vec::new();
+        self.class_labels = Vec::new();
         self.songs = Arc::new(Vec::new());
+        self.rows = Arc::new(Vec::new());
         self.sizes = row_sizes(0);
         self.scroll_handle = VirtualListScrollHandle::new();
         self.selected_class = None;
@@ -94,12 +106,37 @@ impl RadioView {
         cx.notify();
     }
 
+    /// 重建当前分类下的电台下标（数据变化或切换分类时调用）
+    fn rebuild_filtered(&mut self) {
+        self.filtered = match &self.selected_class {
+            None => (0..self.stations.len()).collect(),
+            Some(target) => self
+                .stations
+                .iter()
+                .enumerate()
+                .filter(|(_, station)| &station.classid == target)
+                .map(|(index, _)| index)
+                .collect(),
+        };
+    }
+
     /// 确保电台分类与频道数据已加载
     pub(crate) fn ensure(&mut self, cx: &mut Context<Self>) {
         if self.loaded || self.loading_catalog {
             return;
         }
+        self.fetch_catalog(cx);
+    }
+
+    /// 重新拉取电台分类与频道（顶栏「刷新当前数据」按钮）
+    pub(crate) fn reload(&mut self, cx: &mut Context<Self>) {
+        self.fetch_catalog(cx);
+    }
+
+    /// 发起分类与频道请求
+    fn fetch_catalog(&mut self, cx: &mut Context<Self>) {
         self.loading_catalog = true;
+        self.loaded = false;
         self.catalog_error = None;
         cx.notify();
         let app = self.backend.app();
@@ -115,6 +152,11 @@ impl RadioView {
     pub(crate) fn on_classes(&mut self, result: Result<Vec<StationClass>, String>, cx: &mut Context<Self>) {
         match result {
             Ok(classes) => {
+                // 分类标签文本预格式化，渲染期不再 format!
+                self.class_labels = classes
+                    .iter()
+                    .map(|class| SharedString::from(format!("{}（{}）", class.name, class.count)))
+                    .collect();
                 self.classes = classes;
                 self.catalog_error = None;
             }
@@ -130,8 +172,9 @@ impl RadioView {
         match result {
             Ok(stations) => {
                 self.stations = Arc::new(stations);
+                self.rebuild_filtered();
                 self.catalog_error = None;
-                if self.station_name.is_none() && !self.stations.is_empty() {
+                if self.station_name.is_none() && !self.filtered.is_empty() {
                     self.select_station(0, cx);
                 }
             }
@@ -148,6 +191,7 @@ impl RadioView {
         self.loading_songs = false;
         match result {
             Ok(songs) => {
+                self.rows = Arc::new(build_rows(&songs));
                 self.sizes = row_sizes(songs.len());
                 self.songs = Arc::new(songs);
                 self.songs_error = None;
@@ -156,6 +200,7 @@ impl RadioView {
                 self.songs_error = Some(error.into());
                 self.sizes = row_sizes(0);
                 self.songs = Arc::new(Vec::new());
+                self.rows = Arc::new(Vec::new());
             }
         }
         cx.notify();
@@ -164,19 +209,23 @@ impl RadioView {
     /// 切换选中的电台分类
     fn select_class(&mut self, classid: Option<String>, cx: &mut Context<Self>) {
         self.selected_class = classid;
+        self.rebuild_filtered();
         cx.notify();
     }
 
     /// 选中电台频道并拉取曲目
     fn select_station(&mut self, index: usize, cx: &mut Context<Self>) {
-        let Some(station) = self.filtered_stations().get(index).cloned() else {
+        let Some(&station_index) = self.filtered.get(index) else {
             return;
         };
-        self.station_name = Some(SharedString::from(station.name));
+        let Some(station) = self.stations.get(station_index) else {
+            return;
+        };
+        self.station_name = Some(SharedString::from(station.name.as_str()));
         self.loading_songs = true;
         self.songs_error = None;
         self.scroll_handle = VirtualListScrollHandle::new();
-        let fmid = station.fmid;
+        let fmid = station.fmid.clone();
         self.request_seq += 1;
         let seq = self.request_seq;
         cx.notify();
@@ -190,18 +239,15 @@ impl RadioView {
     }
 
     /// 渲染单首曲目行
-    fn row(&self, index: usize, cx: &App) -> AnyElement {
-        let (is_current, is_playing) = {
-            let model = self.player.read(cx);
-            let cur_hash = model.current_song().map(|s| &s.hash);
-            let this_hash = self.songs.get(index).map(|s| &s.hash);
-            (
-                cur_hash.is_some() && cur_hash == this_hash,
-                model.snapshot.state == lyra_audio::State::Playing,
-            )
+    fn row(&self, index: usize, cur_hash: Option<&str>, is_playing: bool, cx: &App) -> AnyElement {
+        let this_hash = self.songs.get(index).map(|s| s.hash.as_str());
+        let is_current = cur_hash.is_some() && cur_hash == this_hash;
+        let Some(row) = self.rows.get(index) else {
+            return div().into_any_element();
         };
         track_row(
             index,
+            row,
             &self.songs,
             &self.shell,
             &self.backend,
@@ -214,22 +260,32 @@ impl RadioView {
 
     /// 渲染分类标签栏
     fn class_chips(&self, cx: &Context<Self>) -> impl IntoElement {
-        let mut row = h_flex()
-            .flex_wrap()
-            .gap(px(8.0))
-            .px_5()
-            .py_3()
-            .child(self.class_chip(None, "全部频道", 0, cx));
+        let mut row = h_flex().flex_wrap().gap(px(8.0)).px_5().py_3().child(self.class_chip(
+            None,
+            SharedString::new_static("全部频道"),
+            0,
+            cx,
+        ));
         for (index, class) in self.classes.iter().enumerate() {
-            let label = format!("{}（{}）", class.name, class.count);
-            row = row.child(self.class_chip(Some(class.classid.clone()), &label, index + 1, cx));
+            let label = self
+                .class_labels
+                .get(index)
+                .cloned()
+                .unwrap_or_else(|| SharedString::new_static(""));
+            row = row.child(self.class_chip(Some(SharedString::from(class.classid.as_str())), label, index + 1, cx));
         }
         row.w_full().border_b_1().border_color(CARD_BORDER)
     }
 
     /// 渲染单个分类胶囊标签
-    fn class_chip(&self, classid: Option<String>, label: &str, index: usize, cx: &Context<Self>) -> impl IntoElement {
-        let active = self.selected_class == classid;
+    fn class_chip(
+        &self,
+        classid: Option<SharedString>,
+        label: SharedString,
+        index: usize,
+        cx: &Context<Self>,
+    ) -> impl IntoElement {
+        let active = self.selected_class.as_deref() == classid.as_deref();
 
         div()
             .id(("class_chip", index))
@@ -253,26 +309,15 @@ impl RadioView {
                     .text_color(TEXT_MUTED)
                     .hover(|style| style.bg(SURFACE_HOVER).text_color(TEXT_PRIMARY))
             })
-            .on_click(cx.listener(move |view, _event, _window, cx| view.select_class(classid.clone(), cx)))
-            .child(SharedString::from(label.to_owned()))
-    }
-
-    /// 获取当前分类过滤后的电台频道列表
-    fn filtered_stations(&self) -> Vec<Station> {
-        let Some(target) = &self.selected_class else {
-            return (*self.stations).clone();
-        };
-        self.stations
-            .iter()
-            .filter(|station| &station.classid == target)
-            .cloned()
-            .collect()
+            .on_click(cx.listener(move |view, _event, _window, cx| {
+                view.select_class(classid.as_ref().map(ToString::to_string), cx);
+            }))
+            .child(label)
     }
 
     /// 渲染电台频道卡片列表
     fn station_grid(&self, cx: &Context<Self>) -> AnyElement {
-        let stations = self.filtered_stations();
-        if self.loading_catalog && stations.is_empty() {
+        if self.loading_catalog && self.filtered.is_empty() {
             return div()
                 .h(px(140.0))
                 .w_full()
@@ -295,14 +340,17 @@ impl RadioView {
             .gap(px(12.0))
             .overflow_x_scrollbar();
 
-        for (index, station) in stations.iter().enumerate() {
-            let active = self.station_name.as_deref() == Some(station.name.as_str());
-            let name = station.name.clone();
-            let heat_str = if station.heat > 10_000 {
-                format!("{:.1}万", station.heat as f64 / 10_000.0)
-            } else {
-                format!("{}", station.heat)
+        for (index, &station_index) in self.filtered.iter().enumerate() {
+            let Some(station) = self.stations.get(station_index) else {
+                continue;
             };
+            let active = self.station_name.as_deref() == Some(station.name.as_str());
+            let heat_str = if station.heat > 10_000 {
+                SharedString::from(format!("{:.1}万", station.heat as f64 / 10_000.0))
+            } else {
+                SharedString::from(station.heat.to_string())
+            };
+            let name = SharedString::from(station.name.as_str());
 
             row = row.child(
                 div()
@@ -420,7 +468,17 @@ impl Render for RadioView {
                 sizes,
                 move |view, range, _window, cx| {
                     let app: &App = cx;
-                    range.map(|index| view.row(index, app)).collect::<Vec<_>>()
+                    // 播放器状态整批读取一次，避免每行都做一次实体读取
+                    let (cur_hash, is_playing) = {
+                        let model = view.player.read(app);
+                        (
+                            model.current_song().map(|s| s.hash.clone()),
+                            model.snapshot.state == lyra_audio::State::Playing,
+                        )
+                    };
+                    range
+                        .map(|index| view.row(index, cur_hash.as_deref(), is_playing, app))
+                        .collect::<Vec<_>>()
                 },
             )
             .track_scroll(&self.scroll_handle)

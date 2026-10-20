@@ -1,6 +1,20 @@
 //! 文本与数值格式化工具函数
 
+use std::fmt::Write as _;
+use std::sync::OnceLock;
+
+use gpui_kit::SharedString;
 use lyra_api::model::LyricLine;
+
+/// 两位序号标签（缓存复用，渲染期零分配）
+pub(crate) fn index_label(index: usize) -> SharedString {
+    static LABELS: OnceLock<Vec<SharedString>> = OnceLock::new();
+    let labels = LABELS.get_or_init(|| (0..100).map(|i| SharedString::from(format!("{i:02}"))).collect());
+    labels
+        .get(index)
+        .cloned()
+        .unwrap_or_else(|| SharedString::from(format!("{index:02}")))
+}
 
 /// 设置页支持的音质选项列表
 pub(crate) const QUALITY_CHOICES: &[(&str, &str)] = &[("flac", "无损"), ("320", "高品 320K"), ("128", "标准 128K")];
@@ -18,15 +32,26 @@ pub(crate) fn quality_label(quality: &str) -> &'static str {
     }
 }
 
-/// 毫秒时间格式化为时分秒字符串
-pub(crate) fn format_duration(ms: u64) -> String {
+/// 毫秒时间格式化写入已有缓冲区（不额外分配）
+pub(crate) fn write_duration(buf: &mut String, ms: u64) {
+    buf.clear();
     let total = ms / 1000;
     let (hours, minutes, seconds) = (total / 3600, (total % 3600) / 60, total % 60);
     if hours > 0 {
-        format!("{hours}:{minutes:02}:{seconds:02}")
+        let _ = write!(buf, "{hours}:{minutes:02}:{seconds:02}");
     } else {
-        format!("{minutes}:{seconds:02}")
+        let _ = write!(buf, "{minutes}:{seconds:02}");
     }
+}
+
+/// 毫秒时间格式化为时分秒字符串
+///
+/// 返回 `SharedString`（内部是 `SmolStr`）：短文本走内联存储、不占堆，
+/// 克隆只是引用计数递增，渲染期可以放心使用。
+pub(crate) fn format_duration(ms: u64) -> SharedString {
+    let mut buf = String::new();
+    write_duration(&mut buf, ms);
+    SharedString::new(buf)
 }
 
 /// 计算播放进度百分比
@@ -79,6 +104,27 @@ mod tests {
         assert_eq!(format_duration(59_000), "0:59");
         assert_eq!(format_duration(226_000), "3:46");
         assert_eq!(format_duration(3_600_000), "1:00:00");
+    }
+
+    #[test]
+    fn index_labels_are_two_digits_and_cached() {
+        assert_eq!(index_label(0), "00");
+        assert_eq!(index_label(7), "07");
+        assert_eq!(index_label(42), "42");
+        // 超出预置范围时回退到直接格式化
+        assert_eq!(index_label(123), "123");
+        // 同一标签重复取用必须是同一个值（缓存命中，不重新分配）
+        assert_eq!(index_label(7), index_label(7));
+    }
+
+    #[test]
+    fn duration_is_written_into_a_reusable_buffer() {
+        let mut buf = String::new();
+        write_duration(&mut buf, 226_000);
+        assert_eq!(buf, "3:46");
+        // 复用同一个缓冲区：长度不变，不产生新的分配
+        write_duration(&mut buf, 61_000);
+        assert_eq!(buf, "1:01");
     }
 
     #[test]

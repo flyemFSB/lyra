@@ -53,7 +53,7 @@ flowchart TD
     end
 
     subgraph Service ["应用与用例层"]
-        App["lyra-app (用例门面 / Tokio 运行时装配)"]
+        App["lyra-app (用例门面 / 接收注入的运行时句柄)"]
     end
 
     subgraph Infrastructure ["领域与基础设施层"]
@@ -81,7 +81,7 @@ flowchart TD
 | [`lyra-api`](crates/api) | 接口传输抽象、端点请求编解码、TinyLFU 缓存与 Single-Flight 请求聚合 | `reqwest`, `moka`, `serde_json` | 否 |
 | [`lyra-store`](crates/store) | 本地数据持久化（设备标识、配置、缓存）与系统凭据管理 | `redb`, `windows` (CredEnumerate) | 否 |
 | [`lyra-audio`](crates/audio) | 音频流处理：Symphonia 解码、音频重采样、环形缓冲与非阻塞事件引擎 | `cpal`, `symphonia`, `rubato` | 否 |
-| [`lyra-app`](crates/app) | 业务用例门面（`Kugou`）组装、Tokio 异步运行时管控与 CLI 命令入口 | `tokio`, `tracing` | 否 |
+| [`lyra-app`](crates/app) | 业务用例门面（`Kugou`）组装与 CLI 命令入口；Tokio 运行时句柄由入口注入，应用层不自建运行时 | `tokio`, `tracing` | 否 |
 | [`lyra-ui`](crates/ui) | GPUI 现代化桌面交互视图（歌单、搜索、电台、歌词、播放条、设置） | `gpui-kit` | 是 |
 | [`lyra`](crates/desktop) | 桌面端可执行程序入口，支持无参数启动 GUI 或带参数运行 CLI | `lyra-app`, `lyra-ui` | 是 |
 | [`xtask`](crates/xtask) | 开发与 CI 辅助任务：依赖树静态合规审计与真实上游端点连通性探测 | `anyhow`, `cargo_metadata` | 否 |
@@ -166,8 +166,8 @@ cargo clippy --workspace --all-targets -- -D warnings
 # 依赖树审计：列出非 Rust 工件与系统绑定，并拦截被禁用的 C 实现 TLS 后端
 cargo xtask audit
 
-# 真实上游存活性冒烟测试（仅限开发/联调，不进入 CI 流程）
-cargo xtask smoke
+# 真实上游存活性冒烟测试（仅限开发/联调，不进入 CI 流程；需显式开启 smoke 特性）
+cargo run -p xtask --features smoke -- smoke
 
 # 本地打包：编译 Release 二进制并打包 Windows 安装程序
 cargo run -p xtask -- package

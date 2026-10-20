@@ -5,6 +5,9 @@ version.workspace      = true
 edition.workspace      = true
 rust-version.workspace = true
 license.workspace      = true
+authors.workspace      = true
+repository.workspace   = true
+publish    = false
 
 # 统一通过 gpui-kit 门面访问 GPUI
 [dependencies]
@@ -12,6 +15,7 @@ gpui-kit    = { workspace = true }
 lyra-app    = { workspace = true }
 lyra-api    = { workspace = true }
 lyra-audio  = { workspace = true }
+async-channel = { workspace = true }
 tokio       = { version = "1", features = ["rt-multi-thread", "macros", "time"] }
 tracing     = { workspace = true }
 

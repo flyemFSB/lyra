@@ -2,6 +2,8 @@
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
+#[cfg(test)]
+use std::{future::Future, pin::Pin};
 
 use async_channel::Sender;
 use dashmap::DashMap;
@@ -9,6 +11,13 @@ use dashmap::mapref::entry::Entry;
 use parking_lot::Mutex;
 
 use crate::error::{Error, Result};
+
+/// 结果发布钩子（仅测试编译）
+///
+/// 在“结果已发布、在途登记尚未摘除”的窗口内被调用，
+/// 用于验证迟到的并发调用方能拿到已发布的结果，而不会重复执行上游请求。
+#[cfg(test)]
+type PublishHook = Box<dyn Fn() -> Pin<Box<dyn Future<Output = ()> + Send>> + Send + Sync + 'static>;
 
 #[derive(Debug)]
 struct Flight<T> {
@@ -38,10 +47,11 @@ impl<T: Clone + Send + Sync + 'static> Drop for LeaderGuard<'_, T> {
         if self.finished {
             return;
         }
-        self.owner.inflight.remove(&self.key);
         let error = Error::Transport("single-flight leader 被取消".to_owned());
-        // 标记完成并唤醒所有等待通道
+        // 先发布失败结果，再摘除在途登记：
+        // 反过来做的话，并发调用者可能在窗口内成为第二个 leader，重复执行上游请求。
         *self.flight.done.lock() = Some(Err(error.clone()));
+        self.owner.inflight.remove(&self.key);
         let waiters = std::mem::take(&mut *self.flight.waiters.lock());
         for waiter in waiters {
             // 派发取消错误
@@ -51,10 +61,21 @@ impl<T: Clone + Send + Sync + 'static> Drop for LeaderGuard<'_, T> {
 }
 
 /// 并发请求合并器
-#[derive(Debug)]
 pub struct SingleFlight<T> {
     inflight: DashMap<String, Arc<Flight<T>>>,
     hits: AtomicU64,
+    /// 结果发布钩子（仅测试编译）
+    #[cfg(test)]
+    publish_hook: Mutex<Option<PublishHook>>,
+}
+
+impl<T> std::fmt::Debug for SingleFlight<T> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SingleFlight")
+            .field("inflight", &self.inflight.len())
+            .field("hits", &self.hits.load(Ordering::Relaxed))
+            .finish_non_exhaustive()
+    }
 }
 
 impl<T> Default for SingleFlight<T> {
@@ -70,6 +91,8 @@ impl<T> SingleFlight<T> {
         Self {
             inflight: DashMap::new(),
             hits: AtomicU64::new(0),
+            #[cfg(test)]
+            publish_hook: Mutex::new(None),
         }
     }
 
@@ -116,7 +139,8 @@ impl<T: Clone + Send + Sync + 'static> SingleFlight<T> {
                     .recv()
                     .await
                     .map_err(|_| Error::Transport("single-flight channel closed".to_owned()))?,
-                None => unreachable!("非 leader 必然有接收端"),
+                // 库代码里不做 panic：无法收到结果时明确报错
+                None => Err(Error::Transport("single-flight follower 缺少接收端".to_owned())),
             };
         }
 
@@ -130,15 +154,35 @@ impl<T: Clone + Send + Sync + 'static> SingleFlight<T> {
 
         let result = work().await;
         guard.finished = true;
+        // 先发布结果，再摘除在途登记：
+        // 反过来做的话，并发调用者可能在窗口内成为第二个 leader，重复执行上游请求。
+        *flight.done.lock() = Some(result.clone());
+        // 仅测试：在“已发布、未摘除”的窗口内插入探测调用
+        #[cfg(test)]
+        self.run_publish_hook().await;
         self.inflight.remove(&key);
 
-        *flight.done.lock() = Some(result.clone());
         let waiters = std::mem::take(&mut *flight.waiters.lock());
         for waiter in waiters {
             // 广播执行结果至所有等待者
             let _ = waiter.send(result.clone()).await;
         }
         result
+    }
+
+    /// 安装结果发布钩子（仅测试使用）
+    #[cfg(test)]
+    fn set_publish_hook(&self, hook: PublishHook) {
+        *self.publish_hook.lock() = Some(hook);
+    }
+
+    /// 执行结果发布钩子（仅测试使用）
+    #[cfg(test)]
+    async fn run_publish_hook(&self) {
+        let hook = self.publish_hook.lock().take();
+        if let Some(hook) = hook {
+            hook().await;
+        }
     }
 }
 
@@ -244,5 +288,44 @@ mod tests {
         assert_eq!(flight.run("k", || async { Ok(1) }).await.unwrap(), 1);
         // 任务完成后后续调用重新成为 Leader。
         assert_eq!(flight.run("k", || async { Ok(2) }).await.unwrap(), 2);
+    }
+
+    #[tokio::test]
+    async fn a_caller_arriving_after_the_leader_finished_reuses_the_published_result() {
+        // 回归：结果必须先发布、再摘除在途登记。
+        // 否则“leader 已完成、登记尚未摘除”的窗口内的调用方会成为第二个 leader，
+        // 重复执行上游请求。
+        let flight = Arc::new(SingleFlight::<u64>::new());
+        let calls = Arc::new(AtomicU64::new(0));
+
+        // 在发布窗口内发起同键调用：必须拿到已发布的结果，且不得再次执行工作
+        let probe_flight = flight.clone();
+        let probe_calls = calls.clone();
+        flight.set_publish_hook(Box::new(move || {
+            let probe_flight = probe_flight.clone();
+            let probe_calls = probe_calls.clone();
+            Box::pin(async move {
+                let value = probe_flight
+                    .run("k", || async move {
+                        probe_calls.fetch_add(1, Ordering::SeqCst);
+                        Ok(999)
+                    })
+                    .await
+                    .unwrap();
+                assert_eq!(value, 42, "迟到的调用方必须拿到已发布的结果");
+            })
+        }));
+
+        let leader_flight = flight.clone();
+        let leader_calls = calls.clone();
+        let value = leader_flight
+            .run("k", || async move {
+                leader_calls.fetch_add(1, Ordering::SeqCst);
+                Ok(42)
+            })
+            .await
+            .unwrap();
+        assert_eq!(value, 42);
+        assert_eq!(calls.load(Ordering::SeqCst), 1, "上游请求只能真正执行一次");
     }
 }

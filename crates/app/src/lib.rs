@@ -4,6 +4,7 @@
 pub mod cli;
 pub mod error;
 pub mod fetcher;
+pub(crate) mod policy;
 pub mod service;
 
 pub use error::{Error, Result};
