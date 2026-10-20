@@ -1,6 +1,6 @@
 [package]
 name        = "lyra-app"
-description = "酷狗概念版用例与状态机；唯一配置运行时的库"
+description = "Lyra音乐用例与状态机；唯一配置运行时的库"
 version.workspace      = true
 edition.workspace      = true
 rust-version.workspace = true

@@ -13,7 +13,7 @@
   #define OutputDir "..\target\dist"
 #endif
 
-#define AppName "Lyra"
+#define AppName "Lyra音乐"
 #define AppPublisher "Lyra Contributors"
 #define AppURL "https://github.com/flyemFSB/lyra"
 #define AppExeName "lyra.exe"
@@ -45,6 +45,7 @@ OutputDir={#OutputDir}
 OutputBaseFilename={#AppName}-v{#AppVersion}-windows-x64-setup
 Compression=lzma2/ultra64
 SolidCompression=yes
+SetupIconFile=logo.ico
 UninstallDisplayIcon={app}\{#AppExeName}
 
 [Languages]

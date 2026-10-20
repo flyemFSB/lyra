@@ -1,6 +1,6 @@
 [package]
 name        = "lyra-proto"
-description = "酷狗概念版协议原语：签名 / 密码学 / 设备身份 / 行为指纹（纯函数，零 IO）"
+description = "Lyra音乐协议原语：签名 / 密码学 / 设备身份 / 行为指纹（纯函数，零 IO）"
 version.workspace      = true
 edition.workspace      = true
 rust-version.workspace = true

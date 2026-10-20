@@ -34,8 +34,8 @@ pub enum Error {
     /// 需要人机行为验证
     #[error("需要行为验证（ssa-code={0}）")]
     NeedsVerify(String),
-    /// 概念版无版权（已下架）
-    #[error("这首歌在概念版没有版权（已下架）")]
+    /// 歌曲暂无版权（已下架）
+    #[error("这首歌暂无版权（已下架）")]
     NoCopyright,
     /// 完整曲需会员或付费，且上游未提供试听片段
     #[error("完整版需要会员或购买，且没有试听片段")]
@@ -52,7 +52,7 @@ impl From<lyra_api::Error> for Error {
             lyra_api::Error::NeedsVerify(code) => Self::NeedsVerify(code),
             // 详细原因记录至日志，错误枚举仅对外暴露清晰提示
             lyra_api::Error::NoCopyright(reason) => {
-                tracing::debug!(%reason, "上游判定概念版无版权");
+                tracing::debug!(%reason, "上游判定无版权");
                 Self::NoCopyright
             }
             lyra_api::Error::NotEntitled(reason) => {

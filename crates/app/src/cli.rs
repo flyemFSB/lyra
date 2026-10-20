@@ -20,7 +20,7 @@ pub fn default_data_dir() -> PathBuf {
 /// 命令行使用帮助文本
 #[must_use]
 pub const fn help() -> &'static str {
-    "lyra — 酷狗概念版桌面客户端（CLI 模式）
+    "Lyra — Lyra音乐桌面客户端（CLI 模式）
 
 用法: lyra <命令> [参数]
 
@@ -186,7 +186,7 @@ pub async fn run(args: &[String]) -> Result<()> {
             if magic == "fLaC" {
                 println!("✅ 确为真无损 FLAC");
             } else if magic == "OggS" {
-                println!("✅ Ogg 容器（概念版 128/320 的标准形态）");
+                println!("✅ Ogg 容器（128/320 的标准形态）");
             } else {
                 println!("⚠️ 未识别的容器头");
             }
@@ -229,7 +229,7 @@ pub async fn run(args: &[String]) -> Result<()> {
         }
         "vip" => {
             let status = app.vip().await?;
-            println!("概念版畅听 VIP 有效: {}", status.is_concept_active());
+            println!("畅听 VIP 有效: {}", status.is_concept_active());
             println!("到期时间(ms): {:?}", status.concept_expires_at());
             for entry in &status.entries {
                 println!(

@@ -1,4 +1,4 @@
-# 酷狗概念版桌面客户端 · Rust 实施方案（v2）
+# Lyra音乐桌面客户端 · Rust 实施方案（v2）
 
 > 状态：**实施中**（M0 已完成并通过黄金向量对拍；见文末「实施记录与偏差」）
 > v2 变更：① 范围收窄为**仅概念版**，删除全部双平台分支；② 技术栈做**纯 Rust 审计**；③ 目录结构改为**惯用 Rust workspace 布局**
@@ -10,7 +10,7 @@
 
 | 项 | 定版 |
 |---|---|
-| 目标 | 酷狗**概念版（lite）**桌面客户端，单平台 |
+| 目标 | **Lyra音乐**桌面客户端，单平台 |
 | UI | `gpui-kit 0.7.3` + `gpui-pre 0.3.9`（crates.io 精确 pin） |
 | 语言边界 | 应用代码 **100% Rust**；唯一非 Rust 工件是 TLS 密码学 crate 内置的 C/asm（见 §3） |
 | 结构 | 7 crate workspace + `xtask`，核心层不含 GPUI，可无头测试 |
@@ -687,7 +687,7 @@ KRC：跳过 4 字节 → 16 字节密钥循环 XOR → zlib inflate → UTF-8
 | 构建 | `crates/xtask/src` | 4 | 依赖分类与禁用判定、schannel 语义 |
 
 合计 **191 条**，`cargo test --workspace` 全绿（连跑 3 次无抖动）。
-GUI 实测可启动：窗口句柄非零、标题 `lyra · 酷狗概念版`、stderr 为空。
+GUI 实测可启动：窗口句柄非零、标题 `Lyra音乐`、stderr 为空。
 
 ---
 

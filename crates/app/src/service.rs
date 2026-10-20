@@ -29,7 +29,7 @@ pub struct Playback {
     pub preview_ms: u64,
 }
 
-/// 酷狗核心业务门面
+/// Lyra音乐核心业务门面
 #[derive(Clone)]
 pub struct Kugou {
     store: Arc<Store>,
@@ -453,7 +453,7 @@ impl Kugou {
         Ok(privilege::vip_status(&self.api).await?)
     }
 
-    /// 领取每日概念版畅听 VIP
+    /// 领取每日畅听 VIP
     pub async fn claim_daily_vip(&self) -> Result<privilege::VipClaim> {
         Ok(privilege::claim_daily_vip(&self.api).await?)
     }

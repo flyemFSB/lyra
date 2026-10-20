@@ -368,7 +368,7 @@ async fn no_copyright_without_a_replacement_is_reported_as_such() {
     assert!(matches!(error, lyra_app::Error::NoCopyright), "{error:?}");
     assert_eq!(
         format!("{error}"),
-        "这首歌在概念版没有版权（已下架）",
+        "这首歌暂无版权（已下架）",
         "错误文案要能看懂，不能再是「上游未返回播放地址」"
     );
     assert!(

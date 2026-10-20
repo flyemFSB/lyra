@@ -1,6 +1,6 @@
 [package]
 name        = "lyra-ui"
-description = "酷狗概念版界面：视图与组件（gpui-kit 门面）"
+description = "Lyra音乐界面：视图与组件（gpui-kit 门面）"
 version.workspace      = true
 edition.workspace      = true
 rust-version.workspace = true

@@ -1,7 +1,11 @@
-# Lyra · 酷狗概念版桌面客户端
+# Lyra音乐 · 桌面客户端
 
 <p align="center">
-  <strong>基于 Rust 与 GPUI 构建的高性能、低开销酷狗概念版（Lite）桌面客户端</strong>
+  <img src="assets/logo.svg" width="120" height="120" alt="Lyra音乐 Logo" />
+</p>
+
+<p align="center">
+  <strong>基于 Rust 与 GPUI 构建的高性能、低开销 Lyra音乐桌面客户端</strong>
 </p>
 
 <p align="center">
@@ -16,7 +20,7 @@
 
 ## 📖 项目简介
 
-Lyra 是一款采用纯 Rust 技术栈实现的酷狗音乐**概念版（Lite）**轻量桌面客户端。
+Lyra 是一款采用纯 Rust 技术栈实现的**Lyra音乐**轻量桌面客户端。
 协议层基于逆向契约与测试向量对拍实现，在内存占用、启动速度、运行稳定性和音质还原度上具备原生级体验。
 
 > [!NOTE]

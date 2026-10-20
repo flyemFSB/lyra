@@ -1,9 +1,10 @@
-//! 酷狗概念版界面层：运行时装配与 GPUI 视图管理
+//! Lyra音乐界面层：运行时装配与 GPUI 视图管理
 #![forbid(unsafe_code)]
 #![allow(clippy::wildcard_imports)]
 
 mod bridge;
 mod format;
+pub(crate) mod logo;
 mod motion;
 mod shell;
 mod theme;
@@ -74,7 +75,7 @@ fn window_options() -> WindowOptions {
         ))),
         window_min_size: Some(size(px(880.0), px(560.0))),
         titlebar: Some(TitlebarOptions {
-            title: Some("Lyra 音乐".into()),
+            title: Some("Lyra音乐".into()),
             ..Default::default()
         }),
         // 桌面环境应用标识

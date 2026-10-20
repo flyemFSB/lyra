@@ -9,9 +9,7 @@ use gpui_kit::component::{Disableable as _, Icon, Sizable as _, h_flex, v_flex};
 use gpui_kit::*;
 
 use crate::bridge::{Backend, Msg};
-use crate::theme::{
-    ACCENT_GREEN, ACCENT_GREEN_HOVER, ACCENT_GREEN_LIGHT, CARD_BORDER, TEXT_MUTED, badge, hex_rgb, main_card, title,
-};
+use crate::theme::{ACCENT_GREEN, CARD_BORDER, TEXT_MUTED, hex_rgb, main_card, title};
 
 /// 验证码重发倒计时时长（秒）
 const RESEND_SECONDS: u32 = 60;
@@ -181,24 +179,12 @@ impl Render for LoginView {
                             .justify_center()
                             .gap(px(8.0))
                             .mb_2()
-                            .child(
-                                div()
-                                    .w(px(52.0))
-                                    .h(px(52.0))
-                                    .rounded(px(14.0))
-                                    .bg(ACCENT_GREEN)
-                                    .shadow_md()
-                                    .flex()
-                                    .items_center()
-                                    .justify_center()
-                                    .child(Icon::new(IconName::Music).size(px(26.0)).text_color(rgb(0xffffff))),
-                            )
+                            .child(crate::logo::lyra_logo_icon(56.0))
                             .child(
                                 h_flex()
                                     .gap(px(8.0))
                                     .items_center()
-                                    .child(title("登录到 Lyra 音乐", cx))
-                                    .child(badge("概念版", ACCENT_GREEN_LIGHT, ACCENT_GREEN_HOVER)),
+                                    .child(title("登录到 Lyra音乐", cx)),
                             )
                             .child(
                                 div()

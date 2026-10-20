@@ -1,6 +1,6 @@
 [package]
 name        = "lyra-audio"
-description = "酷狗概念版音频引擎：抓取 / 解码 / 输出三段分离"
+description = "Lyra音乐音频引擎：抓取 / 解码 / 输出三段分离"
 version.workspace      = true
 edition.workspace      = true
 rust-version.workspace = true

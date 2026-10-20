@@ -577,6 +577,9 @@ impl AppShell {
     fn sidebar(&self, cx: &Context<Self>) -> impl IntoElement {
         let mut column = v_flex().id("sidebar").w(px(216.0)).h_full().p_2().gap(px(10.0));
 
+        // 顶部品牌区
+        column = column.child(crate::logo::lyra_brand_header());
+
         // 用户身份卡片
         let username = self
             .backend

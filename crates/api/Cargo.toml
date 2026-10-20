@@ -1,6 +1,6 @@
 [package]
 name        = "lyra-api"
-description = "酷狗概念版传输抽象、端点与缓存（通过 trait Transport 反转依赖，不依赖 GPUI）"
+description = "Lyra音乐传输抽象、端点与缓存（通过 trait Transport 反转依赖，不依赖 GPUI）"
 version.workspace      = true
 edition.workspace      = true
 rust-version.workspace = true

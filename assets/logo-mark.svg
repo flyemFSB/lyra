@@ -1,0 +1,23 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="100%" height="100%">
+  <!-- Lyre Left Wing / Arm -->
+  <path d="M 236 384 C 180 376 136 328 136 248 C 136 172 176 138 206 138 C 220 138 226 148 218 160 C 206 178 174 200 174 250 C 174 300 204 336 244 348 Z" fill="currentColor" />
+
+  <!-- Lyre Right Wing / Arm -->
+  <path d="M 276 384 C 332 376 376 328 376 248 C 376 172 336 138 306 138 C 292 138 286 148 294 160 C 306 178 338 200 338 250 C 338 300 308 336 268 348 Z" fill="currentColor" />
+
+  <!-- Lyre Sound Box / Base Cradle -->
+  <path d="M 200 368 C 220 404 292 404 312 368 C 286 382 226 382 200 368 Z" fill="currentColor" />
+
+  <!-- 4 Harmonic Acoustic Strings / Sound Wave Bars -->
+  <rect x="210" y="220" width="14" height="136" rx="7" fill="currentColor" />
+  <rect x="238" y="176" width="14" height="186" rx="7" fill="currentColor" />
+  <rect x="266" y="176" width="14" height="186" rx="7" fill="currentColor" />
+  <rect x="294" y="220" width="14" height="136" rx="7" fill="currentColor" />
+
+  <!-- Center Acoustic Harmonic Node -->
+  <circle cx="259" cy="270" r="10" fill="currentColor" />
+
+  <!-- Vega Star (4-point brilliance star at upper right) -->
+  <path d="M 372 100 Q 372 128 396 128 Q 372 128 372 156 Q 372 128 348 128 Q 372 128 372 100 Z" fill="currentColor" />
+  <circle cx="372" cy="128" r="4" fill="currentColor" />
+</svg>

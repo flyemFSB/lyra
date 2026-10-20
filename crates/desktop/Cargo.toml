@@ -1,6 +1,6 @@
 [package]
 name        = "lyra"
-description = "酷狗概念版桌面客户端（薄二进制：装配 + 启动）"
+description = "Lyra音乐桌面客户端（薄二进制：装配 + 启动）"
 version.workspace      = true
 edition.workspace      = true
 rust-version.workspace = true

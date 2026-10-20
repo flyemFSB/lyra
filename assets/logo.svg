@@ -1,0 +1,83 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="512" height="512">
+  <defs>
+    <!-- Background Gradient: Emerald to Dark Cyan -->
+    <linearGradient id="bgGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#10b981" />
+      <stop offset="55%" stop-color="#059669" />
+      <stop offset="100%" stop-color="#0f766e" />
+    </linearGradient>
+
+    <!-- Glass Sheen / Highlight -->
+    <linearGradient id="sheenGrad" x1="0%" y1="0%" x2="0%" y2="100%">
+      <stop offset="0%" stop-color="#ffffff" stop-opacity="0.35" />
+      <stop offset="40%" stop-color="#ffffff" stop-opacity="0.08" />
+      <stop offset="100%" stop-color="#ffffff" stop-opacity="0.0" />
+    </linearGradient>
+
+    <!-- Emblem Gradient -->
+    <linearGradient id="emblemGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#ffffff" />
+      <stop offset="100%" stop-color="#ecfeff" />
+    </linearGradient>
+
+    <!-- Star Gradient -->
+    <linearGradient id="starGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#ffffff" />
+      <stop offset="60%" stop-color="#fef08a" />
+      <stop offset="100%" stop-color="#facc15" />
+    </linearGradient>
+
+    <!-- Drop Shadow for the Emblem -->
+    <filter id="emblemShadow" x="-20%" y="-20%" width="140%" height="140%">
+      <feDropShadow dx="0" dy="8" stdDeviation="10" flood-color="#022c22" flood-opacity="0.45" />
+    </filter>
+
+    <!-- Background Card Shadow -->
+    <filter id="badgeShadow" x="-15%" y="-15%" width="130%" height="130%">
+      <feDropShadow dx="0" dy="16" stdDeviation="20" flood-color="#022c22" flood-opacity="0.35" />
+    </filter>
+  </defs>
+
+  <!-- Base Squircle -->
+  <rect x="24" y="24" width="464" height="464" rx="116" fill="url(#bgGrad)" filter="url(#badgeShadow)" />
+  <!-- Glass Sheen Overlay -->
+  <rect x="24" y="24" width="464" height="464" rx="116" fill="url(#sheenGrad)" />
+  <!-- Crisp Inner Border -->
+  <rect x="25" y="25" width="462" height="462" rx="115" fill="none" stroke="#ffffff" stroke-width="2.5" stroke-opacity="0.3" />
+
+  <!-- Subtle Harmonic Constellation Orbit Rings -->
+  <circle cx="256" cy="270" r="160" fill="none" stroke="#ffffff" stroke-width="1.5" stroke-opacity="0.12" stroke-dasharray="8 6" />
+  <circle cx="256" cy="270" r="206" fill="none" stroke="#ffffff" stroke-width="1" stroke-opacity="0.06" />
+
+  <!-- Emblem Group with Shadow -->
+  <g filter="url(#emblemShadow)">
+    <!-- Lyre Left Wing / Arm -->
+    <path d="M 236 384 C 180 376 136 328 136 248 C 136 172 176 138 206 138 C 220 138 226 148 218 160 C 206 178 174 200 174 250 C 174 300 204 336 244 348 Z" fill="url(#emblemGrad)" />
+
+    <!-- Lyre Right Wing / Arm -->
+    <path d="M 276 384 C 332 376 376 328 376 248 C 376 172 336 138 306 138 C 292 138 286 148 294 160 C 306 178 338 200 338 250 C 338 300 308 336 268 348 Z" fill="url(#emblemGrad)" />
+
+    <!-- Lyre Sound Box / Base Cradle -->
+    <path d="M 200 368 C 220 404 292 404 312 368 C 286 382 226 382 200 368 Z" fill="url(#emblemGrad)" />
+
+    <!-- 4 Harmonic Acoustic Strings / Sound Wave Equalizer Bars -->
+    <!-- String 1 -->
+    <rect x="210" y="220" width="14" height="136" rx="7" fill="url(#emblemGrad)" />
+    <!-- String 2 -->
+    <rect x="238" y="176" width="14" height="186" rx="7" fill="url(#emblemGrad)" />
+    <!-- String 3 -->
+    <rect x="266" y="176" width="14" height="186" rx="7" fill="url(#emblemGrad)" />
+    <!-- String 4 -->
+    <rect x="294" y="220" width="14" height="136" rx="7" fill="url(#emblemGrad)" />
+
+    <!-- Center Acoustic Harmonic Node -->
+    <circle cx="259" cy="270" r="10" fill="#10b981" stroke="#ffffff" stroke-width="3.5" />
+
+    <!-- Vega Star (4-point brilliance star at upper right) -->
+    <!-- Star Glow -->
+    <circle cx="372" cy="128" r="28" fill="#fef08a" fill-opacity="0.3" />
+    <!-- Star Diamond Ray Path -->
+    <path d="M 372 100 Q 372 128 396 128 Q 372 128 372 156 Q 372 128 348 128 Q 372 128 372 100 Z" fill="url(#starGrad)" />
+    <circle cx="372" cy="128" r="4" fill="#ffffff" />
+  </g>
+</svg>

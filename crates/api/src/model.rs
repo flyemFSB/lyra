@@ -460,11 +460,11 @@ pub struct QualityRight {
     pub status: i64,
     /// 是否需要 VIP
     pub need_vip: bool,
-    /// 概念版无版权或已下架标记
+    /// 无版权或已下架标记
     pub no_copyright: bool,
     /// 是否可直接获取
     pub obtainable: bool,
-    /// 概念版免费听活动命中
+    /// 免费听活动命中
     pub free_listen: bool,
     /// 要求的 VIP 类型（如 concept 或 suvip）
     pub require_vip_type: String,
@@ -561,7 +561,7 @@ impl VipStatus {
         Self { entries }
     }
 
-    /// 获取概念版畅听 VIP 条目
+    /// 获取畅听 VIP 条目
     #[must_use]
     pub fn concept(&self) -> Option<&VipEntry> {
         self.entries
@@ -569,14 +569,14 @@ impl VipStatus {
             .find(|e| e.busi_type.eq_ignore_ascii_case("concept") && e.product_type.eq_ignore_ascii_case("svip"))
     }
 
-    /// 检查当前概念版 VIP 是否有效
+    /// 检查当前畅听 VIP 是否有效
     #[must_use]
     pub fn is_concept_active(&self) -> bool {
         let now = crate::spec::now_millis();
         self.concept().is_some_and(|e| e.is_active_at(now))
     }
 
-    /// 获取概念版 VIP 到期时间戳（毫秒）
+    /// 获取畅听 VIP 到期时间戳（毫秒）
     #[must_use]
     pub fn concept_expires_at(&self) -> Option<i64> {
         self.concept().map(|e| e.end_ms)
@@ -847,7 +847,7 @@ mod tests {
 
     #[test]
     fn vip_status_uses_busi_vip_not_top_level_flags() {
-        // 概念版通过 busi_vip 判断权益有效性。
+        // 通过 busi_vip 判断权益有效性。
         let value = json!({
             "status": 1, "vip_type": 0, "is_vip": 0,
             "data": {"busi_vip": [

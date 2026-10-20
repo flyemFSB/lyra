@@ -96,7 +96,7 @@ impl SettingsView {
     pub(crate) fn on_claim(&mut self, result: Result<(), String>, cx: &mut Context<Self>) {
         match result {
             Ok(()) => {
-                self.last_action = Some(SharedString::new_static("已成功领取今日概念版畅听 VIP"));
+                self.last_action = Some(SharedString::new_static("已成功领取今日畅听 VIP"));
                 self.loaded = false;
                 self.ensure();
             }
@@ -268,7 +268,7 @@ impl Render for SettingsView {
                                     .text_sm()
                                     .font_weight(FontWeight::BOLD)
                                     .text_color(TEXT_PRIMARY)
-                                    .child("酷狗概念版畅听 VIP"),
+                                    .child("Lyra音乐畅听 VIP"),
                             )
                             .child(badge(
                                 if is_vip_active { "有效" } else { "未开通" },
@@ -296,7 +296,7 @@ impl Render for SettingsView {
                     .primary()
                     .icon(IconName::Sparkles)
                     .label("一键免费领取 VIP")
-                    .tooltip("每日可领取一次概念版畅听权益")
+                    .tooltip("每日可领取一次畅听权益")
                     .on_click(cx.listener(|view, _event, _window, cx| view.claim_vip(cx))),
             );
 
@@ -485,6 +485,45 @@ impl Render for SettingsView {
                                     ),
                             )
                             .child(account_row),
+                    )
+                    .child(
+                        v_flex()
+                            .p_4()
+                            .rounded(px(12.0))
+                            .bg(CARD_BG)
+                            .border_1()
+                            .border_color(CARD_BORDER)
+                            .shadow_sm()
+                            .gap(px(12.0))
+                            .child(
+                                h_flex()
+                                    .gap(px(12.0))
+                                    .items_center()
+                                    .child(crate::logo::lyra_logo_icon(44.0))
+                                    .child(
+                                        v_flex()
+                                            .gap(px(2.0))
+                                            .child(
+                                                h_flex()
+                                                    .gap(px(8.0))
+                                                    .items_center()
+                                                    .child(
+                                                        div()
+                                                            .text_sm()
+                                                            .font_weight(FontWeight::BOLD)
+                                                            .text_color(TEXT_PRIMARY)
+                                                            .child("Lyra音乐"),
+                                                    )
+                                                    .child(badge("v0.1.0", ACCENT_GREEN_LIGHT, ACCENT_GREEN_HOVER)),
+                                            )
+                                            .child(
+                                                div()
+                                                    .text_xs()
+                                                    .text_color(TEXT_MUTED)
+                                                    .child("基于 Rust 与 GPUI 构建的高性能、低开销轻量桌面音乐客户端"),
+                                            ),
+                                    ),
+                            ),
                     ),
             )
             .children(status)

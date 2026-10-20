@@ -65,8 +65,8 @@ pub enum Error {
     /// 响应成功但关键数据为空
     #[error("empty data: {0}")]
     EmptyData(String),
-    /// 概念版无版权或歌曲已下架
-    #[error("no copyright in the concept edition: {0}")]
+    /// 无版权或歌曲已下架
+    #[error("no copyright: {0}")]
     NoCopyright(String),
     /// 需会员或单独购买且无试听片段
     #[error("entitlement required: {0}")]
