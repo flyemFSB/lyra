@@ -518,20 +518,58 @@ impl SongRights {
 pub struct VipEntry {
     /// 业务类型（如 concept）
     pub busi_type: String,
-    /// 产品类型（如 svip）
+    /// 产品类型（如 svip / tvip）
     pub product_type: String,
+    /// 是否为有效 VIP（对应上游 is_vip 字段）
+    pub is_vip: bool,
     /// 生效时间戳（毫秒）
     pub begin_ms: i64,
     /// 到期时间戳（毫秒）
     pub end_ms: i64,
+    /// 原始到期时间字符串（如 "2026-10-21 13:41:21"）
+    pub end_time_str: String,
 }
 
 impl VipEntry {
     /// 检查指定时间戳是否处于会员有效期内
     #[must_use]
     pub fn is_active_at(&self, now_ms: i64) -> bool {
-        now_ms >= self.begin_ms && now_ms < self.end_ms
+        if self.end_ms > 0 {
+            return now_ms < self.end_ms && (self.begin_ms == 0 || now_ms >= self.begin_ms);
+        }
+        self.is_vip
     }
+}
+
+/// 解析时间为 Unix 毫秒时间戳（支持数字时间戳与 "YYYY-MM-DD HH:MM:SS" 格式）
+fn parse_time_ms(v: &Value, keys: &[&str]) -> i64 {
+    for key in keys {
+        if let Some(val) = v.get(*key) {
+            if let Some(n) = val.as_i64()
+                && n > 0
+            {
+                return if n > 1_000_000_000_000 { n } else { n * 1000 };
+            }
+            if let Some(s) = val.as_str() {
+                let s = s.trim();
+                if s.is_empty() {
+                    continue;
+                }
+                if let Ok(n) = s.parse::<i64>()
+                    && n > 0
+                {
+                    return if n > 1_000_000_000_000 { n } else { n * 1000 };
+                }
+                if let Ok(dt) = chrono::NaiveDateTime::parse_from_str(s, "%Y-%m-%d %H:%M:%S")
+                    && let Some(cst) = chrono::FixedOffset::east_opt(8 * 3600)
+                    && let Some(dt_cst) = dt.and_local_timezone(cst).single()
+                {
+                    return dt_cst.timestamp_millis();
+                }
+            }
+        }
+    }
+    0
 }
 
 /// VIP 权益状态汇总
@@ -549,11 +587,17 @@ impl VipStatus {
             .map(|items| {
                 items
                     .iter()
-                    .map(|item| VipEntry {
-                        busi_type: codec::pick_str(item, &["busi_type", "busitype"]),
-                        product_type: codec::pick_str(item, &["product_type", "producttype"]),
-                        begin_ms: codec::pick_i64(item, &["vip_begin_time", "begin_time", "begin"]),
-                        end_ms: codec::pick_i64(item, &["vip_end_time", "end_time", "end"]),
+                    .map(|item| {
+                        let is_vip = codec::pick_i64(item, &["is_vip"]) == 1;
+                        let end_time_str = codec::pick_str(item, &["vip_end_time", "end_time", "end"]);
+                        VipEntry {
+                            busi_type: codec::pick_str(item, &["busi_type", "busitype"]),
+                            product_type: codec::pick_str(item, &["product_type", "producttype"]),
+                            is_vip,
+                            begin_ms: parse_time_ms(item, &["vip_begin_time", "begin_time", "begin"]),
+                            end_ms: parse_time_ms(item, &["vip_end_time", "end_time", "end"]),
+                            end_time_str,
+                        }
                     })
                     .collect()
             })
@@ -564,9 +608,20 @@ impl VipStatus {
     /// 获取畅听 VIP 条目
     #[must_use]
     pub fn concept(&self) -> Option<&VipEntry> {
+        let now = crate::spec::now_millis();
         self.entries
             .iter()
-            .find(|e| e.busi_type.eq_ignore_ascii_case("concept") && e.product_type.eq_ignore_ascii_case("svip"))
+            .find(|e| {
+                e.busi_type.eq_ignore_ascii_case("concept")
+                    && (e.product_type.eq_ignore_ascii_case("svip") || e.product_type.eq_ignore_ascii_case("tvip"))
+                    && e.is_active_at(now)
+            })
+            .or_else(|| {
+                self.entries.iter().find(|e| {
+                    e.busi_type.eq_ignore_ascii_case("concept")
+                        && (e.product_type.eq_ignore_ascii_case("svip") || e.product_type.eq_ignore_ascii_case("tvip"))
+                })
+            })
     }
 
     /// 检查当前畅听 VIP 是否有效
@@ -580,6 +635,14 @@ impl VipStatus {
     #[must_use]
     pub fn concept_expires_at(&self) -> Option<i64> {
         self.concept().map(|e| e.end_ms)
+    }
+
+    /// 获取畅听 VIP 到期时间字符串（如 "2026-10-21 13:41:21"）
+    #[must_use]
+    pub fn concept_expires_str(&self) -> Option<&str> {
+        self.concept()
+            .map(|e| e.end_time_str.as_str())
+            .filter(|s| !s.is_empty())
     }
 }
 

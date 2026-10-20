@@ -371,7 +371,7 @@ pub async fn vip_status(api: &Api) -> Result<VipStatus> {
     let spec = RequestSpec::get("/v1/get_union_vip")
         .base(crate::spec::VIP_BASE)
         .param("busi_type", "concept");
-    let value = api.call(spec, Freshness::ACCOUNT).await?;
+    let value = api.call(spec, Freshness::NoStore).await?;
     Ok(VipStatus::from_value(&value))
 }
 

@@ -3,7 +3,7 @@
 use gpui_kit::assets::IconName;
 use gpui_kit::component::button::{Button, ButtonVariants};
 use gpui_kit::component::input::{Input, InputState};
-use gpui_kit::component::{Icon, Sizable as _, h_flex, v_flex};
+use gpui_kit::component::{Disableable as _, Icon, Sizable as _, h_flex, v_flex};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use lyra_api::model::VipStatus;
@@ -97,6 +97,7 @@ impl SettingsView {
         match result {
             Ok(()) => {
                 self.last_action = Some(SharedString::new_static("已成功领取今日畅听 VIP"));
+                self.backend.app().clear_cache();
                 self.loaded = false;
                 self.ensure();
             }
@@ -197,11 +198,17 @@ impl SettingsView {
     }
 
     /// 获取会员状态展示文案
-    fn vip_label(&self) -> &'static str {
+    fn vip_label(&self) -> String {
         match &self.vip {
-            Some(vip) if vip.is_concept_active() => "畅听 VIP 权益生效中",
-            Some(_) => "未开通畅听 VIP（点击右侧一键领取）",
-            None => "会员状态获取中…",
+            Some(vip) if vip.is_concept_active() => {
+                if let Some(exp) = vip.concept_expires_str() {
+                    format!("今日畅听 VIP 权益生效中（有效期至 {exp}）")
+                } else {
+                    "今日畅听 VIP 权益生效中".to_string()
+                }
+            }
+            Some(_) => "今日未领取畅听 VIP（点击右侧一键领取）".to_string(),
+            None => "会员状态获取中…".to_string(),
         }
     }
 }
@@ -271,7 +278,7 @@ impl Render for SettingsView {
                                     .child("Lyra音乐畅听 VIP"),
                             )
                             .child(badge(
-                                if is_vip_active { "有效" } else { "未开通" },
+                                if is_vip_active { "已领取" } else { "未领取" },
                                 if is_vip_active {
                                     ACCENT_GREEN_LIGHT
                                 } else {
@@ -293,11 +300,20 @@ impl Render for SettingsView {
             )
             .child(
                 Button::new("claim_vip")
-                    .primary()
-                    .icon(IconName::Sparkles)
-                    .label("一键免费领取 VIP")
-                    .tooltip("每日可领取一次畅听权益")
-                    .on_click(cx.listener(|view, _event, _window, cx| view.claim_vip(cx))),
+                    .when(is_vip_active, |b| {
+                        b.ghost()
+                            .disabled(true)
+                            .icon(IconName::Sparkles)
+                            .label("今日已领取")
+                            .tooltip("今日畅听 VIP 权益已生效")
+                    })
+                    .when(!is_vip_active, |b| {
+                        b.primary()
+                            .icon(IconName::Sparkles)
+                            .label("一键免费领取 VIP")
+                            .tooltip("每日可领取一次畅听权益")
+                            .on_click(cx.listener(|view, _event, _window, cx| view.claim_vip(cx)))
+                    }),
             );
 
         // 缓存容量预设

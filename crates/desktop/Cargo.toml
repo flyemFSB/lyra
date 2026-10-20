@@ -18,3 +18,7 @@ tracing-subscriber = { workspace = true }
 
 [lints]
 workspace = true
+
+[target.'cfg(windows)'.build-dependencies]
+embed-resource = "3.0"
+

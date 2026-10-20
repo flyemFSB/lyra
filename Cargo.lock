@@ -3728,6 +3728,7 @@ dependencies = [
 name = "lyra"
 version = "0.1.0"
 dependencies = [
+ "embed-resource",
  "lyra-app",
  "lyra-ui",
  "tokio",
@@ -3740,6 +3741,7 @@ version = "0.1.0"
 dependencies = [
  "async-channel",
  "async-trait",
+ "chrono",
  "dashmap",
  "futures",
  "lyra-proto",
