@@ -42,7 +42,7 @@ WizardStyle=modern
 
 ; 打包压缩配置与输出目标
 OutputDir={#OutputDir}
-OutputBaseFilename={#AppName}-v{#AppVersion}-windows-x64-setup
+OutputBaseFilename=Lyra-v{#AppVersion}-windows-x64-setup
 Compression=lzma2/ultra64
 SolidCompression=yes
 SetupIconFile=logo.ico
