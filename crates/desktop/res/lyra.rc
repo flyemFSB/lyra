@@ -1,3 +1,4 @@
+// Lyra 应用图标。
+// 应用清单（RT_MANIFEST）由 GPUI（gpui-pre 的 windows-manifest 特性）提供，
+// 此处不可重复声明，否则链接期会报 CVT1100「资源重复」。
 1 ICON "logo.ico"
-#define RT_MANIFEST 24
-1 RT_MANIFEST "gpui.manifest.xml"
