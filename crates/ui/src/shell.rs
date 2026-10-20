@@ -68,7 +68,7 @@ pub(crate) struct AppShell {
     closing_lyrics: bool,
     /// 歌词收起动效序号
     closing_lyrics_seq: u64,
-    _lyrics_close_task: Option<Task<()>>,
+    lyrics_close_task: Option<Task<()>>,
     /// 导航切换序号
     pub(crate) nav_seq: u64,
     /// 轻提示变更序号（驱动浮动提示下落动效）
@@ -115,7 +115,7 @@ impl AppShell {
             show_queue: false,
             closing_lyrics: false,
             closing_lyrics_seq: 1,
-            _lyrics_close_task: None,
+            lyrics_close_task: None,
             nav_seq: 1,
             toast_seq: 1,
             queue_seq: 1,
@@ -224,7 +224,7 @@ impl AppShell {
     /// 切换导航页面并记录历史栈
     pub(crate) fn set_nav(&mut self, nav: Nav, cx: &mut Context<Self>) {
         self.closing_lyrics = false;
-        self._lyrics_close_task = None;
+        self.lyrics_close_task = None;
         if self.nav != nav {
             self.history.truncate(self.history_idx + 1);
             self.history.push(nav);
@@ -268,7 +268,7 @@ impl AppShell {
                 .await;
             this.update(cx, |shell, cx| {
                 shell.closing_lyrics = false;
-                shell._lyrics_close_task = None;
+                shell.lyrics_close_task = None;
                 while shell.history_idx > 0 && shell.history[shell.history_idx] == Nav::Lyrics {
                     shell.history_idx -= 1;
                 }
@@ -277,13 +277,12 @@ impl AppShell {
                 } else {
                     shell.nav = shell.history[shell.history_idx];
                 }
-                shell.nav_seq += 1;
                 shell.ensure_loaded(cx);
                 cx.notify();
             })
             .ok();
         });
-        self._lyrics_close_task = Some(task);
+        self.lyrics_close_task = Some(task);
     }
 
     /// 前进至历史下一页
@@ -721,7 +720,11 @@ impl AppShell {
             .shadow_sm();
 
         let pill: AnyElement = if tab_seq <= 1 {
-            let left_pos = if tab == PlaylistTab::Created { px(3.0) } else { px(100.0) };
+            let left_pos = if tab == PlaylistTab::Created {
+                px(3.0)
+            } else {
+                px(100.0)
+            };
             pill_base.left(left_pos).into_any_element()
         } else {
             let (from_x, to_x) = if tab == PlaylistTab::Collected {
@@ -759,9 +762,7 @@ impl AppShell {
                             .items_center()
                             .justify_center()
                             .text_xs()
-                            .when(is_created, |s| {
-                                s.text_color(TEXT_PRIMARY).font_weight(FontWeight::BOLD)
-                            })
+                            .when(is_created, |s| s.text_color(TEXT_PRIMARY).font_weight(FontWeight::BOLD))
                             .when(!is_created, |s| {
                                 s.text_color(TEXT_MUTED)
                                     .font_weight(FontWeight::MEDIUM)
@@ -774,6 +775,7 @@ impl AppShell {
                                         .update(cx, |p, cx| p.switch_tab(PlaylistTab::Created, cx));
                                 }
                                 shell.set_nav(Nav::Playlists, cx);
+                                cx.notify();
                             }))
                             .child("自建歌单"),
                     )
@@ -803,6 +805,7 @@ impl AppShell {
                                         .update(cx, |p, cx| p.switch_tab(PlaylistTab::Collected, cx));
                                 }
                                 shell.set_nav(Nav::Playlists, cx);
+                                cx.notify();
                             }))
                             .child("收藏歌单"),
                     ),
@@ -869,6 +872,7 @@ impl AppShell {
                             views.playlists.update(cx, |p, cx| p.select(index, cx));
                         }
                         shell.set_nav(Nav::Playlists, cx);
+                        cx.notify();
                     }))
                     .child(if is_liked {
                         div()
@@ -1200,7 +1204,10 @@ impl Render for AppShell {
                             .h_full()
                             .overflow_hidden()
                             .child(self.top_header(cx))
-                            .child(div().flex_1().min_h(px(0.0)).child(body)),
+                            .child(div().flex_1().min_h(px(0.0)).child(crate::motion::page_entrance(
+                                div().relative().size_full().child(body),
+                                ("main_route_page", self.nav_seq),
+                            ))),
                     )
                     .children(lyrics_exit_overlay)
                     .children(self.queue_drawer(cx))

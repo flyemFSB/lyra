@@ -4,12 +4,15 @@ use std::time::Duration;
 use gpui_kit::base::animation::ease_out_cubic;
 use gpui_kit::component::Icon;
 use gpui_kit::{
-    Animation, AnimationElement, AnimationExt as _, AnyElement, ElementId, IntoElement, Styled,
-    Transformation, linear, percentage, pulsating_between, px,
+    Animation, AnimationElement, AnimationExt as _, AnyElement, ElementId, IntoElement, Styled, Transformation, linear,
+    percentage, pulsating_between, px,
 };
 
 /// 歌单胶囊指示器滑动切换动画时长（200ms）
 pub(crate) const CAPSULE_TRANSITION_DURATION: Duration = Duration::from_millis(200);
+
+/// 页面视图切换平滑过渡动画时长（180ms，轻盈丝滑）
+pub(crate) const PAGE_TRANSITION_DURATION: Duration = Duration::from_millis(180);
 
 /// 浮动轻提示入场动画时长（240ms，优雅下落）
 pub(crate) const TOAST_TRANSITION_DURATION: Duration = Duration::from_millis(240);
@@ -25,6 +28,21 @@ pub(crate) const SPINNER_ROTATION_DURATION: Duration = Duration::from_millis(100
 
 /// 播放脉冲动画时长（1600ms 呼吸周期）
 pub(crate) const PULSE_DURATION: Duration = Duration::from_millis(1600);
+
+/// 为主内容区各视图提供轻缓上浮淡入过渡动效（微位移 8px + 透明度渐入）
+pub(crate) fn page_entrance<E: IntoElement + Styled + 'static>(
+    element: E,
+    id: impl Into<ElementId>,
+) -> AnimationElement<E> {
+    element.with_animation(
+        id,
+        Animation::new(PAGE_TRANSITION_DURATION).with_easing(ease_out_cubic),
+        |this, delta| {
+            let offset = px(8.0 * (1.0 - delta));
+            this.relative().top(offset).opacity(0.40 + 0.60 * delta)
+        },
+    )
+}
 
 /// 为侧边栏歌单胶囊切换器（自建歌单 / 收藏歌单）提供平滑滑动的背景指示块动效
 pub(crate) fn capsule_pill_sliding<E: IntoElement + Styled + 'static>(
@@ -53,7 +71,7 @@ pub(crate) fn lyrics_open_entrance<E: IntoElement + Styled + 'static>(
         Animation::new(LYRICS_TRANSITION_DURATION).with_easing(ease_out_cubic),
         |this, delta| {
             let offset = px(30.0 * (1.0 - delta));
-            this.top(offset).opacity(delta)
+            this.relative().top(offset).opacity(delta)
         },
     )
 }
@@ -68,7 +86,7 @@ pub(crate) fn lyrics_close_exit<E: IntoElement + Styled + 'static>(
         Animation::new(LYRICS_TRANSITION_DURATION).with_easing(ease_out_cubic),
         |this, delta| {
             let offset = px(30.0 * delta);
-            this.top(offset).opacity(1.0 - delta)
+            this.relative().top(offset).opacity(1.0 - delta)
         },
     )
 }
@@ -97,8 +115,8 @@ pub(crate) fn drawer_entrance<E: IntoElement + Styled + 'static>(
         id,
         Animation::new(DRAWER_TRANSITION_DURATION).with_easing(ease_out_cubic),
         |this, delta| {
-            let offset = px(24.0 * (1.0 - delta));
-            this.right(offset).opacity(delta)
+            let offset = px(-24.0 * (1.0 - delta));
+            this.relative().right(offset).opacity(delta)
         },
     )
 }
@@ -107,9 +125,7 @@ pub(crate) fn drawer_entrance<E: IntoElement + Styled + 'static>(
 pub(crate) fn rotating_icon(icon: Icon, id: impl Into<ElementId>) -> AnyElement {
     icon.with_animation(
         id,
-        Animation::new(SPINNER_ROTATION_DURATION)
-            .repeat()
-            .with_easing(linear),
+        Animation::new(SPINNER_ROTATION_DURATION).repeat().with_easing(linear),
         |icon, delta| icon.transform(Transformation::rotate(percentage(delta))),
     )
     .into_any_element()
@@ -122,7 +138,7 @@ pub(crate) fn pulsating_icon(icon: Icon, id: impl Into<ElementId>) -> AnyElement
         Animation::new(PULSE_DURATION)
             .repeat()
             .with_easing(pulsating_between(0.50, 1.0)),
-        |icon, alpha| icon.opacity(alpha),
+        gpui_kit::Styled::opacity,
     )
     .into_any_element()
 }

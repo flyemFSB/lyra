@@ -113,9 +113,9 @@ impl Song {
             let title_part = title_part.trim();
             if !artist_part.is_empty() && !title_part.is_empty() {
                 if singer.is_empty() {
-                    singer = artist_part.to_owned();
+                    artist_part.clone_into(&mut singer);
                 }
-                name = title_part.to_owned();
+                name = String::from(title_part);
             }
         }
 

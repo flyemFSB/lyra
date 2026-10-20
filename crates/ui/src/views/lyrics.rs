@@ -308,7 +308,7 @@ impl LyricsView {
                                 Animation::new(Duration::from_millis(2400))
                                     .repeat()
                                     .with_easing(pulsating_between(0.25, 0.65)),
-                                |this, alpha| this.opacity(alpha),
+                                gpui_kit::Styled::opacity,
                             )
                             .into_any_element()
                         } else {
@@ -546,7 +546,7 @@ impl Render for LyricsView {
                             .icon(IconName::ChevronLeft)
                             .tooltip("返回主界面")
                             .on_click(move |_event, _window, cx| {
-                                shell_exit.update(cx, |shell, cx| shell.close_lyrics(cx)).ok();
+                                shell_exit.update(cx, crate::shell::AppShell::close_lyrics).ok();
                             }),
                     ),
             )
