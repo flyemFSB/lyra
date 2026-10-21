@@ -12,7 +12,9 @@ use lyra_api::model::{Page, Playlist, Song};
 
 use crate::bridge::{Backend, Msg};
 use crate::shell::AppShell;
-use crate::theme::{CARD_BORDER, TEXT_MUTED, cover_box, notice_with_icon, row_sizes, title};
+use crate::theme::{
+    CARD_BORDER, TEXT_MUTED, cover_box, friendly_error_message, notice_with_icon, row_sizes, title,
+};
 use crate::views::player::PlayerModel;
 use crate::views::tracks::{RowContext, TrackRow, build_rows, current_play_state, track_row};
 
@@ -185,7 +187,10 @@ impl PlaylistsView {
                     self.select(first, cx);
                 }
             }
-            Err(error) => self.error = Some(error.into()),
+            Err(error) => {
+                tracing::warn!(%error, "加载歌单失败");
+                self.error = Some(friendly_error_message(&error).into());
+            }
         }
         cx.notify();
     }
@@ -254,11 +259,12 @@ impl PlaylistsView {
                 self.error = None;
             }
             Err(error) => {
+                tracing::warn!(%error, "加载曲目失败");
                 if appending {
-                    self.backend.send(Msg::Toast(format!("加载更多失败: {error}")));
+                    self.backend.send(Msg::Toast(friendly_error_message(&error)));
                 } else {
                     self.next_page = None;
-                    self.error = Some(error.into());
+                    self.error = Some(friendly_error_message(&error).into());
                 }
             }
         }
@@ -366,7 +372,7 @@ impl PlaylistsView {
                 Button::new("load_more")
                     .ghost()
                     .small()
-                    .icon(IconName::RefreshCw)
+                    .icon(IconName::ChevronDown)
                     .label(if self.appending { "加载中…" } else { "加载更多" })
                     .on_click(cx.listener(|view, _event, _window, cx| view.load_more(cx))),
             );

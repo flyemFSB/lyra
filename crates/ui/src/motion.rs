@@ -9,6 +9,7 @@ use gpui_kit::{
 };
 
 /// 歌单胶囊指示器滑动切换动画时长（200ms）
+#[allow(dead_code)]
 pub(crate) const CAPSULE_TRANSITION_DURATION: Duration = Duration::from_millis(200);
 
 /// 页面视图切换平滑过渡动画时长（180ms，轻盈丝滑）
@@ -45,6 +46,7 @@ pub(crate) fn page_entrance<E: IntoElement + Styled + 'static>(
 }
 
 /// 为侧边栏歌单胶囊切换器（自建歌单 / 收藏歌单）提供平滑滑动的背景指示块动效
+#[allow(dead_code)]
 pub(crate) fn capsule_pill_sliding<E: IntoElement + Styled + 'static>(
     element: E,
     id: impl Into<ElementId>,
@@ -91,7 +93,7 @@ pub(crate) fn lyrics_close_exit<E: IntoElement + Styled + 'static>(
     )
 }
 
-/// 为浮动 Toast 提示提供轻缓下落与透明度渐入动效（从 top: 4px 下移至 16px）
+/// 为顶部浮动 Toast 弹窗提供轻缓自顶部滑落与透明度渐入动效（从 top: 2px 下移至 14px）
 pub(crate) fn toast_entrance<E: IntoElement + Styled + 'static>(
     element: E,
     id: impl Into<ElementId>,
@@ -101,7 +103,7 @@ pub(crate) fn toast_entrance<E: IntoElement + Styled + 'static>(
         Animation::new(TOAST_TRANSITION_DURATION).with_easing(ease_out_cubic),
         |this, delta| {
             let offset = px(12.0 * (1.0 - delta));
-            this.top(px(16.0) - offset).opacity(delta)
+            this.top(px(14.0) - offset).opacity(delta)
         },
     )
 }

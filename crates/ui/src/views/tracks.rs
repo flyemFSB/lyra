@@ -13,8 +13,8 @@ use crate::bridge::{Backend, Msg};
 use crate::format::format_duration;
 use crate::shell::AppShell;
 use crate::theme::{
-    ACCENT_GREEN, ACCENT_GREEN_BORDER, ACCENT_GREEN_HOVER, ACCENT_GREEN_LIGHT, ROW_HEIGHT, SURFACE_HOVER, TEXT_FAINT,
-    TEXT_MUTED, TEXT_PRIMARY, badge, cover_box,
+    ACCENT_GREEN, ROW_HEIGHT, SURFACE_HOVER, TEXT_FAINT, TEXT_MUTED, TEXT_PRIMARY,
+    friendly_error_message, hex_rgb, song_cover, sq_badge,
 };
 use crate::views::player::PlayerModel;
 
@@ -31,6 +31,8 @@ pub(crate) struct TrackRow {
     pub(crate) duration: SharedString,
     /// 序号文本（01、02…）
     pub(crate) index: SharedString,
+    /// 封面图片 URL
+    pub(crate) cover: SharedString,
 }
 
 /// 为一组歌曲预构建展示模型
@@ -43,6 +45,7 @@ pub(crate) fn build_rows(songs: &[Song]) -> Vec<TrackRow> {
             singer: SharedString::from(song.display_singer()),
             duration: format_duration(song.duration_ms),
             index: SharedString::from(format!("{:02}", index + 1)),
+            cover: SharedString::from(song.cover_at(120)),
         })
         .collect()
 }
@@ -109,58 +112,52 @@ pub(crate) fn track_row(
         .h(px(ROW_HEIGHT))
         .w_full()
         .px_3()
-        .gap(px(12.0))
+        .gap(px(10.0))
         .rounded(px(8.0))
         .cursor_pointer()
-        .when(is_current, |this| {
-            this.bg(ACCENT_GREEN_LIGHT)
-                .border_1()
-                .border_color(ACCENT_GREEN_BORDER)
-        })
-        .when(!is_current, |this| {
-            this.hover(|style| style.bg(SURFACE_HOVER))
-        })
+        .items_center()
+        .when(is_current, |this| this.bg(hex_rgb(0xf2f4f7)))
+        .when(!is_current, |this| this.hover(|style| style.bg(SURFACE_HOVER)))
         .on_click(move |_event, _window, cx| {
             play_shell
                 .update(cx, |shell, cx| shell.play_queue(play_queue.clone(), index, cx))
                 .ok();
         })
-        // 序号或声波指示
+        // [ 序号 / 动态频谱 (24px) ]
         .child(
             div()
-                .w(px(28.0))
+                .w(px(24.0))
                 .flex()
                 .items_center()
                 .justify_center()
                 .when(is_current, |this| {
                     if is_playing {
                         this.child(crate::motion::pulsating_icon(
-                            Icon::new(IconName::AudioLines).size(px(16.0)).text_color(ACCENT_GREEN),
+                            Icon::new(IconName::AudioLines).size(px(15.0)).text_color(ACCENT_GREEN),
                             ("track_wave", index),
                         ))
                     } else {
-                        this.child(Icon::new(IconName::Music).size(px(16.0)).text_color(ACCENT_GREEN))
+                        this.child(Icon::new(IconName::Music).size(px(14.0)).text_color(ACCENT_GREEN))
                     }
                 })
                 .when(!is_current, |this| {
-                    this.child(div().text_sm().text_color(TEXT_FAINT).child(row.index.clone()))
+                    this.child(
+                        div()
+                            .text_xs()
+                            .font_weight(FontWeight::NORMAL)
+                            .text_color(TEXT_FAINT)
+                            .child(row.index.clone()),
+                    )
                 }),
         )
-        .child(
-            div()
-                .when(is_current, |this| {
-                    this.rounded(px(8.0))
-                        .border_1()
-                        .border_color(ACCENT_GREEN_BORDER)
-                })
-                .child(cover_box(row.title.as_ref(), 36.0)),
-        )
-        // 主标题：歌名；副标题：歌手名
+        // [ 封面 (40x40px, rounded 6px，支持真实封面图与优雅矢量降级) ]
+        .child(song_cover(row.cover.as_ref(), row.title.as_ref(), 40.0))
+        // [ 歌名 + SQ微标签 ]
         .child(
             v_flex()
                 .flex_1()
                 .min_w(px(0.0))
-                .gap(px(3.0))
+                .gap(px(2.0))
                 .child(
                     h_flex()
                         .gap(px(6.0))
@@ -171,31 +168,32 @@ pub(crate) fn track_row(
                                 .font_weight(if is_current {
                                     FontWeight::BOLD
                                 } else {
-                                    FontWeight::SEMIBOLD
+                                    FontWeight::MEDIUM
                                 })
-                                .text_color(if is_current {
-                                    ACCENT_GREEN_HOVER
-                                } else {
-                                    TEXT_PRIMARY
-                                })
+                                .text_color(TEXT_PRIMARY)
                                 .truncate()
                                 .child(row.title.clone()),
                         )
-                        .child(badge("SQ", ACCENT_GREEN_LIGHT, ACCENT_GREEN)),
+                        .child(sq_badge()),
                 )
                 .child(
                     div()
                         .text_xs()
-                        .text_color(if is_current {
-                            ACCENT_GREEN_HOVER
-                        } else {
-                            TEXT_MUTED
-                        })
+                        .text_color(TEXT_MUTED)
                         .truncate()
                         .child(row.singer.clone()),
                 ),
         )
-        .child(div().w(px(56.0)).text_xs().text_color(TEXT_FAINT).child(row.duration.clone()))
+        // [ 时长 (靠右, 等宽对齐) ]
+        .child(
+            div()
+                .w(px(52.0))
+                .text_right()
+                .text_xs()
+                .text_color(TEXT_FAINT)
+                .child(row.duration.clone()),
+        )
+        // [ 悬浮/行内操作图标 ]
         .child(
             Button::new(("like", index))
                 .ghost()
@@ -210,10 +208,13 @@ pub(crate) fn track_row(
                     let song = song.clone();
                     let app = like_backend.app();
                     like_backend.spawn(async move {
-                        Msg::Toast(match app.like(&song).await {
-                            Ok(()) => "已加入「我喜欢」".to_owned(),
-                            Err(error) => format!("收藏失败: {error}"),
-                        })
+                        match app.like(&song).await {
+                            Ok(()) => Msg::Noop,
+                            Err(error) => {
+                                tracing::warn!(%error, "收藏歌曲失败");
+                                Msg::Toast(friendly_error_message(&error.to_string()))
+                            }
+                        }
                     });
                 }),
         );

@@ -18,6 +18,9 @@ lyra-audio  = { workspace = true }
 async-channel = { workspace = true }
 tokio       = { version = "1", features = ["rt-multi-thread", "macros", "time"] }
 tracing     = { workspace = true }
+reqwest     = { workspace = true }
+anyhow      = { workspace = true }
+futures     = { workspace = true }
 
 # 纯函数单测使用普通 #[test]，无需启用 gpui-kit 的 test-support
 

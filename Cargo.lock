@@ -3825,11 +3825,14 @@ dependencies = [
 name = "lyra-ui"
 version = "0.1.0"
 dependencies = [
+ "anyhow",
  "async-channel",
+ "futures",
  "gpui-kit",
  "lyra-api",
  "lyra-app",
  "lyra-audio",
+ "reqwest",
  "tokio",
  "tracing",
 ]

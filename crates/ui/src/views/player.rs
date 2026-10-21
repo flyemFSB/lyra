@@ -17,8 +17,8 @@ use crate::bridge::{Backend, Msg, Nav};
 use crate::format::{format_duration, progress_percent};
 use crate::shell::AppShell;
 use crate::theme::{
-    ACCENT_GREEN, ACCENT_GREEN_HOVER, ACCENT_GREEN_LIGHT, CARD_BG, CARD_BORDER, TEXT_MUTED, TEXT_PRIMARY, badge,
-    cover_box,
+    ACCENT_GREEN, ACCENT_GREEN_HOVER, CARD_BG, TEXT_FAINT, TEXT_MUTED, TEXT_PRIMARY, badge,
+    hex_rgb, song_cover, sq_badge,
 };
 use crate::views::tracks::{TrackRow, build_rows};
 
@@ -162,15 +162,16 @@ impl PlayerModel {
         self.current_song().map(|song| song.hash.as_str())
     }
 
-    /// 获取当前曲目标题与歌手（仅在曲目真正变化时调用）
-    pub(crate) fn current_labels(&self) -> (Option<String>, SharedString, SharedString) {
+    /// 获取当前曲目标题、歌手与封面（仅在曲目真正变化时调用）
+    pub(crate) fn current_labels(&self) -> (Option<String>, SharedString, SharedString, SharedString) {
         self.current_song().map_or_else(
-            || (None, SharedString::new_static("未在播放"), SharedString::new_static("")),
+            || (None, SharedString::new_static("未在播放"), SharedString::new_static(""), SharedString::new_static("")),
             |song| {
                 (
                     Some(song.hash.clone()),
                     SharedString::from(song.display_title()),
                     SharedString::from(song.display_singer()),
+                    SharedString::from(song.cover_at(480)),
                 )
             },
         )
@@ -188,6 +189,17 @@ impl PlayerModel {
         self.queue = queue;
         self.index = index;
         self.snapshot.position_ms = 0;
+    }
+
+    /// 追加新曲目至队列末尾（用于红心电台连续流推荐）
+    pub(crate) fn append_songs(&mut self, new_songs: Vec<Song>) {
+        if new_songs.is_empty() {
+            return;
+        }
+        let mut queue = (*self.queue).clone();
+        queue.extend(new_songs);
+        self.rows = Arc::new(build_rows(&queue));
+        self.queue = Arc::new(queue);
     }
 
     /// 只切换当前索引（进度归零，避免沿用上一首的位置）
@@ -223,6 +235,7 @@ pub(crate) struct PlayerBar {
     playing: bool,
     title: SharedString,
     singer: SharedString,
+    cover: SharedString,
     current_hash: Option<String>,
     /// 时长文本（仅在总时长变化时重建）
     duration_text: SharedString,
@@ -306,6 +319,7 @@ impl PlayerBar {
             playing: false,
             title: SharedString::new_static("未在播放"),
             singer: SharedString::new_static(""),
+            cover: SharedString::new_static(""),
             current_hash: None,
             duration_text: SharedString::new_static("0:00"),
             queue_tip: SharedString::new_static("播放队列 (0 首)"),
@@ -335,10 +349,11 @@ impl PlayerBar {
             model.current_hash() != self.current_hash.as_deref()
         };
         if retitled {
-            let (hash, title, singer) = self.player.read(cx).current_labels();
+            let (hash, title, singer, cover) = self.player.read(cx).current_labels();
             self.current_hash = hash;
             self.title = title;
             self.singer = singer;
+            self.cover = cover;
         }
 
         let (percent, volume, playing) = {
@@ -481,20 +496,25 @@ impl Render for PlayerBar {
         let like_backend = self.backend.clone();
         let like_queue = queue.clone();
 
+        let vol_num = if is_muted {
+            0
+        } else {
+            value_single(self.volume.read(cx).value()).round().clamp(0.0, 100.0) as u32
+        };
+
         h_flex()
-            .h(px(76.0))
+            .h(px(72.0))
             .w_full()
             .px_5()
             .gap(px(16.0))
             .bg(CARD_BG)
-            .rounded(px(14.0))
-            .border_1()
-            .border_color(CARD_BORDER)
-            .shadow_sm()
+            .border_t_1()
+            .border_color(hex_rgb(0xe5e7eb))
+            .items_center()
             // 封面、曲目信息与收藏按钮
             .child(
                 h_flex()
-                    .w(px(260.0))
+                    .w(px(250.0))
                     .min_w(px(0.0))
                     .gap(px(12.0))
                     .items_center()
@@ -513,7 +533,7 @@ impl Render for PlayerBar {
                                 }).ok();
                             })
                             .hover(|s| s.opacity(0.85))
-                            .child(cover_box(self.title.as_ref(), 46.0)),
+                            .child(song_cover(self.cover.as_ref(), self.title.as_ref(), 44.0)),
                     )
                     .child(
                         v_flex()
@@ -532,7 +552,7 @@ impl Render for PlayerBar {
                                             .truncate()
                                             .child(self.title.clone()),
                                     )
-                                    .child(badge("SQ", ACCENT_GREEN_LIGHT, ACCENT_GREEN)),
+                                    .child(sq_badge()),
                             )
                             .child(
                                 div()
@@ -555,25 +575,25 @@ impl Render for PlayerBar {
                                 let song = song.clone();
                                 let app = like_backend.app();
                                 like_backend.spawn(async move {
-                                    Msg::Toast(match app.like(&song).await {
-                                        Ok(()) => "已加入「我喜欢」".to_owned(),
-                                        Err(error) => format!("收藏失败: {error}"),
-                                    })
+                                    match app.like(&song).await {
+                                        Ok(()) => Msg::Noop,
+                                        Err(error) => Msg::Toast(format!("收藏失败: {error}")),
+                                    }
                                 });
                             }),
                     ),
             )
-            // 核心控制区与进度条
+            // 核心控制区与进度条（紧凑居中平衡布局）
             .child(
                 v_flex()
                     .flex_1()
                     .min_w(px(0.0))
                     .items_center()
                     .justify_center()
-                    .gap(px(3.0))
+                    .gap(px(4.0))
                     .child(
                         h_flex()
-                            .gap(px(14.0))
+                            .gap(px(12.0))
                             .items_center()
                             // 切换播放模式
                             .child(
@@ -589,7 +609,6 @@ impl Render for PlayerBar {
                                             m
                                         });
                                         this.persist_mode(next);
-                                        this.backend.send(Msg::Toast(format!("已切换为：{}", mode_label(next))));
                                     })),
                             )
                             .child(
@@ -608,8 +627,8 @@ impl Render for PlayerBar {
                                     .id("toggle_play_btn")
                                     .role(Role::Button)
                                     .cursor_pointer()
-                                    .w(px(38.0))
-                                    .h(px(38.0))
+                                    .w(px(36.0))
+                                    .h(px(36.0))
                                     .rounded_full()
                                     .bg(ACCENT_GREEN)
                                     .hover(|s| s.bg(ACCENT_GREEN_HOVER))
@@ -618,7 +637,7 @@ impl Render for PlayerBar {
                                     .items_center()
                                     .justify_center()
                                     .on_click(cx.listener(|this, _event, _window, _cx| this.toggle()))
-                                    .child(Icon::new(play_icon).size(px(20.0)).text_color(rgb(0xffffff))),
+                                    .child(Icon::new(play_icon).size(px(18.0)).text_color(rgb(0xffffff))),
                             )
                             .child(
                                 Button::new("next")
@@ -631,18 +650,18 @@ impl Render for PlayerBar {
                                     }),
                             ),
                     )
-                    // 进度条
+                    // 进度条与对齐时间
                     .child(
                         h_flex()
                             .w_full()
-                            .gap(px(10.0))
+                            .gap(px(8.0))
                             .items_center()
                             .child(
                                 div()
-                                    .w(px(40.0))
+                                    .w(px(38.0))
                                     .text_xs()
-                                    .font_weight(FontWeight::MEDIUM)
-                                    .text_color(TEXT_MUTED)
+                                    .font_weight(FontWeight::NORMAL)
+                                    .text_color(TEXT_FAINT)
                                     .text_right()
                                     .child(position_text),
                             )
@@ -654,10 +673,10 @@ impl Render for PlayerBar {
                             )
                             .child(
                                 div()
-                                    .w(px(40.0))
+                                    .w(px(38.0))
                                     .text_xs()
-                                    .font_weight(FontWeight::MEDIUM)
-                                    .text_color(TEXT_MUTED)
+                                    .font_weight(FontWeight::NORMAL)
+                                    .text_color(TEXT_FAINT)
                                     .child(self.duration_text.clone()),
                             ),
                     ),
@@ -665,7 +684,7 @@ impl Render for PlayerBar {
             // 音量与播放队列
             .child(
                 h_flex()
-                    .w(px(260.0))
+                    .w(px(250.0))
                     .justify_end()
                     .items_center()
                     .gap(px(10.0))
@@ -694,8 +713,16 @@ impl Render for PlayerBar {
                             )
                             .child(
                                 div()
-                                    .w(px(80.0))
+                                    .w(px(72.0))
                                     .child(Slider::new(&self.volume).w_full()),
+                            )
+                            .child(
+                                div()
+                                    .w(px(32.0))
+                                    .text_size(px(11.0))
+                                    .font_weight(FontWeight::MEDIUM)
+                                    .text_color(if is_muted { TEXT_FAINT } else { TEXT_MUTED })
+                                    .child(format!("{vol_num}%")),
                             ),
                     )
                     // 播放队列开关

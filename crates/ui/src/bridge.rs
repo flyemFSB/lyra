@@ -2,7 +2,7 @@
 
 use async_channel::Sender;
 
-use lyra_api::model::{LyricLine, Page, Playlist, Song, Station, StationClass, VipStatus};
+use lyra_api::model::{LyricLine, Page, Playlist, Song, VipStatus};
 use lyra_app::Kugou;
 
 /// 导航页面枚举
@@ -10,10 +10,8 @@ use lyra_app::Kugou;
 pub(crate) enum Nav {
     /// 我的歌单
     Playlists,
-    /// 每日推荐
+    /// 发现
     Daily,
-    /// 电台
-    Radio,
     /// 搜索
     Search,
     /// 歌词
@@ -36,14 +34,10 @@ pub(crate) enum Msg {
     Tracks(u64, Result<Page<Song>, String>),
     /// 每日推荐歌曲列表
     Daily(Result<Vec<Song>, String>),
+    /// 红心电台歌曲分页结果
+    PersonalFm(Result<Page<Song>, String>),
     /// 搜索结果（附带请求序号）
     Search(u64, Result<Vec<Song>, String>),
-    /// 电台推荐频道列表
-    Stations(Result<Vec<Station>, String>),
-    /// 电台分类目录列表
-    StationClasses(Result<Vec<StationClass>, String>),
-    /// 电台频道歌曲列表（附带请求序号）
-    StationSongs(u64, Result<Vec<Song>, String>),
     /// 歌词获取结果（附带请求序号）
     Lyrics(u64, Result<Vec<LyricLine>, String>),
     /// 会员状态查询结果

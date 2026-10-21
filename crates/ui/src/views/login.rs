@@ -211,7 +211,7 @@ impl Render for LoginView {
                             .gap(px(8.0))
                             .items_center()
                             .child(Icon::new(IconName::Smartphone).size(px(16.0)).text_color(ACCENT_GREEN))
-                            .child(div().flex_1().child(Input::new(&self.mobile).w_full())),
+                            .child(div().flex_1().child(Input::new(&self.mobile).appearance(false).w_full())),
                     )
                     .child(
                         h_flex()
@@ -230,7 +230,7 @@ impl Render for LoginView {
                                     .gap(px(8.0))
                                     .items_center()
                                     .child(Icon::new(IconName::KeyRound).size(px(16.0)).text_color(ACCENT_GREEN))
-                                    .child(div().flex_1().child(Input::new(&self.code).w_full())),
+                                    .child(div().flex_1().child(Input::new(&self.code).appearance(false).w_full())),
                             )
                             .child(
                                 Button::new("send_code")

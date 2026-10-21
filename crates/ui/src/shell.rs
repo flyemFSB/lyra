@@ -10,20 +10,20 @@ use gpui_kit::component::scroll::ScrollableElement as _;
 use gpui_kit::component::{Disableable as _, Icon, Sizable as _, h_flex, v_flex};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
-use lyra_api::model::Song;
+use gpui_kit::component::input::{Input, InputEvent, InputState};
+use lyra_api::model::{Page, Song};
 
 use crate::bridge::{Backend, Msg, Nav};
 use crate::theme::{
     ACCENT_GREEN, ACCENT_GREEN_BORDER, ACCENT_GREEN_HOVER, ACCENT_GREEN_LIGHT, CANVAS_BG, CARD_BG, CARD_BORDER,
-    SURFACE_HOVER, TEXT_FAINT, TEXT_MUTED, TEXT_PRIMARY, badge, cover_box, hex_rgb, main_card, notice,
-    notice_with_icon,
+    SURFACE_HOVER, TEXT_FAINT, TEXT_MUTED, TEXT_PRIMARY, badge, cover_box, friendly_error_message, hex_rgb,
+    main_card, notice, notice_with_icon, song_cover,
 };
 use crate::views::daily::DailyView;
 use crate::views::login::LoginView;
 use crate::views::lyrics::LyricsView;
 use crate::views::player::{PlayerBar, PlayerModel, mode_label};
 use crate::views::playlists::{PlaylistTab, PlaylistsView};
-use crate::views::radio::RadioView;
 use crate::views::search::SearchView;
 use crate::views::settings::SettingsView;
 
@@ -32,8 +32,8 @@ fn should_skip_unplayable(skips: usize) -> bool {
     skips < MAX_AUTO_SKIPS
 }
 
-/// 轻提示默认展示时长
-const TOAST_TTL: Duration = Duration::from_secs(4);
+/// 轻提示默认展示时长（保持紧凑克制）
+const TOAST_TTL: Duration = Duration::from_millis(2600);
 
 /// 自动续播允许连续跳过的曲目上限（避免死循环）
 const MAX_AUTO_SKIPS: usize = 5;
@@ -43,7 +43,6 @@ struct Views {
     player_bar: Entity<PlayerBar>,
     playlists: Entity<PlaylistsView>,
     daily: Entity<DailyView>,
-    radio: Entity<RadioView>,
     search: Entity<SearchView>,
     settings: Entity<SettingsView>,
     login: Entity<LoginView>,
@@ -83,6 +82,11 @@ pub(crate) struct AppShell {
     auto_skips: usize,
     /// 轻提示过期计时任务（重复提示时自动取消前一个）
     toast_task: Option<Task<()>>,
+    top_search: Option<Entity<InputState>>,
+    _top_search_sub: Option<Subscription>,
+    personal_fm_cursor: Option<String>,
+    is_personal_fm_active: bool,
+    is_fetching_personal_fm: bool,
     _drain: Task<()>,
 }
 
@@ -136,6 +140,11 @@ impl AppShell {
             play_seq: 0,
             auto_skips: 0,
             toast_task: None,
+            top_search: None,
+            _top_search_sub: None,
+            personal_fm_cursor: None,
+            is_personal_fm_active: false,
+            is_fetching_personal_fm: false,
             _drain: drain,
         }
     }
@@ -152,17 +161,43 @@ impl AppShell {
         let player_bar = cx.new(|cx| PlayerBar::new(backend.clone(), shell.clone(), player.clone(), window, cx));
         let playlists = cx.new(|cx| PlaylistsView::new(backend.clone(), shell.clone(), player.clone(), cx));
         let daily = cx.new(|cx| DailyView::new(backend.clone(), shell.clone(), player.clone(), cx));
-        let radio = cx.new(|cx| RadioView::new(backend.clone(), shell.clone(), player.clone(), cx));
         let search = cx.new(|cx| SearchView::new(backend.clone(), shell.clone(), player.clone(), window, cx));
         let settings = cx.new(|cx| SettingsView::new(backend.clone(), window, cx));
         let login = cx.new(|cx| LoginView::new(backend.clone(), window, cx));
         let lyrics = cx.new(|cx| LyricsView::new(backend, shell.clone(), player, cx));
 
+        // 顶部全局可直接输入的搜索框
+        let top_search = cx.new(|cx| InputState::new(window, cx).placeholder("搜索音乐、歌手、专辑…"));
+        let search_for_sub = search.clone();
+        let shell_for_sub = shell.clone();
+        let top_search_sub = cx.subscribe(&top_search, move |_this, state, event: &InputEvent, cx| {
+            match event {
+                InputEvent::PressEnter { .. } => {
+                    let kw = state.read(cx).value().to_string();
+                    if !kw.trim().is_empty() {
+                        shell_for_sub
+                            .update(cx, |shell, cx| {
+                                shell.set_nav(Nav::Search, cx);
+                            })
+                            .ok();
+                        search_for_sub
+                            .update(cx, |view, cx| {
+                                view.execute_search(kw, cx);
+                            });
+                    }
+                }
+                InputEvent::Change | InputEvent::Focus | InputEvent::Blur => {
+                    cx.notify();
+                }
+            }
+        });
+        self.top_search = Some(top_search);
+        self._top_search_sub = Some(top_search_sub);
+
         self.views = Some(Views {
             player_bar,
             playlists: playlists.clone(),
             daily,
-            radio,
             search,
             settings,
             login,
@@ -174,14 +209,13 @@ impl AppShell {
 
     /// 分发处理后台异步事件
     fn apply(&mut self, msg: Msg, cx: &mut Context<Self>) {
-        let (playlists, daily, radio, search, settings, login, lyrics) = {
+        let (playlists, daily, search, settings, login, lyrics) = {
             let Some(views) = self.views.as_ref() else {
                 return;
             };
             (
                 views.playlists.clone(),
                 views.daily.clone(),
-                views.radio.clone(),
                 views.search.clone(),
                 views.settings.clone(),
                 views.login.clone(),
@@ -201,10 +235,8 @@ impl AppShell {
             Msg::Playlists(result) => playlists.update(cx, |view, cx| view.on_playlists(result, cx)),
             Msg::Tracks(seq, result) => playlists.update(cx, |view, cx| view.on_tracks(seq, result, cx)),
             Msg::Daily(result) => daily.update(cx, |view, cx| view.on_daily(result, cx)),
+            Msg::PersonalFm(result) => self.on_personal_fm(result, cx),
             Msg::Search(seq, result) => search.update(cx, |view, cx| view.on_search(seq, result, cx)),
-            Msg::Stations(result) => radio.update(cx, |view, cx| view.on_stations(result, cx)),
-            Msg::StationClasses(result) => radio.update(cx, |view, cx| view.on_classes(result, cx)),
-            Msg::StationSongs(seq, result) => radio.update(cx, |view, cx| view.on_songs(seq, result, cx)),
             Msg::Lyrics(seq, result) => {
                 // 忽略过期请求的歌词响应
                 if seq == self.lyrics_seq {
@@ -217,9 +249,11 @@ impl AppShell {
             Msg::TrackRemoved(result) => match result {
                 Ok(()) => {
                     playlists.update(cx, PlaylistsView::refresh_current);
-                    self.set_toast("已移除".to_owned(), cx);
                 }
-                Err(error) => self.set_toast(format!("移除失败: {error}"), cx),
+                Err(error) => {
+                    tracing::warn!(%error, "移除歌曲失败");
+                    self.set_toast(friendly_error_message(&error), cx);
+                }
             },
             // 播放请求：过期的响应必须丢弃，否则旧歌会抢在新歌之前起播
             Msg::PlayReady {
@@ -360,16 +394,13 @@ impl AppShell {
         match self.nav {
             Nav::Playlists => views.playlists.update(cx, PlaylistsView::ensure),
             Nav::Daily => views.daily.update(cx, DailyView::ensure),
-            Nav::Radio => views.radio.update(cx, RadioView::ensure),
             Nav::Settings => views.settings.update(cx, SettingsView::ensure),
             Nav::Login | Nav::Search | Nav::Lyrics => {}
         }
     }
 
-    /// 重新加载当前页面的数据（顶栏「刷新当前数据」）
-    ///
-    /// 与 `ensure_loaded` 的区别：这里无条件重新拉取，
-    /// 否则电台页因为 `loaded` 闩锁会让刷新按钮永远无效。
+    /// 重新加载当前页面的数据
+    #[allow(dead_code)]
     pub(crate) fn reload_current(&mut self, cx: &mut Context<Self>) {
         let Some(views) = self.views.as_ref() else {
             return;
@@ -377,7 +408,6 @@ impl AppShell {
         match self.nav {
             Nav::Playlists => views.playlists.update(cx, PlaylistsView::reload),
             Nav::Daily => views.daily.update(cx, DailyView::reload),
-            Nav::Radio => views.radio.update(cx, RadioView::reload),
             Nav::Settings => views.settings.update(cx, SettingsView::reload),
             Nav::Login | Nav::Search | Nav::Lyrics => {}
         }
@@ -388,6 +418,7 @@ impl AppShell {
         if index >= songs.len() {
             return;
         }
+        self.is_personal_fm_active = false;
         self.auto_skips = 0;
         self.player.update(cx, |model, model_cx| {
             model.set_queue(songs, index);
@@ -439,14 +470,23 @@ impl AppShell {
         if !is_current {
             return;
         }
-        self.set_toast(format!("播放失败: {message}"), cx);
-        self.skip_unplayable(cx);
+        tracing::warn!(%hash, %message, "曲目取址播放失败");
+        if should_skip_unplayable(self.auto_skips) {
+            // 静默跳过下一首，避免连续自动跳歌时反复弹出 Toast 打扰用户
+            self.skip_unplayable(cx);
+        } else {
+            self.set_toast(format!("播放失败: {}", friendly_error_message(message)), cx);
+        }
     }
 
     /// 处理音频引擎拉流或解码失败事件
     fn on_engine_failed(&mut self, message: &str, cx: &mut Context<Self>) {
-        self.set_toast(format!("播放失败: {message}"), cx);
-        self.skip_unplayable(cx);
+        tracing::warn!(%message, "音频引擎解码失败");
+        if should_skip_unplayable(self.auto_skips) {
+            self.skip_unplayable(cx);
+        } else {
+            self.set_toast(format!("播放失败: {}", friendly_error_message(message)), cx);
+        }
     }
 
     /// 当前曲目不可播时尝试跳过至下一首
@@ -469,7 +509,86 @@ impl AppShell {
             });
             self.play_index(cx);
             self.load_lyrics(cx);
+            self.check_fm_prefetch(cx);
+        } else if self.is_personal_fm_active {
+            self.prefetch_personal_fm(cx);
         }
+    }
+
+    /// 开启红心 Radio（无限流漫游电台）
+    pub(crate) fn start_personal_fm(&mut self, _cx: &mut Context<Self>) {
+        self.is_personal_fm_active = true;
+        self.personal_fm_cursor = None;
+        self.is_fetching_personal_fm = true;
+        let app = self.backend.app();
+        self.backend.spawn(async move {
+            Msg::PersonalFm(app.personal_fm(None, "normal").await.map_err(|e| e.to_string()))
+        });
+    }
+
+    /// 处理红心电台返回数据
+    fn on_personal_fm(&mut self, result: Result<Page<Song>, String>, cx: &mut Context<Self>) {
+        self.is_fetching_personal_fm = false;
+        match result {
+            Ok(page) => {
+                self.personal_fm_cursor = page.cursor;
+                let songs = page.items;
+                if songs.is_empty() {
+                    if self.player.read(cx).queue.is_empty() {
+                        self.set_toast("未获取到推荐电台歌曲，请稍后重试".to_owned(), cx);
+                    }
+                    return;
+                }
+                let is_empty_queue = self.player.read(cx).queue.is_empty();
+                if is_empty_queue || !self.is_personal_fm_active {
+                    self.is_personal_fm_active = true;
+                    self.auto_skips = 0;
+                    self.player.update(cx, |model, model_cx| {
+                        model.set_queue(Arc::new(songs), 0);
+                        model_cx.notify();
+                    });
+                    self.play_index(cx);
+                    self.load_lyrics(cx);
+                } else {
+                    // 已在漫游中，无缝追加到播放队列末尾
+                    self.player.update(cx, |player, model_cx| {
+                        player.append_songs(songs);
+                        model_cx.notify();
+                    });
+                }
+            }
+            Err(error) => {
+                tracing::warn!(%error, "获取红心电台失败");
+                self.set_toast(friendly_error_message(&error), cx);
+            }
+        }
+    }
+
+    /// 检查是否需要静默预取下一批红心电台歌曲
+    fn check_fm_prefetch(&mut self, cx: &mut Context<Self>) {
+        if !self.is_personal_fm_active || self.is_fetching_personal_fm {
+            return;
+        }
+        let player = self.player.read(cx);
+        let current = player.index;
+        let total = player.queue.len();
+        // 当距离队尾还剩 2 首或更少时，在后台静默拉取下一批
+        if total.saturating_sub(current) <= 2 {
+            self.prefetch_personal_fm(cx);
+        }
+    }
+
+    /// 静默预取下一批红心电台数据
+    fn prefetch_personal_fm(&mut self, _cx: &mut Context<Self>) {
+        if self.is_fetching_personal_fm {
+            return;
+        }
+        self.is_fetching_personal_fm = true;
+        let cursor = self.personal_fm_cursor.clone();
+        let app = self.backend.app();
+        self.backend.spawn(async move {
+            Msg::PersonalFm(app.personal_fm(cursor.as_deref(), "normal").await.map_err(|e| e.to_string()))
+        });
     }
 
     /// 播放上一首歌曲（遵循当前播放模式）
@@ -511,7 +630,6 @@ impl AppShell {
     fn on_logged_in(&mut self, cx: &mut Context<Self>) {
         self.logged_in = true;
         self.nickname = read_nickname(&self.backend.app());
-        self.set_toast("登录成功".to_owned(), cx);
         if let Some(views) = self.views.as_ref() {
             views.login.update(cx, LoginView::reset);
             views.playlists.update(cx, PlaylistsView::reload);
@@ -531,12 +649,10 @@ impl AppShell {
         if let Some(views) = self.views.as_ref() {
             views.playlists.update(cx, PlaylistsView::reset);
             views.daily.update(cx, DailyView::reset);
-            views.radio.update(cx, RadioView::reset);
             views.lyrics.update(cx, LyricsView::clear);
             views.search.update(cx, SearchView::reset);
         }
         self.set_nav(Nav::Login, cx);
-        self.set_toast("已登出".to_owned(), cx);
     }
 
     /// 展示全局轻提示
@@ -555,18 +671,27 @@ impl AppShell {
         }));
     }
 
-    /// 渲染主内容区顶栏
-    fn top_header(&self, cx: &Context<Self>) -> impl IntoElement {
+    /// 手动关闭全局轻提示弹窗
+    pub(crate) fn dismiss_toast(&mut self, cx: &mut Context<Self>) {
+        if self.toast.is_some() {
+            self.toast = None;
+            self.toast_task = None;
+            cx.notify();
+        }
+    }
+
+    /// 渲染主内容区顶栏（含沉浸式窗口拖拽与 Windows 11 风格窗口控制按钮）
+    fn top_header(&self, window: &mut Window, cx: &Context<Self>) -> impl IntoElement {
         let is_search = self.nav == Nav::Search;
         let can_go_back = self.history_idx > 0;
         let can_go_forward = self.history_idx + 1 < self.history.len();
+        let is_maximized = window.is_maximized();
 
         h_flex()
             .w_full()
-            .h(px(46.0))
-            .px_4()
+            .h(px(48.0))
+            .pl_4()
             .items_center()
-            .gap(px(12.0))
             .border_b_1()
             .border_color(CARD_BORDER)
             // 历史前进后退
@@ -593,299 +718,238 @@ impl AppShell {
                             .on_click(cx.listener(|shell, _event, _window, cx| shell.go_forward(cx))),
                     ),
             )
-            // 胶囊搜索框
+            // 顶部直接可编辑的搜索框（与整体胶囊背景融为一体，高度更适中舒适）
             .child(
                 div()
-                    .id("top_search_capsule")
-                    .role(Role::Button)
-                    .cursor_pointer()
-                    .w(px(220.0))
-                    .h(px(32.0))
-                    .px_3()
-                    .rounded(px(999.0))
-                    .bg(if is_search { ACCENT_GREEN_LIGHT } else { hex_rgb(0xeef1f5) })
-                    .border_1()
-                    .border_color(if is_search { ACCENT_GREEN_BORDER } else { CARD_BORDER })
-                    .flex()
-                    .items_center()
-                    .gap(px(8.0))
-                    .on_click(cx.listener(|shell, _event, _window, cx| shell.set_nav(Nav::Search, cx)))
-                    .child(
-                        Icon::new(IconName::Search)
-                            .size(px(14.0))
-                            .text_color(if is_search { ACCENT_GREEN } else { TEXT_FAINT }),
-                    )
-                    .child(
-                        div()
-                            .text_xs()
-                            .font_weight(if is_search { FontWeight::BOLD } else { FontWeight::NORMAL })
-                            .text_color(if is_search { ACCENT_GREEN } else { TEXT_MUTED })
-                            .child("搜索音乐"),
-                    ),
+                    .w(px(260.0))
+                    .h(px(34.0))
+                    .ml_3()
+                    .when_some(self.top_search.as_ref(), |this, search_state| {
+                        this.child(
+                            Input::new(search_state)
+                                .appearance(false)
+                                .w_full()
+                                .h_full()
+                                .px_3()
+                                .rounded(px(999.0))
+                                .bg(if is_search { ACCENT_GREEN_LIGHT } else { hex_rgb(0xf2f4f7) })
+                                .border_1()
+                                .border_color(if is_search { ACCENT_GREEN_BORDER } else { hex_rgb(0xe5e7eb) })
+                                .prefix(
+                                    Icon::new(IconName::Search)
+                                        .size(px(14.0))
+                                        .text_color(if is_search { ACCENT_GREEN } else { TEXT_FAINT }),
+                                )
+                                .cleanable(true),
+                        )
+                    }),
             )
-            .child(div().flex_1())
-            // 右侧工具区
+            // 窗口可拖动中间区域（原生支持双击缩放/最大化）
+            .child(
+                div()
+                    .flex_1()
+                    .h_full()
+                    .window_control_area(WindowControlArea::Drag),
+            )
+            // Windows 11 原生贴合无边框窗口控制按钮
             .child(
                 h_flex()
-                    .gap(px(8.0))
+                    .h_full()
                     .items_center()
+                    .ml_1()
+                    // 最小化
                     .child(
-                        Button::new("top_refresh")
-                            .ghost()
-                            .small()
-                            .icon(IconName::RefreshCw)
-                            .tooltip("刷新当前数据")
-                            .on_click(cx.listener(|shell, _event, _window, cx| shell.reload_current(cx))),
+                        div()
+                            .id("win_min")
+                            .w(px(44.0))
+                            .h_full()
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .cursor_pointer()
+                            .text_color(TEXT_MUTED)
+                            .hover(|s| s.bg(SURFACE_HOVER).text_color(TEXT_PRIMARY))
+                            .window_control_area(WindowControlArea::Min)
+                            .on_click(|_event, window, _cx| {
+                                window.minimize_window();
+                            })
+                            .child(Icon::new(IconName::WindowMinimize).size(px(12.0))),
+                    )
+                    // 最大化 / 还原
+                    .child(
+                        div()
+                            .id("win_max")
+                            .w(px(44.0))
+                            .h_full()
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .cursor_pointer()
+                            .text_color(TEXT_MUTED)
+                            .hover(|s| s.bg(SURFACE_HOVER).text_color(TEXT_PRIMARY))
+                            .window_control_area(WindowControlArea::Max)
+                            .on_click(|_event, window, _cx| {
+                                window.zoom_window();
+                            })
+                            .child(
+                                Icon::new(if is_maximized {
+                                    IconName::WindowRestore
+                                } else {
+                                    IconName::WindowMaximize
+                                })
+                                .size(px(12.0)),
+                            ),
+                    )
+                    // 关闭
+                    .child(
+                        div()
+                            .id("win_close")
+                            .w(px(44.0))
+                            .h_full()
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .cursor_pointer()
+                            .text_color(TEXT_MUTED)
+                            .hover(|s| s.bg(hex_rgb(0xe81123)).text_color(rgb(0xffffff)))
+                            .window_control_area(WindowControlArea::Close)
+                            .on_click(|_event, window, _cx| {
+                                window.remove_window();
+                            })
+                            .child(Icon::new(IconName::WindowClose).size(px(12.0))),
                     ),
             )
     }
 
     /// 渲染左侧导航侧边栏
     fn sidebar(&self, cx: &Context<Self>) -> impl IntoElement {
-        let mut column = v_flex().id("sidebar").w(px(216.0)).h_full().p_2().gap(px(10.0));
+        let mut column = v_flex().id("sidebar").w(px(204.0)).h_full().p_2().gap(px(8.0));
 
-        // 顶部品牌区
-        column = column.child(crate::logo::lyra_brand_header());
+        // 顶部品牌区（兼具窗口拖拽区，提升无边框体验）
+        column = column.child(
+            div()
+                .w_full()
+                .window_control_area(WindowControlArea::Drag)
+                .child(crate::logo::lyra_brand_header()),
+        );
 
-        // 用户身份卡片
-        // 昵称在登录态变化时读一次并缓存：渲染期访问存储会拖慢每一帧
-        let username = self.nickname.clone().unwrap_or_else(|| {
-            if self.logged_in {
-                "已登录用户".to_owned()
-            } else {
-                "点击登录账号".to_owned()
-            }
-        });
-
-        let user_capsule = div()
-            .id("user_capsule")
-            .role(Role::Button)
-            .cursor_pointer()
-            .w_full()
-            .px_2()
-            .py_1()
-            .rounded(px(10.0))
-            .hover(|s| s.bg(SURFACE_HOVER))
-            .on_click(cx.listener(|shell, _event, _window, cx| {
-                if shell.logged_in {
-                    shell.set_nav(Nav::Settings, cx);
-                } else {
-                    shell.set_nav(Nav::Login, cx);
-                }
-            }))
-            .child(
-                h_flex()
-                    .gap(px(8.0))
-                    .items_center()
-                    .child(
-                        div()
-                            .w(px(28.0))
-                            .h(px(28.0))
-                            .rounded_full()
-                            .bg(if self.logged_in {
-                                ACCENT_GREEN_LIGHT
-                            } else {
-                                CARD_BORDER
-                            })
-                            .border_1()
-                            .border_color(if self.logged_in {
-                                ACCENT_GREEN_BORDER
-                            } else {
-                                hex_rgb(0xd1d5db)
-                            })
-                            .flex()
-                            .items_center()
-                            .justify_center()
-                            .child(
-                                Icon::new(IconName::CircleUser)
-                                    .size(px(18.0))
-                                    .text_color(if self.logged_in { ACCENT_GREEN } else { TEXT_MUTED }),
-                            ),
-                    )
-                    .child(
-                        v_flex()
-                            .flex_1()
-                            .min_w(px(0.0))
-                            .gap(px(1.0))
-                            .child(
-                                div()
-                                    .text_xs()
-                                    .font_weight(FontWeight::BOLD)
-                                    .text_color(TEXT_PRIMARY)
-                                    .truncate()
-                                    .child(username),
-                            )
-                            .when(self.logged_in, |this| {
-                                this.child(div().text_xs().text_color(TEXT_FAINT).child("设置"))
-                            }),
-                    )
-                    .when(self.logged_in, |this| {
-                        this.child(Icon::new(IconName::Settings).size(px(14.0)).text_color(TEXT_FAINT))
-                    }),
-            );
-        column = column.child(user_capsule);
-
-        // 快捷导航栏
-        let quick_items = [
-            (Nav::Daily, IconName::House, "发现"),
-            (Nav::Radio, IconName::Radio, "电台"),
-            (Nav::Search, IconName::Search, "搜索"),
+        // 标准纵向主导航菜单（清晰的垂直排布，替代拥挤的横向胶囊）
+        let nav_items = [
+            (Nav::Daily, IconName::Compass, "发现"),
         ];
 
-        let mut quick_row = h_flex().w_full().gap(px(6.0));
-        for (idx, (nav, icon, label)) in quick_items.into_iter().enumerate() {
+        let mut nav_column = v_flex().w_full().gap(px(2.0));
+        for (idx, (nav, icon, label)) in nav_items.into_iter().enumerate() {
             let active = self.nav == nav;
             let btn = div()
-                .id(("quick_nav", idx))
+                .id(("side_nav", idx))
                 .role(Role::Button)
                 .cursor_pointer()
-                .flex_1()
+                .w_full()
                 .h(px(32.0))
-                .rounded(px(8.0))
+                .px_2()
+                .rounded(px(6.0))
                 .flex()
                 .items_center()
-                .justify_center()
-                .gap(px(4.0))
-                .when(active, |this| this.bg(TEXT_PRIMARY).text_color(CARD_BG).shadow_sm())
+                .gap(px(8.0))
+                .when(active, |this| {
+                    this.bg(CARD_BG).text_color(TEXT_PRIMARY).font_weight(FontWeight::BOLD).shadow_xs()
+                })
                 .when(!active, |this| {
-                    this.bg(hex_rgb(0xe5e9ef))
-                        .text_color(TEXT_MUTED)
-                        .hover(|s| s.bg(hex_rgb(0xd9dfe7)).text_color(TEXT_PRIMARY))
+                    this.text_color(TEXT_MUTED)
+                        .hover(|s| s.bg(SURFACE_HOVER).text_color(TEXT_PRIMARY))
                 })
                 .on_click(cx.listener(move |shell, _event, _window, cx| shell.set_nav(nav, cx)))
-                .child(Icon::new(icon).size(px(14.0)))
-                .child(div().text_xs().font_weight(FontWeight::MEDIUM).child(label));
+                .child(Icon::new(icon).size(px(15.0)).text_color(if active { ACCENT_GREEN } else { TEXT_MUTED }))
+                .child(div().text_xs().child(label));
 
-            quick_row = quick_row.child(btn);
+            nav_column = nav_column.child(btn);
         }
-        column = column.child(quick_row);
+        column = column.child(nav_column);
 
-        // 歌单胶囊切换器与侧边栏歌单列表
-        // 条目已在 PlaylistsView 里按标签页过滤并预格式化，渲染期不再重新过滤
-        let (tab, tab_seq, entries, selected, loading_playlists) = if let Some(views) = self.views.as_ref() {
+        // 歌单分类与列表区
+        let (tab, entries, selected, loading_playlists) = if let Some(views) = self.views.as_ref() {
             let p = views.playlists.read(cx);
-            (p.tab, p.tab_seq, p.entries.clone(), p.selected, p.loading_playlists)
+            (p.tab, p.entries.clone(), p.selected, p.loading_playlists)
         } else {
-            (PlaylistTab::Created, 1, Arc::new(Vec::new()), None, false)
-        };
-
-        let pill_base = div()
-            .id("capsule_slider_pill")
-            .absolute()
-            .top(px(3.0))
-            .w(px(97.0))
-            .h(px(26.0))
-            .rounded(px(999.0))
-            .bg(CARD_BG)
-            .shadow_sm();
-
-        let pill: AnyElement = if tab_seq <= 1 {
-            let left_pos = if tab == PlaylistTab::Created {
-                px(3.0)
-            } else {
-                px(100.0)
-            };
-            pill_base.left(left_pos).into_any_element()
-        } else {
-            let (from_x, to_x) = if tab == PlaylistTab::Collected {
-                (3.0, 100.0)
-            } else {
-                (100.0, 3.0)
-            };
-            crate::motion::capsule_pill_sliding(pill_base, ("capsule_pill_anim", tab_seq), from_x, to_x)
-                .into_any_element()
+            (PlaylistTab::Created, Arc::new(Vec::new()), None, false)
         };
 
         let is_created = tab == PlaylistTab::Created;
         let is_collected = tab == PlaylistTab::Collected;
 
-        let tab_capsule = div()
-            .relative()
+        // 歌单轻量分类切换器（极简双标签）
+        let playlist_section_header = h_flex()
             .w_full()
-            .h(px(32.0))
-            .p(px(3.0))
-            .bg(hex_rgb(0xe5e9ef))
-            .rounded(px(999.0))
-            .child(pill)
+            .pt_2()
+            .pb_1()
+            .px_1()
+            .items_center()
+            .justify_between()
+            .child(
+                div()
+                    .text_xs()
+                    .font_weight(FontWeight::BOLD)
+                    .text_color(TEXT_FAINT)
+                    .child("我的歌单"),
+            )
             .child(
                 h_flex()
-                    .relative()
-                    .size_full()
+                    .gap(px(2.0))
+                    .p(px(1.5))
+                    .rounded(px(5.0))
+                    .bg(hex_rgb(0xe5e8ed))
                     .child(
                         div()
-                            .id("sidebar_tab_created")
+                            .id("tab_btn_created")
                             .role(Role::Button)
                             .cursor_pointer()
-                            .flex_1()
-                            .h_full()
-                            .flex()
-                            .items_center()
-                            .justify_center()
-                            .text_xs()
-                            .when(is_created, |s| s.text_color(TEXT_PRIMARY).font_weight(FontWeight::BOLD))
-                            .when(!is_created, |s| {
-                                s.text_color(TEXT_MUTED)
-                                    .font_weight(FontWeight::MEDIUM)
-                                    .hover(|h| h.text_color(TEXT_PRIMARY))
-                            })
+                            .px_2()
+                            .py(px(1.0))
+                            .rounded(px(4.0))
+                            .text_size(px(10.5))
+                            .when(is_created, |s| s.bg(CARD_BG).text_color(TEXT_PRIMARY).font_weight(FontWeight::BOLD).shadow_xs())
+                            .when(!is_created, |s| s.text_color(TEXT_MUTED).hover(|h| h.text_color(TEXT_PRIMARY)))
                             .on_click(cx.listener(|shell, _event, _window, cx| {
                                 if let Some(views) = shell.views.as_ref() {
-                                    views
-                                        .playlists
-                                        .update(cx, |p, cx| p.switch_tab(PlaylistTab::Created, cx));
+                                    views.playlists.update(cx, |p, cx| p.switch_tab(PlaylistTab::Created, cx));
                                 }
                                 shell.set_nav(Nav::Playlists, cx);
                                 cx.notify();
                             }))
-                            .child("自建歌单"),
+                            .child("自建"),
                     )
                     .child(
                         div()
-                            .id("sidebar_tab_collected")
+                            .id("tab_btn_collected")
                             .role(Role::Button)
                             .cursor_pointer()
-                            .flex_1()
-                            .h_full()
-                            .flex()
-                            .items_center()
-                            .justify_center()
-                            .text_xs()
-                            .when(is_collected, |s| {
-                                s.text_color(TEXT_PRIMARY).font_weight(FontWeight::BOLD)
-                            })
-                            .when(!is_collected, |s| {
-                                s.text_color(TEXT_MUTED)
-                                    .font_weight(FontWeight::MEDIUM)
-                                    .hover(|h| h.text_color(TEXT_PRIMARY))
-                            })
+                            .px_2()
+                            .py(px(1.0))
+                            .rounded(px(4.0))
+                            .text_size(px(10.5))
+                            .when(is_collected, |s| s.bg(CARD_BG).text_color(TEXT_PRIMARY).font_weight(FontWeight::BOLD).shadow_xs())
+                            .when(!is_collected, |s| s.text_color(TEXT_MUTED).hover(|h| h.text_color(TEXT_PRIMARY)))
                             .on_click(cx.listener(|shell, _event, _window, cx| {
                                 if let Some(views) = shell.views.as_ref() {
-                                    views
-                                        .playlists
-                                        .update(cx, |p, cx| p.switch_tab(PlaylistTab::Collected, cx));
+                                    views.playlists.update(cx, |p, cx| p.switch_tab(PlaylistTab::Collected, cx));
                                 }
                                 shell.set_nav(Nav::Playlists, cx);
                                 cx.notify();
                             }))
-                            .child("收藏歌单"),
+                            .child("收藏"),
                     ),
             );
-        column = column.child(tab_capsule);
+        column = column.child(playlist_section_header);
 
-        let mut playlist_list = v_flex().w_full().gap(px(3.0));
-
+        let mut playlist_list = v_flex().w_full().gap(px(2.0));
         if loading_playlists && entries.is_empty() {
-            playlist_list = playlist_list.child(notice_with_icon(IconName::RefreshCw, "加载歌单中…"));
+            playlist_list = playlist_list.child(notice_with_icon(IconName::RefreshCw, "加载歌单…"));
         }
-
         if !loading_playlists && entries.is_empty() {
-            playlist_list = playlist_list.child(div().py_6().child(notice_with_icon(
+            playlist_list = playlist_list.child(div().py_4().child(notice_with_icon(
                 IconName::ListMusic,
-                if tab == PlaylistTab::Created {
-                    "暂无自建歌单"
-                } else {
-                    "暂无收藏歌单"
-                },
+                if tab == PlaylistTab::Created { "暂无自建歌单" } else { "暂无收藏歌单" },
             )));
         }
 
@@ -901,17 +965,14 @@ impl AppShell {
                     .role(Role::Button)
                     .w_full()
                     .px_2()
-                    .py(px(5.0))
-                    .rounded(px(8.0))
+                    .py(px(4.0))
+                    .rounded(px(6.0))
                     .cursor_pointer()
                     .flex()
                     .items_center()
                     .gap(px(8.0))
                     .when(active, |this| {
-                        this.bg(ACCENT_GREEN_LIGHT)
-                            .border_1()
-                            .border_color(ACCENT_GREEN_BORDER)
-                            .text_color(ACCENT_GREEN_HOVER)
+                        this.bg(CARD_BG).text_color(TEXT_PRIMARY).font_weight(FontWeight::BOLD).shadow_xs()
                     })
                     .when(!active, |this| {
                         this.text_color(TEXT_MUTED)
@@ -926,28 +987,32 @@ impl AppShell {
                     }))
                     .child(if is_liked {
                         div()
-                            .w(px(28.0))
-                            .h(px(28.0))
-                            .rounded(px(6.0))
+                            .w(px(26.0))
+                            .h(px(26.0))
+                            .rounded(px(5.0))
                             .bg(hex_rgb(0xfee2e2))
                             .flex()
                             .items_center()
                             .justify_center()
-                            .child(Icon::new(IconName::Heart).size(px(14.0)).text_color(hex_rgb(0xef4444)))
+                            .child(Icon::new(IconName::Heart).size(px(13.0)).text_color(hex_rgb(0xef4444)))
                             .into_any_element()
                     } else {
-                        cover_box(&name, 28.0).into_any_element()
+                        cover_box(&name, 26.0).into_any_element()
                     })
                     .child(
                         div()
                             .flex_1()
                             .min_w(px(0.0))
                             .text_xs()
-                            .font_weight(if active { FontWeight::BOLD } else { FontWeight::NORMAL })
                             .truncate()
                             .child(name),
                     )
-                    .child(badge(entry.count.clone(), hex_rgb(0xeef1f5), TEXT_MUTED)),
+                    .child(
+                        div()
+                            .text_size(px(10.0))
+                            .text_color(TEXT_FAINT)
+                            .child(entry.count.clone()),
+                    ),
             );
         }
 
@@ -961,45 +1026,198 @@ impl AppShell {
 
         column = column.child(playlist_scroll);
 
+        // 底部用户胶囊与设置区（固定于侧边栏底部）
+        let username = self.nickname.clone().unwrap_or_else(|| {
+            if self.logged_in {
+                "已登录".to_owned()
+            } else {
+                "点击登录".to_owned()
+            }
+        });
+
+        let user_capsule = div()
+            .id("sidebar_user_capsule")
+            .role(Role::Button)
+            .cursor_pointer()
+            .flex_1()
+            .min_w(px(0.0))
+            .h(px(32.0))
+            .px_2()
+            .rounded(px(6.0))
+            .hover(|s| s.bg(SURFACE_HOVER))
+            .on_click(cx.listener(|shell, _event, _window, cx| {
+                if shell.logged_in {
+                    shell.set_nav(Nav::Settings, cx);
+                } else {
+                    shell.set_nav(Nav::Login, cx);
+                }
+            }))
+            .child(
+                h_flex()
+                    .w_full()
+                    .gap(px(8.0))
+                    .items_center()
+                    .child(
+                        div()
+                            .w(px(24.0))
+                            .h(px(24.0))
+                            .rounded_full()
+                            .bg(if self.logged_in {
+                                ACCENT_GREEN_LIGHT
+                            } else {
+                                hex_rgb(0xe5e7eb)
+                            })
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .child(
+                                Icon::new(IconName::User)
+                                    .size(px(13.0))
+                                    .text_color(if self.logged_in { ACCENT_GREEN } else { TEXT_MUTED }),
+                            ),
+                    )
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w(px(0.0))
+                            .text_xs()
+                            .font_weight(FontWeight::MEDIUM)
+                            .text_color(TEXT_PRIMARY)
+                            .truncate()
+                            .child(username),
+                    ),
+            );
+
+        let is_settings = self.nav == Nav::Settings;
+        let settings_btn = div()
+            .id("sidebar_settings_btn")
+            .role(Role::Button)
+            .cursor_pointer()
+            .w(px(32.0))
+            .h(px(32.0))
+            .rounded(px(6.0))
+            .flex()
+            .items_center()
+            .justify_center()
+            .when(is_settings, |s| s.bg(CARD_BG).shadow_xs())
+            .when(!is_settings, |s| s.hover(|h| h.bg(SURFACE_HOVER)))
+            .on_click(cx.listener(|shell, _event, _window, cx| shell.set_nav(Nav::Settings, cx)))
+            .child(
+                Icon::new(IconName::Settings)
+                    .size(px(15.0))
+                    .text_color(if is_settings { ACCENT_GREEN } else { TEXT_MUTED }),
+            );
+
+        let bottom_bar = h_flex()
+            .w_full()
+            .pt_2()
+            .border_t_1()
+            .border_color(hex_rgb(0xe5e7eb))
+            .items_center()
+            .justify_between()
+            .gap(px(4.0))
+            .child(user_capsule)
+            .child(settings_btn);
+
+        column = column.child(bottom_bar);
         column
     }
 
-    /// 渲染浮动轻提示
-    fn toast_element(&self, _cx: &App) -> Option<AnyElement> {
-        let toast_id = ("toast_entrance", self.toast_seq);
-        self.toast.clone().map(|text| {
+    /// 渲染顶部浮动提示弹窗（遵循设计系统 Level 1 质感，具备语义化图标与轻量关闭交互）
+    fn toast_element(&self, cx: &Context<Self>) -> Option<AnyElement> {
+        let text = self.toast.clone()?;
+        let toast_id = ("top_toast_entrance", self.toast_seq);
+        let shell = cx.entity().downgrade();
+
+        let is_error = text.contains("失败")
+            || text.contains("错误")
+            || text.contains("未能")
+            || text.contains("异常")
+            || text.contains("不稳定")
+            || text.contains("超时");
+
+        let is_success = text.contains("成功")
+            || text.contains("已加入")
+            || text.contains("已收藏")
+            || text.contains("已保存")
+            || text.contains("已清除")
+            || text.contains("已从");
+
+        let (icon_name, icon_col, icon_bg) = if is_error {
+            (IconName::CircleAlert, hex_rgb(0xef4444), hex_rgb(0xfef2f2))
+        } else if is_success {
+            (IconName::Check, ACCENT_GREEN, ACCENT_GREEN_LIGHT)
+        } else {
+            (IconName::Sparkles, ACCENT_GREEN, ACCENT_GREEN_LIGHT)
+        };
+
+        let content = h_flex()
+            .items_center()
+            .gap(px(8.0))
+            .pl(px(10.0))
+            .pr(px(8.0))
+            .py(px(6.0))
+            .max_w(px(520.0))
+            .rounded(px(999.0))
+            .bg(CARD_BG)
+            .border_1()
+            .border_color(CARD_BORDER)
+            .shadow_lg()
+            // 语义化状态图标指示器（带柔和圆形背景色）
+            .child(
+                div()
+                    .w(px(22.0))
+                    .h(px(22.0))
+                    .rounded_full()
+                    .bg(icon_bg)
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .child(Icon::new(icon_name).size(px(13.0)).text_color(icon_col)),
+            )
+            // 提示文案内容
+            .child(
+                div()
+                    .text_xs()
+                    .font_weight(FontWeight::MEDIUM)
+                    .text_color(TEXT_PRIMARY)
+                    .truncate()
+                    .child(text),
+            )
+            // 快速手动关闭按钮
+            .child(
+                div()
+                    .id("toast_close_btn")
+                    .role(Role::Button)
+                    .cursor_pointer()
+                    .w(px(18.0))
+                    .h(px(18.0))
+                    .rounded_full()
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .text_color(TEXT_FAINT)
+                    .hover(|s| s.bg(SURFACE_HOVER).text_color(TEXT_PRIMARY))
+                    .on_click(move |_event, _window, cx| {
+                        shell.update(cx, |this, cx| this.dismiss_toast(cx)).ok();
+                    })
+                    .child(Icon::new(IconName::X).size(px(11.0))),
+            );
+
+        Some(
             crate::motion::toast_entrance(
                 div()
                     .absolute()
-                    .top(px(16.0))
+                    .top(px(14.0))
                     .left_0()
                     .right_0()
                     .flex()
                     .justify_center()
-                    .child(
-                        h_flex()
-                            .gap(px(8.0))
-                            .items_center()
-                            .px_5()
-                            .py_2()
-                            .rounded(px(999.0))
-                            .bg(CARD_BG)
-                            .border_1()
-                            .border_color(CARD_BORDER)
-                            .shadow_lg()
-                            .child(Icon::new(IconName::Sparkles).size(px(16.0)).text_color(ACCENT_GREEN))
-                            .child(
-                                div()
-                                    .text_sm()
-                                    .font_weight(FontWeight::MEDIUM)
-                                    .text_color(TEXT_PRIMARY)
-                                    .child(text),
-                            ),
-                    ),
+                    .child(content),
                 toast_id,
             )
-            .into_any_element()
-        })
+            .into_any_element(),
+        )
     }
 
     /// 渲染右侧播放队列抽屉
@@ -1098,9 +1316,7 @@ impl AppShell {
                         .gap(px(8.0))
                         .items_center()
                         .cursor_pointer()
-                        .when(is_current, |this| {
-                            this.bg(ACCENT_GREEN_LIGHT).border_1().border_color(ACCENT_GREEN_BORDER)
-                        })
+                        .when(is_current, |this| this.bg(SURFACE_HOVER))
                         .when(!is_current, |this| this.hover(|s| s.bg(SURFACE_HOVER)))
                         .on_click(move |_event, _window, cx| {
                             shell
@@ -1132,6 +1348,11 @@ impl AppShell {
                                     )
                                 }),
                         )
+                        .child(song_cover(
+                            row.map_or("", |r| r.cover.as_ref()),
+                            row.map_or("", |r| r.title.as_ref()),
+                            28.0,
+                        ))
                         .child(
                             v_flex()
                                 .flex_1()
@@ -1141,11 +1362,11 @@ impl AppShell {
                                     div()
                                         .text_xs()
                                         .font_weight(if is_current {
-                                            FontWeight::BOLD
+                                             FontWeight::BOLD
                                         } else {
-                                            FontWeight::MEDIUM
+                                             FontWeight::MEDIUM
                                         })
-                                        .text_color(if is_current { ACCENT_GREEN_HOVER } else { TEXT_PRIMARY })
+                                        .text_color(TEXT_PRIMARY)
                                         .truncate()
                                         .child(
                                             row.map_or_else(|| SharedString::new_static(""), |row| row.title.clone()),
@@ -1173,7 +1394,7 @@ impl AppShell {
 }
 
 impl Render for AppShell {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let Some(views) = self.views.as_ref() else {
             return notice("初始化中…");
         };
@@ -1184,22 +1405,24 @@ impl Render for AppShell {
                 ("lyrics_fullscreen_card", self.nav_seq),
             );
             return v_flex()
+                .relative()
                 .size_full()
                 .bg(CANVAS_BG)
                 .text_color(TEXT_PRIMARY)
-                .p(px(8.0))
-                .gap(px(8.0))
+                .overflow_hidden()
                 .child(
                     div()
                         .relative()
                         .flex_1()
                         .min_h(px(0.0))
                         .w_full()
+                        .p(px(8.0))
+                        .pb_0()
                         .child(lyrics_card)
-                        .children(self.queue_drawer(cx))
-                        .children(self.toast_element(cx)),
+                        .children(self.queue_drawer(cx)),
                 )
                 .child(views.player_bar.clone())
+                .children(self.toast_element(cx))
                 .into_any_element();
         }
 
@@ -1220,7 +1443,6 @@ impl Render for AppShell {
         let body = match effective_nav {
             Nav::Playlists => views.playlists.clone().into_any_element(),
             Nav::Daily => views.daily.clone().into_any_element(),
-            Nav::Radio => views.radio.clone().into_any_element(),
             Nav::Search => views.search.clone().into_any_element(),
             Nav::Lyrics => views.lyrics.clone().into_any_element(),
             Nav::Settings => views.settings.clone().into_any_element(),
@@ -1239,11 +1461,11 @@ impl Render for AppShell {
 
         // 根容器填满窗口视口
         v_flex()
+            .relative()
             .size_full()
             .bg(CANVAS_BG)
             .text_color(TEXT_PRIMARY)
-            .p(px(8.0))
-            .gap(px(8.0))
+            .overflow_hidden()
             .child(
                 div()
                     .relative()
@@ -1251,6 +1473,8 @@ impl Render for AppShell {
                     .flex_row()
                     .flex_1()
                     .min_h(px(0.0))
+                    .p(px(8.0))
+                    .pb_0()
                     .gap(px(8.0))
                     .child(self.sidebar(cx))
                     .child(
@@ -1261,17 +1485,17 @@ impl Render for AppShell {
                             .min_w(px(0.0))
                             .h_full()
                             .overflow_hidden()
-                            .child(self.top_header(cx))
+                            .child(self.top_header(window, cx))
                             .child(div().flex_1().min_h(px(0.0)).child(crate::motion::page_entrance(
                                 div().relative().size_full().child(body),
                                 ("main_route_page", self.nav_seq),
                             ))),
                     )
                     .children(lyrics_exit_overlay)
-                    .children(self.queue_drawer(cx))
-                    .children(self.toast_element(cx)),
+                    .children(self.queue_drawer(cx)),
             )
             .child(views.player_bar.clone())
+            .children(self.toast_element(cx))
             .into_any_element()
     }
 }

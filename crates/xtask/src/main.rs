@@ -364,19 +364,22 @@ fn package() -> anyhow::Result<()> {
     println!("✅ 绿色便携包生成完成: {}", zip_dest.display());
 
     // 寻找 Inno Setup 编译器 ISCC
-    let iscc_paths = [
-        "iscc",
-        "ISCC.exe",
-        r"C:\Program Files (x86)\Inno Setup 6\ISCC.exe",
-        r"C:\Program Files\Inno Setup 6\ISCC.exe",
+    let mut iscc_paths = vec![
+        "iscc".to_owned(),
+        "ISCC.exe".to_owned(),
+        r"C:\Program Files (x86)\Inno Setup 6\ISCC.exe".to_owned(),
+        r"C:\Program Files\Inno Setup 6\ISCC.exe".to_owned(),
     ];
+    if let Ok(local_appdata) = std::env::var("LOCALAPPDATA") {
+        iscc_paths.push(format!(r"{local_appdata}\Programs\Inno Setup 6\ISCC.exe"));
+    }
 
     let mut iscc_found = None;
     for path in &iscc_paths {
         if let Ok(output) = Command::new(path).arg("/?").output()
             && (output.status.success() || !output.stdout.is_empty() || !output.stderr.is_empty())
         {
-            iscc_found = Some((*path).to_owned());
+            iscc_found = Some(path.clone());
             break;
         }
     }

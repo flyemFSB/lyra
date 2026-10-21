@@ -395,28 +395,57 @@ pub struct VipClaim {
     pub raw: Value,
 }
 
-/// 领取每日 24 小时畅听 VIP
+/// 领取每日畅听 VIP（自然日内有效，有效期至当天 23:59:59）
+///
+/// 酷狗概念版（Youth/Lite）采用双阶段听歌激励：
+/// 1. 尝试升级/领取激励端点 (`/youth/v1/listen_song/upgrade_vip_reward`)；
+/// 2. 若上游返回非幂等错误（如 297000 未达条件），回退尝试基础领取端点 (`/youth/v1/recharge/receive_vip_listen_song`)。
+/// 3. 若任一端点成功或返回 297002（今日已领），均按幂等成功处理。
 pub async fn claim_daily_vip(api: &Api) -> Result<VipClaim> {
     let session = api.session();
     crate::spec::ensure_logged_in(&session)?;
-    let spec = RequestSpec::post("/youth/v1/listen_song/upgrade_vip_reward")
+
+    let is_already_claimed = |err: &crate::error::Error| {
+        err.code() == Some(Code::AlreadyClaimed)
+            || err.code() == Some(Code::Other(297_002))
+    };
+
+    // 1. 优先尝试升级激励端点
+    let upgrade_spec = RequestSpec::post("/youth/v1/listen_song/upgrade_vip_reward")
         .param("kugouid", session.userid())
         .param("ad_type", 1);
 
-    // 账号写操作不附加时间扰动，避免上游签名校验失败 (20006)
-    match api.call_auth(spec).await {
+    match api.call_auth(upgrade_spec).await {
         Ok(value) => Ok(VipClaim {
             already_claimed: false,
             recharge_hours: codec::pick_u64_paths(&value, &[&["data", "recharge_hours"][..], &["recharge_hours"][..]]),
             raw: value,
         }),
-        // 已经领取视为幂等成功
-        Err(error) if error.code() == Some(Code::AlreadyClaimed) => Ok(VipClaim {
+        Err(error) if is_already_claimed(&error) => Ok(VipClaim {
             already_claimed: true,
             recharge_hours: 0,
             raw: Value::Null,
         }),
-        Err(error) => Err(error),
+        Err(first_error) => {
+            // 2. 若升级端点未达条件（如 297000）或失败，回退尝试基础听歌激励端点
+            let receive_spec = RequestSpec::post("/youth/v1/recharge/receive_vip_listen_song")
+                .param("kugouid", session.userid())
+                .param("ad_type", 1);
+
+            match api.call_auth(receive_spec).await {
+                Ok(value) => Ok(VipClaim {
+                    already_claimed: false,
+                    recharge_hours: codec::pick_u64_paths(&value, &[&["data", "recharge_hours"][..], &["recharge_hours"][..]]),
+                    raw: value,
+                }),
+                Err(error) if is_already_claimed(&error) => Ok(VipClaim {
+                    already_claimed: true,
+                    recharge_hours: 0,
+                    raw: Value::Null,
+                }),
+                Err(_) => Err(first_error),
+            }
+        }
     }
 }
 

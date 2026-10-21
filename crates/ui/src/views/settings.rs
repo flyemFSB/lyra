@@ -9,10 +9,10 @@ use gpui_kit::*;
 use lyra_api::model::VipStatus;
 
 use crate::bridge::{Backend, Msg};
-use crate::format::{QUALITY_CHOICES, format_bytes, quality_label};
+use crate::format::QUALITY_CHOICES;
 use crate::theme::{
     ACCENT_GREEN, ACCENT_GREEN_HOVER, ACCENT_GREEN_LIGHT, CANVAS_BG, CARD_BG, CARD_BORDER, TEXT_FAINT, TEXT_MUTED,
-    TEXT_PRIMARY, VIP_GOLD, VIP_GOLD_LIGHT, badge, hex_rgb, title,
+    TEXT_PRIMARY, badge, hex_rgb, title,
 };
 
 /// 缓存容量预设选项
@@ -85,9 +85,8 @@ impl SettingsView {
             .spawn(async move { Msg::Vip(app.vip().await.map_err(|error| error.to_string())) });
     }
 
-    /// 重新加载会员状态（顶栏「刷新当前数据」）
-    ///
-    /// `ensure` 带 `loaded` 闩锁：直接复用它会让刷新按钮永远无效。
+    /// 重新加载会员状态
+    #[allow(dead_code)]
     pub(crate) fn reload(&mut self, cx: &mut Context<Self>) {
         self.loaded = false;
         self.ensure(cx);
@@ -97,7 +96,10 @@ impl SettingsView {
     pub(crate) fn on_vip(&mut self, result: Result<VipStatus, String>, cx: &mut Context<Self>) {
         match result {
             Ok(vip) => self.vip = Some(vip),
-            Err(error) => self.last_action = Some(error.into()),
+            Err(error) => {
+                tracing::warn!(%error, "获取 VIP 状态失败");
+                self.last_action = Some(SharedString::new_static("获取会员状态失败，请稍后重试"));
+            }
         }
         cx.notify();
     }
@@ -107,11 +109,16 @@ impl SettingsView {
         match result {
             Ok(()) => {
                 self.last_action = Some(SharedString::new_static("已成功领取今日畅听 VIP"));
+                self.backend.send(Msg::Toast("已成功领取今日畅听 VIP".to_owned()));
                 self.backend.app().clear_cache();
                 self.loaded = false;
                 self.ensure(cx);
             }
-            Err(error) => self.last_action = Some(SharedString::from(format!("领取失败: {error}"))),
+            Err(error) => {
+                tracing::warn!(%error, "领取 VIP 失败");
+                self.last_action = Some(SharedString::new_static("网络连接不稳定，请稍后重试"));
+                self.backend.send(Msg::Toast("领取失败: 网络连接不稳定，请稍后重试".to_owned()));
+            }
         }
         cx.notify();
     }
@@ -120,7 +127,11 @@ impl SettingsView {
     pub(crate) fn on_saved(&mut self, result: Result<(), String>, cx: &mut Context<Self>) {
         self.last_action = Some(match result {
             Ok(()) => SharedString::new_static("设置已成功保存"),
-            Err(error) => SharedString::from(format!("保存失败: {error}")),
+            Err(error) => {
+                tracing::warn!(%error, "保存设置失败");
+                self.backend.send(Msg::Toast("保存设置失败，请稍后重试".to_owned()));
+                SharedString::new_static("保存失败，请稍后重试")
+            }
         });
         cx.notify();
     }
@@ -192,10 +203,11 @@ impl SettingsView {
         });
     }
 
-    /// 清理内存接口缓存
+    /// 清理网络临时缓存
     fn clear_cache(&mut self, cx: &mut Context<Self>) {
         self.backend.app().clear_cache();
-        self.last_action = Some(SharedString::new_static("已清理接口缓存"));
+        self.last_action = Some(SharedString::new_static("已清理网络临时缓存"));
+        self.backend.send(Msg::Toast("网络临时缓存已成功清除".to_owned()));
         cx.notify();
     }
 
@@ -204,20 +216,20 @@ impl SettingsView {
         match &self.vip {
             Some(vip) if vip.is_concept_active() => {
                 if let Some(exp) = vip.concept_expires_str() {
-                    format!("今日畅听 VIP 权益生效中（有效期至 {exp}）")
+                    format!("今日畅听 VIP 权益生效中（自然日有效，有效期至 {exp}）")
                 } else {
-                    "今日畅听 VIP 权益生效中".to_string()
+                    "今日畅听 VIP 权益生效中（自然日内有效）".to_string()
                 }
             }
-            Some(_) => "今日未领取畅听 VIP（点击右侧一键领取）".to_string(),
-            None => "会员状态获取中…".to_string(),
+            Some(_) => "每日可领取一次畅听权益（自然日内有效，享无损高品质音乐）".to_string(),
+            None => "会员状态同步中…".to_string(),
         }
     }
 }
 
 impl Render for SettingsView {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        // 音质偏好选择
+        // 音质偏好选择（点击选中即可体现状态，去除多余标签）
         let mut quality_row = h_flex().gap(px(8.0)).flex_wrap().items_center();
         for (id, label) in QUALITY_CHOICES.iter().copied() {
             let active = self.quality == id;
@@ -230,13 +242,8 @@ impl Render for SettingsView {
                     .on_click(cx.listener(move |view, _event, _window, cx| view.set_quality(id, cx))),
             );
         }
-        quality_row = quality_row.child(badge(
-            format!("当前: {}", quality_label(self.quality.as_str())),
-            ACCENT_GREEN_LIGHT,
-            ACCENT_GREEN_HOVER,
-        ));
 
-        // VIP 权益卡片
+        // VIP 权益卡片（沉稳暗金质感，沉敛高级，告别页游风格）
         let is_vip_active = self
             .vip
             .as_ref()
@@ -245,24 +252,24 @@ impl Render for SettingsView {
             .w_full()
             .p_4()
             .rounded(px(12.0))
-            .bg(hex_rgb(0xfffbeb))
+            .bg(hex_rgb(0x181a20))
             .border_1()
-            .border_color(hex_rgb(0xfde68a))
+            .border_color(hex_rgb(0x2d323b))
             .shadow_sm()
             .items_center()
-            .gap(px(16.0))
+            .gap(px(14.0))
             .child(
                 div()
-                    .w(px(44.0))
-                    .h(px(44.0))
+                    .w(px(40.0))
+                    .h(px(40.0))
                     .rounded_full()
-                    .bg(VIP_GOLD_LIGHT)
+                    .bg(hex_rgb(0x262a34))
                     .border_1()
-                    .border_color(hex_rgb(0xfcd34d))
+                    .border_color(hex_rgb(0x383e4c))
                     .flex()
                     .items_center()
                     .justify_center()
-                    .child(Icon::new(IconName::Crown).size(px(22.0)).text_color(VIP_GOLD)),
+                    .child(Icon::new(IconName::Crown).size(px(20.0)).text_color(hex_rgb(0xf59e0b))),
             )
             .child(
                 v_flex()
@@ -276,27 +283,27 @@ impl Render for SettingsView {
                                 div()
                                     .text_sm()
                                     .font_weight(FontWeight::BOLD)
-                                    .text_color(TEXT_PRIMARY)
-                                    .child("Lyra音乐畅听 VIP"),
+                                    .text_color(hex_rgb(0xf3f4f6))
+                                    .child("Lyra音乐 畅听 VIP"),
                             )
                             .child(badge(
-                                if is_vip_active { "已领取" } else { "未领取" },
+                                if is_vip_active { "权益生效中" } else { "今日未领取" },
                                 if is_vip_active {
-                                    ACCENT_GREEN_LIGHT
+                                    hex_rgb(0x064e3b)
                                 } else {
-                                    hex_rgb(0xfee2e2)
+                                    hex_rgb(0x27272a)
                                 },
                                 if is_vip_active {
-                                    ACCENT_GREEN_HOVER
+                                    hex_rgb(0x34d399)
                                 } else {
-                                    hex_rgb(0xef4444)
+                                    hex_rgb(0x9ca3af)
                                 },
                             )),
                     )
                     .child(
                         div()
                             .text_xs()
-                            .text_color(TEXT_MUTED)
+                            .text_color(hex_rgb(0x9ca3af))
                             .child(SharedString::from(self.vip_label())),
                     ),
             )
@@ -312,13 +319,13 @@ impl Render for SettingsView {
                     .when(!is_vip_active, |b| {
                         b.primary()
                             .icon(IconName::Sparkles)
-                            .label("一键免费领取 VIP")
+                            .label("一键免费领取")
                             .tooltip("每日可领取一次畅听权益")
                             .on_click(cx.listener(|view, _event, _window, cx| view.claim_vip(cx)))
                     }),
             );
 
-        // 缓存容量预设
+        // 缓存容量预设（选项激活态即语义表达，无需冗余文本）
         let mut preset_row = h_flex().gap(px(8.0)).flex_wrap().items_center();
         for (label, bytes) in CACHE_PRESETS.iter().copied() {
             let active = self.max_cache_bytes == bytes;
@@ -331,13 +338,8 @@ impl Render for SettingsView {
                     .on_click(cx.listener(move |view, _event, _window, cx| view.set_cache_limit(bytes, cx))),
             );
         }
-        preset_row = preset_row.child(badge(
-            format!("当前: {}", format_bytes(self.max_cache_bytes)),
-            ACCENT_GREEN_LIGHT,
-            ACCENT_GREEN_HOVER,
-        ));
 
-        // 缓存路径
+        // 缓存路径（现代文件选择器布局：只读展示 + 更改/保存）
         let cache_row = h_flex()
             .gap(px(10.0))
             .items_center()
@@ -347,18 +349,18 @@ impl Render for SettingsView {
                     .min_w(px(0.0))
                     .px_3()
                     .py(px(4.0))
-                    .rounded(px(10.0))
+                    .rounded(px(8.0))
                     .bg(CANVAS_BG)
                     .border_1()
                     .border_color(CARD_BORDER)
                     .gap(px(8.0))
                     .items_center()
-                    .child(Icon::new(IconName::HardDrive).size(px(16.0)).text_color(ACCENT_GREEN))
-                    .child(div().flex_1().child(Input::new(&self.cache_dir))),
+                    .child(Icon::new(IconName::Folder).size(px(16.0)).text_color(TEXT_MUTED))
+                    .child(div().flex_1().child(Input::new(&self.cache_dir).appearance(false))),
             )
             .child(
                 Button::new("save_cache_dir")
-                    .primary()
+                    .ghost()
                     .small()
                     .icon(IconName::Check)
                     .label("保存路径")
@@ -373,8 +375,9 @@ impl Render for SettingsView {
                 Button::new("clear_cache")
                     .ghost()
                     .small()
-                    .icon(IconName::RefreshCw)
-                    .label("清理内存接口缓存")
+                    .icon(IconName::Trash)
+                    .label("清除网络缓存")
+                    .tooltip("清除网络临时接口缓存，不影响已下载曲目")
                     .on_click(cx.listener(|view, _event, _window, cx| view.clear_cache(cx))),
             )
             .child(
@@ -385,22 +388,6 @@ impl Render for SettingsView {
                     .label("退出当前登录")
                     .on_click(cx.listener(|view, _event, _window, _cx| view.logout())),
             );
-
-        // 操作状态反馈条
-        let status = self.last_action.clone().map(|text| {
-            h_flex()
-                .w_full()
-                .px_5()
-                .py_2()
-                .items_center()
-                .gap(px(6.0))
-                .border_t_1()
-                .border_color(CARD_BORDER)
-                .bg(hex_rgb(0xf9fafb))
-                .child(Icon::new(IconName::Sparkles).size(px(14.0)).text_color(ACCENT_GREEN))
-                .child(div().text_xs().text_color(TEXT_MUTED).child(text))
-                .into_any_element()
-        });
 
         v_flex()
             .size_full()
@@ -544,6 +531,5 @@ impl Render for SettingsView {
                             ),
                     ),
             )
-            .children(status)
     }
 }

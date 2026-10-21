@@ -4,6 +4,7 @@
 
 mod bridge;
 mod format;
+mod http;
 pub(crate) mod logo;
 mod motion;
 mod shell;
@@ -44,8 +45,11 @@ pub fn run() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let opened = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
     let opened_in_closure = opened.clone();
 
+    let http_client = std::sync::Arc::new(http::LyraHttpClient::new(handle.clone()));
+
     gpui_kit::application()
         .with_assets(gpui_kit::assets::AllAssets)
+        .with_http_client(http_client)
         .run(move |cx| {
             gpui_kit::init(cx);
             gpui_kit::component::Theme::change(gpui_kit::component::ThemeMode::Light, None, cx);
@@ -77,8 +81,10 @@ fn window_options() -> WindowOptions {
         window_min_size: Some(size(px(880.0), px(560.0))),
         titlebar: Some(TitlebarOptions {
             title: Some("Lyra音乐".into()),
+            appears_transparent: true,
             ..Default::default()
         }),
+        app_owns_titlebar_drag: true,
         // 桌面环境应用标识
         app_id: Some("lyra".to_owned()),
         ..Default::default()

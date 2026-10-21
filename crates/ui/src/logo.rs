@@ -1,9 +1,9 @@
 //! Lyra音乐品牌标识与图标组件
 
-use gpui_kit::component::{h_flex, v_flex};
+use gpui_kit::component::h_flex;
 use gpui_kit::*;
 
-use crate::theme::{ACCENT_GREEN, TEXT_FAINT, TEXT_PRIMARY};
+use crate::theme::{ACCENT_GREEN, TEXT_PRIMARY};
 
 /// Lyra 天琴座标志纯矢量 SVG 源码（支持 fill="currentColor" 自由着色）
 pub(crate) const LYRA_MARK_SVG: &str = r#"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" fill="none">
@@ -41,44 +41,37 @@ pub(crate) fn lyra_logo_icon(edge: f32) -> Div {
         )
 }
 
-/// 侧边栏顶部品牌标识栏组件
+/// 侧边栏顶部品牌标识栏组件（精简现代风格，与左侧栏无缝贴合）
 pub(crate) fn lyra_brand_header() -> impl IntoElement {
     h_flex()
         .id("lyra_brand_header")
         .w_full()
         .px_2()
-        .py(px(4.0))
+        .py(px(6.0))
         .items_center()
-        .gap(px(10.0))
-        .child(lyra_logo_icon(32.0))
+        .gap(px(8.0))
+        .child(lyra_logo_icon(26.0))
         .child(
-            v_flex()
-                .flex_1()
-                .min_w(px(0.0))
-                .gap(px(1.0))
+            h_flex()
+                .gap(px(6.0))
+                .items_center()
                 .child(
-                    h_flex()
-                        .gap(px(6.0))
-                        .items_center()
-                        .child(
-                            div()
-                                .text_sm()
-                                .font_weight(FontWeight::BOLD)
-                                .text_color(TEXT_PRIMARY)
-                                .child("Lyra音乐"),
-                        )
-                        .child(
-                            div()
-                                .px(px(5.0))
-                                .py(px(1.0))
-                                .rounded(px(999.0))
-                                .bg(crate::theme::ACCENT_GREEN_LIGHT)
-                                .text_color(crate::theme::ACCENT_GREEN_HOVER)
-                                .text_xs()
-                                .font_weight(FontWeight::BOLD)
-                                .child("Lite"),
-                        ),
+                    div()
+                        .text_sm()
+                        .font_weight(FontWeight::BOLD)
+                        .text_color(TEXT_PRIMARY)
+                        .child("Lyra音乐"),
                 )
-                .child(div().text_xs().text_color(TEXT_FAINT).child("天琴高品质音乐")),
+                .child(
+                    div()
+                        .px(px(4.0))
+                        .py(px(0.5))
+                        .rounded(px(3.0))
+                        .bg(crate::theme::hex_rgb(0xe5e7eb))
+                        .text_color(crate::theme::hex_rgb(0x6b7280))
+                        .text_size(px(9.0))
+                        .font_weight(FontWeight::MEDIUM)
+                        .child("Lite"),
+                ),
         )
 }

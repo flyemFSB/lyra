@@ -7,7 +7,6 @@ use std::time::Duration;
 
 use gpui_kit::assets::IconName;
 use gpui_kit::component::button::{Button, ButtonVariants};
-use gpui_kit::component::scroll::ScrollableElement as _;
 use gpui_kit::component::{Sizable as _, h_flex, v_flex};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
@@ -16,7 +15,9 @@ use lyra_api::model::LyricLine;
 use crate::bridge::Backend;
 use crate::format::lyric_index;
 use crate::shell::AppShell;
-use crate::theme::{CARD_BG, CARD_BORDER, badge, cover_box, hex_rgb, notice_with_icon};
+use crate::theme::{
+    CARD_BORDER, TEXT_MUTED, TEXT_PRIMARY, hex_rgb, notice_with_icon, song_cover, sq_badge,
+};
 use crate::views::player::PlayerModel;
 
 /// 歌词视图
@@ -29,6 +30,7 @@ pub(crate) struct LyricsView {
     texts: Arc<Vec<SharedString>>,
     title: SharedString,
     singer: SharedString,
+    cover: SharedString,
     current_hash: Option<String>,
     status: Option<SharedString>,
     /// 歌词滚动区控制柄
@@ -53,13 +55,13 @@ fn center_offset(viewport: Bounds<Pixels>, item: Bounds<Pixels>) -> Pixels {
     viewport.center().y - item.center().y
 }
 
-/// 离当前行越远的歌词越淡
+/// 离当前行越远的歌词呈阶梯式平滑衰减
 fn lyric_fade(distance: usize) -> f32 {
     match distance {
         0 => 1.0,
-        1 => 0.55,
-        2 => 0.35,
-        _ => 0.2,
+        1 => 0.60,
+        2 => 0.38,
+        _ => 0.20,
     }
 }
 
@@ -83,6 +85,7 @@ impl LyricsView {
             texts: Arc::new(Vec::new()),
             title: SharedString::new_static("未在播放"),
             singer: SharedString::new_static(""),
+            cover: SharedString::new_static(""),
             current_hash: None,
             status: None,
             scroll: ScrollHandle::new(),
@@ -101,6 +104,7 @@ impl LyricsView {
         self.texts = Arc::new(Vec::new());
         self.title = SharedString::new_static("未在播放");
         self.singer = SharedString::new_static("");
+        self.cover = SharedString::new_static("");
         self.current_hash = None;
         self.status = None;
         self.followed = None;
@@ -200,10 +204,11 @@ impl LyricsView {
         if !changed {
             return;
         }
-        let (hash, title, singer) = self.player.read(cx).current_labels();
+        let (hash, title, singer, cover) = self.player.read(cx).current_labels();
         self.current_hash = hash;
         self.title = title;
         self.singer = singer;
+        self.cover = cover;
     }
 
     /// 渲染歌词流：当前行固定在滚动区正中，切换时平滑滚过去并淡入
@@ -238,25 +243,25 @@ impl LyricsView {
 
             let label = div()
                 .when(active, |this| {
-                    this.text_2xl()
+                    this.text_xl()
                         .font_weight(FontWeight::BOLD)
-                        .text_color(hex_rgb(0x0284c7))
+                        .text_color(TEXT_PRIMARY)
                 })
                 .when(!active, |this| {
                     this.text_base()
                         .font_weight(FontWeight::NORMAL)
-                        .text_color(hex_rgb(0x94a3b8))
-                        .hover(|s| s.text_color(hex_rgb(0x334155)))
+                        .text_color(TEXT_MUTED)
+                        .hover(|s| s.text_color(TEXT_PRIMARY))
                 })
                 .child(text);
 
-            // 当前行淡入并轻放大，其余行越远越淡
+            // 当前行淡入并轻微放大，其余行阶梯式淡化
             let label = if active {
                 label
                     .with_animation(
                         ("lyric_active", index),
                         Animation::new(LYRIC_ANIMATION).with_easing(ease_in_out),
-                        |label, delta| label.text_size(rems(1.25 + 0.25 * delta)).opacity(delta),
+                        |label, delta| label.text_size(rems(1.20 + 0.15 * delta)).opacity(delta),
                     )
                     .into_any_element()
             } else {
@@ -273,7 +278,7 @@ impl LyricsView {
                     .role(Role::Button)
                     .cursor_pointer()
                     .w_full()
-                    .py(px(4.0))
+                    .py(px(5.0))
                     .flex()
                     .items_center()
                     .gap(px(10.0))
@@ -284,6 +289,7 @@ impl LyricsView {
             );
         }
 
+        // 隐藏系统原生滚动条，支持平滑惯性滚动
         div()
             .id("lyrics-scroll")
             .flex_1()
@@ -302,11 +308,10 @@ impl LyricsView {
                     body
                 },
             ))
-            .vertical_scrollbar(&self.scroll)
             .into_any_element()
     }
 
-    /// 渲染黑胶唱机拟态舞台
+    /// 渲染现代沉浸风大尺寸专辑封面与动态弥散光晕舞台（方案 B）
     fn vinyl_turntable_stage(&self, is_playing: bool) -> impl IntoElement {
         let title_label = self.title.as_ref();
 
@@ -321,174 +326,44 @@ impl LyricsView {
             .child(
                 div()
                     .relative()
-                    .w(px(380.0))
-                    .h(px(380.0))
+                    .w(px(320.0))
+                    .h(px(320.0))
                     .flex()
                     .items_center()
                     .justify_center()
-                    // 外圈辉光（播放中自然呼吸微光）
+                    // 四周动态弥散模糊光晕（播放时呼吸微光）
                     .child({
-                        let glow = div()
+                        let ambient_glow = div()
                             .absolute()
-                            .size(px(380.0))
-                            .rounded_full()
-                            .bg(hsla(202.0 / 360.0, 0.95, 0.88, 0.45))
+                            .size(px(340.0))
+                            .rounded(px(28.0))
+                            .bg(hsla(160.0 / 360.0, 0.45, 0.75, 0.22))
                             .shadow_xl();
                         if is_playing {
-                            glow.with_animation(
-                                "vinyl_glow",
-                                Animation::new(Duration::from_millis(2400))
-                                    .repeat()
-                                    .with_easing(pulsating_between(0.25, 0.65)),
-                                gpui_kit::Styled::opacity,
-                            )
-                            .into_any_element()
+                            ambient_glow
+                                .with_animation(
+                                    "ambient_glow",
+                                    Animation::new(Duration::from_millis(3000))
+                                        .repeat()
+                                        .with_easing(pulsating_between(0.18, 0.55)),
+                                    gpui_kit::Styled::opacity,
+                                )
+                                .into_any_element()
                         } else {
-                            glow.into_any_element()
+                            ambient_glow.opacity(0.18).into_any_element()
                         }
                     })
-                    // 彩胶外环
+                    // 大尺寸质感封面（支持高清网络封面与优雅矢量降级）
                     .child(
                         div()
-                            .size(px(340.0))
-                            .rounded_full()
-                            .bg(hsla(204.0 / 360.0, 0.85, 0.62, 0.45))
-                            .border_2()
-                            .border_color(hsla(200.0 / 360.0, 0.95, 0.80, 0.65))
+                            .size(px(320.0))
+                            .rounded(px(16.0))
+                            .overflow_hidden()
                             .shadow_lg()
                             .flex()
                             .items_center()
                             .justify_center()
-                            .child(
-                                div()
-                                    .size(px(280.0))
-                                    .rounded_full()
-                                    .border_1()
-                                    .border_color(hsla(200.0 / 360.0, 0.90, 0.85, 0.35))
-                                    .flex()
-                                    .items_center()
-                                    .justify_center()
-                                    .child(
-                                        div()
-                                            .size(px(220.0))
-                                            .rounded_full()
-                                            .border_1()
-                                            .border_color(hsla(200.0 / 360.0, 0.85, 0.90, 0.40))
-                                            .flex()
-                                            .items_center()
-                                            .justify_center()
-                                            // 唱片中心封面
-                                            .child(
-                                                div()
-                                                    .size(px(160.0))
-                                                    .rounded_full()
-                                                    .overflow_hidden()
-                                                    .border_2()
-                                                    .border_color(CARD_BG)
-                                                    .shadow_md()
-                                                    .flex()
-                                                    .items_center()
-                                                    .justify_center()
-                                                    .child(cover_box(title_label, 160.0)),
-                                            ),
-                                    ),
-                            ),
-                    )
-                    // 中心轴芯
-                    .child(
-                        div()
-                            .absolute()
-                            .size(px(26.0))
-                            .rounded_full()
-                            .bg(CARD_BG)
-                            .border_2()
-                            .border_color(hex_rgb(0xcfd8dc))
-                            .shadow_sm()
-                            .flex()
-                            .items_center()
-                            .justify_center()
-                            .child(
-                                div()
-                                    .size(px(8.0))
-                                    .rounded_full()
-                                    .bg(hex_rgb(0x475569)),
-                            ),
-                    )
-                    // 唱臂与唱针组件（播放/暂停平滑切入与复位）
-                    .child(
-                        div()
-                            .absolute()
-                            .w(px(90.0))
-                            .h(px(220.0))
-                            .with_animation(
-                                if is_playing { "tonearm_playing" } else { "tonearm_paused" },
-                                Animation::new(Duration::from_millis(360))
-                                    .with_easing(gpui_kit::base::animation::ease_out_cubic),
-                                move |this, delta| {
-                                    let (start_top, target_top) = if is_playing { (8.0, 12.0) } else { (12.0, 8.0) };
-                                    let (start_right, target_right) = if is_playing { (16.0, 24.0) } else { (24.0, 16.0) };
-                                    this.top(px(start_top + (target_top - start_top) * delta))
-                                        .right(px(start_right + (target_right - start_right) * delta))
-                                },
-                            )
-                            .child(
-                                div()
-                                    .absolute()
-                                    .top_0()
-                                    .right_0()
-                                    .size(px(32.0))
-                                    .rounded_full()
-                                    .bg(CARD_BG)
-                                    .border_1()
-                                    .border_color(hex_rgb(0xe2e8f0))
-                                    .shadow_md()
-                                    .flex()
-                                    .items_center()
-                                    .justify_center()
-                                    .child(
-                                        div()
-                                            .size(px(12.0))
-                                            .rounded_full()
-                                            .bg(hex_rgb(0x94a3b8)),
-                                    ),
-                            )
-                            .child(
-                                div()
-                                    .absolute()
-                                    .top(px(26.0))
-                                    .right(px(12.0))
-                                    .w(px(6.0))
-                                    .h(px(140.0))
-                                    .rounded_full()
-                                    .bg(hex_rgb(0xf1f5f9))
-                                    .border_1()
-                                    .border_color(hex_rgb(0xe2e8f0))
-                                    .shadow_sm(),
-                            )
-                            // 唱头与唱针
-                            .child(
-                                div()
-                                    .absolute()
-                                    .top(px(154.0))
-                                    .right(if is_playing { px(18.0) } else { px(10.0) })
-                                    .w(px(26.0))
-                                    .h(px(16.0))
-                                    .rounded(px(5.0))
-                                    .bg(CARD_BG)
-                                    .border_1()
-                                    .border_color(hex_rgb(0xcfd8dc))
-                                    .shadow_md()
-                                    .flex()
-                                    .items_center()
-                                    .justify_center()
-                                    .child(
-                                        div()
-                                            .w(px(3.0))
-                                            .h(px(8.0))
-                                            .rounded_full()
-                                            .bg(hex_rgb(0x0284c7)),
-                                    ),
-                            ),
+                            .child(song_cover(self.cover.as_ref(), title_label, 320.0)),
                     ),
             )
     }
@@ -527,29 +402,29 @@ impl Render for LyricsView {
             .child(
                 v_flex()
                     .w_full()
-                    .gap(px(6.0))
+                    .gap(px(4.0))
                     .pb_4()
                     .border_b_1()
                     .border_color(CARD_BORDER)
                     .child(
                         h_flex()
                             .gap(px(10.0))
-                            .items_baseline()
+                            .items_center()
                             .child(
                                 div()
-                                    .text_3xl()
+                                    .text_2xl()
                                     .font_weight(FontWeight::BOLD)
-                                    .text_color(hex_rgb(0x0f172a))
+                                    .text_color(TEXT_PRIMARY)
                                     .truncate()
                                     .child(self.title.clone()),
                             )
-                            .child(badge("SQ 无损母带", hex_rgb(0xf0fdf4), hex_rgb(0x16a34a))),
+                            .child(sq_badge()),
                     )
                     .child(
                         div()
-                            .text_base()
+                            .text_sm()
                             .font_weight(FontWeight::MEDIUM)
-                            .text_color(hex_rgb(0x64748b))
+                            .text_color(TEXT_MUTED)
                             .truncate()
                             .child(self.singer.clone()),
                     ),

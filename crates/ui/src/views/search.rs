@@ -16,7 +16,7 @@ use crate::bridge::{Backend, Msg};
 use crate::shell::AppShell;
 use crate::theme::{
     ACCENT_GREEN, ACCENT_GREEN_HOVER, ACCENT_GREEN_LIGHT, CANVAS_BG, CARD_BORDER, TEXT_MUTED, badge, chip,
-    notice_with_icon, row_sizes, title,
+    friendly_error_message, notice_with_icon, row_sizes, title,
 };
 use crate::views::player::PlayerModel;
 use crate::views::tracks::{RowContext, TrackRow, build_rows, current_play_state, song_row};
@@ -120,7 +120,7 @@ impl SearchView {
     }
 
     /// 发起搜索请求
-    fn execute_search(&mut self, keyword: String, cx: &mut Context<Self>) {
+    pub(crate) fn execute_search(&mut self, keyword: String, cx: &mut Context<Self>) {
         if !is_searchable(&keyword) {
             return;
         }
@@ -151,10 +151,11 @@ impl SearchView {
                 self.error = None;
             }
             Err(error) => {
+                tracing::warn!(%error, "搜索歌曲失败");
                 self.songs = Arc::new(Vec::new());
                 self.rows = Arc::new(Vec::new());
                 self.sizes = row_sizes(0);
-                self.error = Some(error.into());
+                self.error = Some(friendly_error_message(&error).into());
             }
         }
         cx.notify();
@@ -215,8 +216,8 @@ impl Render for SearchView {
                         h_flex()
                             .flex_1()
                             .min_w(px(0.0))
+                            .h(px(38.0))
                             .px_3()
-                            .py(px(4.0))
                             .rounded(px(10.0))
                             .bg(CANVAS_BG)
                             .border_1()
@@ -224,7 +225,7 @@ impl Render for SearchView {
                             .gap(px(8.0))
                             .items_center()
                             .child(Icon::new(IconName::Search).size(px(16.0)).text_color(ACCENT_GREEN))
-                            .child(div().flex_1().child(Input::new(&self.input).w_full()))
+                            .child(div().flex_1().child(Input::new(&self.input).appearance(false).w_full()))
                             .when(has_input_text, |this| {
                                 this.child(
                                     Button::new("clear_input")

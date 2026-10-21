@@ -17,6 +17,7 @@ pub(crate) fn index_label(index: usize) -> SharedString {
 }
 
 /// 音质标识 → 展示文本
+#[allow(dead_code)]
 const QUALITY_LABELS: &[(&str, &str)] = &[
     ("flac", "无损"),
     ("320", "高品 320K"),
@@ -30,6 +31,7 @@ const QUALITY_LABELS: &[(&str, &str)] = &[
 pub(crate) const QUALITY_CHOICES: &[(&str, &str)] = &[("flac", "无损"), ("320", "高品 320K"), ("128", "标准 128K")];
 
 /// 获取音质编码对应的展示文本
+#[allow(dead_code)]
 pub(crate) fn quality_label(quality: &str) -> &'static str {
     QUALITY_LABELS
         .iter()
@@ -70,7 +72,7 @@ pub(crate) fn progress_percent(position_ms: u64, duration_ms: u64) -> f32 {
 }
 
 /// 字节数格式化为易读存储单位
-#[allow(clippy::cast_precision_loss)]
+#[allow(dead_code, clippy::cast_precision_loss)]
 pub(crate) fn format_bytes(bytes: u64) -> String {
     const UNITS: [&str; 5] = ["B", "KiB", "MiB", "GiB", "TiB"];
     if bytes < 1024 {
