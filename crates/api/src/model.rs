@@ -59,18 +59,40 @@ impl Song {
         if hash.is_empty() && name.is_empty() {
             return None;
         }
-        // 上游时长单位不统一（秒/毫秒），按量级归一化为毫秒
-        let duration_ms = normalise_duration(codec::pick_i64(
+        // 上游时长单位不统一（秒/毫秒），字段命名多变，按量级归一化为毫秒
+        let mut duration_raw = codec::pick_i64(
             value,
             &[
+                "time_length",
+                "timelength",
                 "timelen",
                 "timelen_ms",
                 "Duration",
                 "duration",
-                "timelength",
                 "duration_ms",
+                "time_len",
+                "interval",
+                "timelength_320",
+                "time_length_320",
+                "timelength_128",
+                "time_length_128",
             ],
-        ));
+        );
+        if duration_raw == 0 {
+            duration_raw = codec::pick_i64_paths(
+                value,
+                &[
+                    &["audio_info", "time_length"],
+                    &["audio_info", "timelength"],
+                    &["audio_info", "timelen"],
+                    &["audio_info", "duration"],
+                    &["trans_param", "time_length"],
+                    &["trans_param", "timelength"],
+                    &["trans_param", "duration"],
+                ],
+            );
+        }
+        let duration_ms = normalise_duration(duration_raw);
         let album_id = scalar_of(codec::pick(value, &["album_id", "albumid"]));
         // 专辑 ID 缺失时回退到 trans_param 中的同名字段
         let album_id = if album_id.is_empty() {
@@ -971,5 +993,36 @@ mod tests {
             }
             .has_more()
         );
+    }
+
+    #[test]
+    fn test_song_duration_from_various_fields() {
+        // 验证每日推荐等接口使用的 time_length 与 timelength_320 能够正确解析为毫秒
+        let json_time_length = json!({
+            "songname": "默契",
+            "hash": "EA5F68BBA10C12AEBE810360A515CD82",
+            "author_name": "海南小崇",
+            "time_length": 208
+        });
+        let song = Song::from_value(&json_time_length).unwrap();
+        assert_eq!(song.duration_ms, 208_000);
+
+        let json_timelength_fallback = json!({
+            "songname": "晴天",
+            "hash": "DF1CBA1FFC7EE33989069D80CBE5C064",
+            "timelength_320": 269
+        });
+        let song2 = Song::from_value(&json_timelength_fallback).unwrap();
+        assert_eq!(song2.duration_ms, 269_000);
+
+        let json_nested = json!({
+            "songname": "七里香",
+            "hash": "EB63DFC82FA0FC03EE58A5DA1F2DFF78",
+            "audio_info": {
+                "time_length": 299
+            }
+        });
+        let song3 = Song::from_value(&json_nested).unwrap();
+        assert_eq!(song3.duration_ms, 299_000);
     }
 }

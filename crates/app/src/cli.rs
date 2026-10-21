@@ -224,7 +224,7 @@ pub async fn run(args: &[String], runtime: tokio::runtime::Handle) -> Result<()>
         }
         "daily" => print_songs(&app.daily().await?),
         "fm" => {
-            let page = app.personal_fm(None, "normal").await?;
+            let page = app.personal_fm(None, 0, None).await?;
             print_songs(&page.items);
             println!("游标: {:?}", page.cursor);
         }

@@ -1,10 +1,10 @@
-//! 通用曲目行渲染组件。
+//! 通用曲目行与桌面端表格渲染组件。
 
 use std::sync::Arc;
 
 use gpui_kit::assets::IconName;
 use gpui_kit::component::button::{Button, ButtonVariants};
-use gpui_kit::component::{Icon, Sizable as _, h_flex, v_flex};
+use gpui_kit::component::{Sizable as _, h_flex};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use lyra_api::model::Song;
@@ -13,8 +13,8 @@ use crate::bridge::{Backend, Msg};
 use crate::format::format_duration;
 use crate::shell::AppShell;
 use crate::theme::{
-    ACCENT_GREEN, ROW_HEIGHT, SURFACE_HOVER, TEXT_FAINT, TEXT_MUTED, TEXT_PRIMARY,
-    friendly_error_message, hex_rgb, song_cover, sq_badge,
+    ACCENT_GREEN, CARD_BORDER, ROW_HEIGHT, SURFACE_HOVER, TEXT_FAINT, TEXT_MUTED, TEXT_PRIMARY, audio_equalizer,
+    friendly_error_message, hex_rgb, skeleton_shimmer, song_cover, sq_badge,
 };
 use crate::views::player::PlayerModel;
 
@@ -27,6 +27,8 @@ pub(crate) struct TrackRow {
     pub(crate) title: SharedString,
     /// 副标题（歌手名）
     pub(crate) singer: SharedString,
+    /// 所属专辑
+    pub(crate) album: SharedString,
     /// 时长文本
     pub(crate) duration: SharedString,
     /// 序号文本（01、02…）
@@ -43,6 +45,11 @@ pub(crate) fn build_rows(songs: &[Song]) -> Vec<TrackRow> {
         .map(|(index, song)| TrackRow {
             title: SharedString::from(song.display_title()),
             singer: SharedString::from(song.display_singer()),
+            album: SharedString::from(if song.album_name.trim().is_empty() {
+                "—"
+            } else {
+                song.album_name.trim()
+            }),
             duration: format_duration(song.duration_ms),
             index: SharedString::from(format!("{:02}", index + 1)),
             cover: SharedString::from(song.cover_at(120)),
@@ -51,9 +58,6 @@ pub(crate) fn build_rows(songs: &[Song]) -> Vec<TrackRow> {
 }
 
 /// 曲目行渲染所需的上下文
-///
-/// 把「队列 + 外壳 + 后端」三样总是成对出现的东西收在一起，
-/// 免得每行都传三个句柄。
 pub(crate) struct RowContext<'a> {
     /// 歌曲队列
     pub(crate) queue: &'a Arc<Vec<Song>>,
@@ -63,11 +67,16 @@ pub(crate) struct RowContext<'a> {
     pub(crate) shell: &'a WeakEntity<AppShell>,
     /// 后端桥接（收藏、移除等动作）
     pub(crate) backend: &'a Backend,
+    /// 当前选中的曲目索引（键盘导航或单击选中态）
+    pub(crate) selected_index: Option<usize>,
+    /// 单击选中回调
+    pub(crate) on_select: Option<SelectCallback>,
 }
 
+/// 单击选中行回调函数类型
+pub(crate) type SelectCallback = std::rc::Rc<dyn Fn(usize, &mut Window, &mut App)>;
+
 /// 渲染普通歌曲行（无移除按钮）
-///
-/// 四个列表视图的行渲染完全相同，只有「可移除」这一项不同。
 pub(crate) fn song_row(index: usize, ctx: &RowContext<'_>, cur_hash: Option<&str>, is_playing: bool) -> AnyElement {
     let this_hash = ctx.queue.get(index).map(|song| song.hash.as_str());
     let is_current = cur_hash.is_some() && cur_hash == this_hash;
@@ -86,7 +95,65 @@ pub(crate) fn current_play_state(player: &Entity<PlayerModel>, cx: &App) -> (Opt
     )
 }
 
-/// 渲染单首曲目行
+/// 桌面端表格表头（轻量 12px 浅灰表头，单行多列对齐）
+pub(crate) fn table_header() -> AnyElement {
+    h_flex()
+        .w_full()
+        .h(px(34.0))
+        .px_3()
+        .gap(px(10.0))
+        .items_center()
+        .border_b_1()
+        .border_color(CARD_BORDER)
+        .text_size(px(12.0))
+        .text_color(TEXT_FAINT)
+        // # 序号 (40px)
+        .child(
+            div()
+                .w(px(40.0))
+                .flex_shrink_0()
+                .flex()
+                .justify_center()
+                .child("#"),
+        )
+        // 标题 (40% 弹性拉伸)
+        .child(
+            div()
+                .flex_1()
+                .min_w(px(0.0))
+                .flex_grow(8.0)
+                .pl_1()
+                .child("标题"),
+        )
+        // 歌手 (25% 弹性拉伸)
+        .child(
+            div()
+                .flex_1()
+                .min_w(px(0.0))
+                .flex_grow(5.0)
+                .child("歌手"),
+        )
+        // 专辑 (25% 弹性拉伸)
+        .child(
+            div()
+                .flex_1()
+                .min_w(px(0.0))
+                .flex_grow(5.0)
+                .child("专辑"),
+        )
+        // 时长 & 操作 (100px 固定靠右)
+        .child(
+            div()
+                .w(px(100.0))
+                .flex_shrink_0()
+                .text_right()
+                .pr_3()
+                .child("时长"),
+        )
+        .into_any_element()
+}
+
+/// 渲染单首桌面端多列表格曲目行
 pub(crate) fn track_row(
     index: usize,
     row: &TrackRow,
@@ -99,46 +166,56 @@ pub(crate) fn track_row(
         return div().into_any_element();
     };
 
-    // 队列是 `Arc`，克隆只是引用计数递增；曲目本体等到真正点击「收藏」时再克隆，
-    // 避免渲染期把整首曲目（10 个 String 字段）复制一遍。
     let play_queue = ctx.queue.clone();
     let play_shell = ctx.shell.clone();
     let like_queue = ctx.queue.clone();
     let like_backend = ctx.backend.clone();
+    let is_selected = ctx.selected_index == Some(index);
+    let on_select = ctx.on_select.clone();
 
-    let mut track = h_flex()
+    let track = h_flex()
         .id(("track", index))
+        .group("track_row")
         .role(Role::Button)
         .h(px(ROW_HEIGHT))
         .w_full()
         .px_3()
         .gap(px(10.0))
-        .rounded(px(8.0))
+        .rounded(px(6.0))
         .cursor_pointer()
         .items_center()
-        .when(is_current, |this| this.bg(hex_rgb(0xf2f4f7)))
-        .when(!is_current, |this| this.hover(|style| style.bg(SURFACE_HOVER)))
-        .on_click(move |_event, _window, cx| {
-            play_shell
-                .update(cx, |shell, cx| shell.play_queue(play_queue.clone(), index, cx))
-                .ok();
+        .when(is_current, |this| this.bg(hex_rgb(0xf0fdf4)))
+        .when(!is_current && is_selected, |this| {
+            this.bg(hex_rgb(0xf3f4f6)).border_1().border_color(hex_rgb(0xd1d5db))
         })
-        // [ 序号 / 动态频谱 (24px) ]
+        .when(!is_current && !is_selected, |this| {
+            this.hover(|style| style.bg(SURFACE_HOVER))
+        })
+        .on_click(move |event, window, cx| {
+            if event.click_count() >= 2 {
+                // 双击：立即插队并播放此曲，避免单击误触
+                play_shell
+                    .update(cx, |shell, cx| shell.play_queue(play_queue.clone(), index, cx))
+                    .ok();
+            } else if let Some(select_fn) = &on_select {
+                // 单击：选中该行
+                select_fn(index, window, cx);
+            } else {
+                play_shell
+                    .update(cx, |shell, cx| shell.play_queue(play_queue.clone(), index, cx))
+                    .ok();
+            }
+        })
+        // 1. [ # 序号 / 3柱声波均衡器 (40px 固定居中) ]
         .child(
             div()
-                .w(px(24.0))
+                .w(px(40.0))
+                .flex_shrink_0()
                 .flex()
                 .items_center()
                 .justify_center()
                 .when(is_current, |this| {
-                    if is_playing {
-                        this.child(crate::motion::pulsating_icon(
-                            Icon::new(IconName::AudioLines).size(px(15.0)).text_color(ACCENT_GREEN),
-                            ("track_wave", index),
-                        ))
-                    } else {
-                        this.child(Icon::new(IconName::Music).size(px(14.0)).text_color(ACCENT_GREEN))
-                    }
+                    this.child(audio_equalizer(is_playing, ("track_eq", index)))
                 })
                 .when(!is_current, |this| {
                     this.child(
@@ -150,16 +227,19 @@ pub(crate) fn track_row(
                     )
                 }),
         )
-        // [ 封面 (40x40px, rounded 6px，支持真实封面图与优雅矢量降级) ]
-        .child(song_cover(row.cover.as_ref(), row.title.as_ref(), 40.0))
-        // [ 歌名 + SQ微标签 ]
+        // 2. [ 标题列 (40% 弹性拉伸)：封面 (36x36px) + 歌名 + SQ微标签 ]
         .child(
-            v_flex()
+            h_flex()
                 .flex_1()
                 .min_w(px(0.0))
-                .gap(px(2.0))
+                .flex_grow(8.0)
+                .gap(px(10.0))
+                .items_center()
+                .child(song_cover(row.cover.as_ref(), row.title.as_ref(), 36.0))
                 .child(
                     h_flex()
+                        .flex_1()
+                        .min_w(px(0.0))
                         .gap(px(6.0))
                         .items_center()
                         .child(
@@ -170,75 +250,134 @@ pub(crate) fn track_row(
                                 } else {
                                     FontWeight::MEDIUM
                                 })
-                                .text_color(TEXT_PRIMARY)
+                                .text_color(if is_current {
+                                    ACCENT_GREEN
+                                } else {
+                                    TEXT_PRIMARY
+                                })
                                 .truncate()
                                 .child(row.title.clone()),
                         )
                         .child(sq_badge()),
-                )
-                .child(
-                    div()
-                        .text_xs()
-                        .text_color(TEXT_MUTED)
-                        .truncate()
-                        .child(row.singer.clone()),
                 ),
         )
-        // [ 时长 (靠右, 等宽对齐) ]
+        // 3. [ 歌手列 (25% 弹性拉伸)：单独一列，悬浮高亮 ]
         .child(
             div()
-                .w(px(52.0))
-                .text_right()
+                .flex_1()
+                .min_w(px(0.0))
+                .flex_grow(5.0)
+                .text_xs()
+                .text_color(TEXT_MUTED)
+                .hover(|s| s.text_color(ACCENT_GREEN))
+                .truncate()
+                .child(row.singer.clone()),
+        )
+        // 4. [ 专辑列 (25% 弹性拉伸)：展示所属专辑 ]
+        .child(
+            div()
+                .flex_1()
+                .min_w(px(0.0))
+                .flex_grow(5.0)
                 .text_xs()
                 .text_color(TEXT_FAINT)
-                .child(row.duration.clone()),
+                .truncate()
+                .child(row.album.clone()),
         )
-        // [ 悬浮/行内操作图标 ]
-        .child(
-            Button::new(("like", index))
-                .ghost()
-                .small()
-                .icon(IconName::Heart)
-                .tooltip("收藏到我喜欢")
-                .block_mouse_except_scroll()
-                .on_click(move |_event, _window, _cx| {
-                    let Some(song) = like_queue.get(index) else {
-                        return;
-                    };
-                    let song = song.clone();
-                    let app = like_backend.app();
-                    like_backend.spawn(async move {
-                        match app.like(&song).await {
-                            Ok(()) => Msg::Noop,
-                            Err(error) => {
-                                tracing::warn!(%error, "收藏歌曲失败");
-                                Msg::Toast(friendly_error_message(&error.to_string()))
-                            }
-                        }
-                    });
-                }),
-        );
+        // 5. [ 时长 & Hover-to-Reveal 交互区 (100px 固定靠右) ]
+        .child({
+            let remove_backend = ctx.backend.clone();
+            let removable = removable_listid.cloned();
+            let fileid = song.fileid;
+            let title_for_more = row.title.clone();
+            let singer_for_more = row.singer.clone();
 
-    // 移除按钮（仅自建歌单可用）
-    if let Some(listid) = removable_listid {
-        let remove_backend = ctx.backend.clone();
-        let listid = listid.clone();
-        let fileid = song.fileid;
-        track = track.child(
-            Button::new(("remove", index))
-                .ghost()
-                .small()
-                .icon(IconName::Trash)
-                .tooltip("从歌单移除")
-                .block_mouse_except_scroll()
-                .on_click(move |_event, _window, _cx| {
-                    remove_backend.send(Msg::RemoveTrack {
-                        listid: listid.to_string(),
-                        fileid,
-                    });
-                }),
-        );
-    }
+            div()
+                .w(px(100.0))
+                .flex_shrink_0()
+                .h_full()
+                .relative()
+                .flex()
+                .items_center()
+                .justify_end()
+                .pr_2()
+                // 常态显示时长（若为 0 显示骨架微光；鼠标悬浮时平滑淡出）
+                .child(
+                    div()
+                        .group_hover("track_row", |s| s.opacity(0.0))
+                        .text_right()
+                        .text_xs()
+                        .text_color(TEXT_FAINT)
+                        .child(if song.duration_ms == 0 {
+                            skeleton_shimmer(34.0, 6.5, ("duration_skel", index))
+                        } else {
+                            div().child(row.duration.clone()).into_any_element()
+                        }),
+                )
+                // 鼠标 Hover 到该行时时长淡出，浮现 [ 爱心 ] 与 [ ··· 更多 ]
+                .child(
+                    h_flex()
+                        .absolute()
+                        .right(px(4.0))
+                        .items_center()
+                        .gap(px(2.0))
+                        .opacity(0.0)
+                        .group_hover("track_row", |s| s.opacity(1.0))
+                        // [ 爱心 ]
+                        .child(
+                            Button::new(("like", index))
+                                .ghost()
+                                .small()
+                                .icon(IconName::Heart)
+                                .tooltip("收藏到我喜欢")
+                                .block_mouse_except_scroll()
+                                .on_click(move |_event, _window, _cx| {
+                                    let Some(song) = like_queue.get(index) else {
+                                        return;
+                                    };
+                                    let song = song.clone();
+                                    let app = like_backend.app();
+                                    like_backend.spawn(async move {
+                                        match app.like(&song).await {
+                                            Ok(()) => Msg::Toast("已添加到我喜欢".to_owned()),
+                                            Err(error) => {
+                                                tracing::warn!(%error, "收藏歌曲失败");
+                                                Msg::Toast(friendly_error_message(&error.to_string()))
+                                            }
+                                        }
+                                    });
+                                }),
+                        )
+                        // [ ··· 更多操作 ]（从歌单移除 / 复制歌名，拒绝常驻垃圾桶图标）
+                        .child(
+                            Button::new(("more", index))
+                                .ghost()
+                                .small()
+                                .icon(IconName::Ellipsis)
+                                .tooltip(if removable.is_some() {
+                                    "从歌单移除"
+                                } else {
+                                    "复制歌名"
+                                })
+                                .block_mouse_except_scroll()
+                                .on_click(move |_event, _window, cx| {
+                                    if let Some(listid) = &removable {
+                                        remove_backend.send(Msg::RemoveTrack {
+                                            listid: listid.to_string(),
+                                            fileid,
+                                        });
+                                    } else {
+                                        cx.write_to_clipboard(ClipboardItem::new_string(format!(
+                                            "{singer_for_more} - {title_for_more}"
+                                        )));
+                                        remove_backend.send(Msg::Toast(format!(
+                                            "已复制: {singer_for_more} - {title_for_more}"
+                                        )));
+                                    }
+                                }),
+                        ),
+                )
+        });
 
     track.into_any_element()
 }
@@ -262,8 +401,6 @@ mod tests {
 
     #[test]
     fn rows_are_preformatted_so_render_does_not_allocate() {
-        // 展示模型必须在数据层就把文本准备好：
-        // 渲染期只做引用计数克隆，不再构造字符串。
         let songs = vec![
             song("a", "夜曲", "周杰伦", 226_000),
             song("b", "晴天", "周杰伦", 269_000),
@@ -272,6 +409,7 @@ mod tests {
         assert_eq!(rows.len(), 2);
         assert_eq!(rows[0].title.as_ref(), "夜曲");
         assert_eq!(rows[0].singer.as_ref(), "周杰伦");
+        assert_eq!(rows[0].album.as_ref(), "—");
         assert_eq!(rows[0].duration.as_ref(), "3:46");
         assert_eq!(rows[0].index.as_ref(), "01");
         assert_eq!(rows[1].index.as_ref(), "02");
@@ -280,12 +418,9 @@ mod tests {
 
     #[test]
     fn the_row_model_does_not_clone_the_song() {
-        // 展示模型只持有预格式化的文本与索引，不复制曲目本体：
-        // 曲目克隆留给「收藏」按钮点击时按需进行。
         let songs = vec![song("a", "夜曲", "周杰伦", 226_000)];
         let rows = build_rows(&songs);
         assert_eq!(rows[0].title.as_ref(), "夜曲");
-        // 原始曲目仍在，模型构建没有把它搬走
         assert_eq!(songs[0].hash, "a");
     }
 }

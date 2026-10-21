@@ -1,7 +1,9 @@
 //! 界面主题系统与常用视觉组件
 
+use std::time::Duration;
+
 use gpui_kit::assets::IconName;
-use gpui_kit::component::Icon;
+use gpui_kit::component::{Icon, h_flex};
 use gpui_kit::*;
 
 /// 十六进制 RGB 颜色构造
@@ -44,8 +46,18 @@ pub(crate) const TEXT_PRIMARY: Rgba = hex_rgb(0x111827);
 pub(crate) const TEXT_MUTED: Rgba = hex_rgb(0x6b7280);
 pub(crate) const TEXT_FAINT: Rgba = hex_rgb(0x9ca3af);
 
-/// 曲目列表单行高度
-pub(crate) const ROW_HEIGHT: f32 = 52.0;
+/// VIP 会员卡片温润浅金微渐变与品质调和色（降低对比度，消除黑块割裂感）
+pub(crate) const VIP_GOLD_BG: Rgba = hex_rgb(0xfdfbf7);
+#[allow(dead_code)]
+pub(crate) const VIP_GOLD_SURFACE: Rgba = hex_rgb(0xf8f4ec);
+pub(crate) const VIP_GOLD_BORDER: Rgba = hex_rgb(0xf0e6d2);
+pub(crate) const VIP_GOLD_TEXT: Rgba = hex_rgb(0x785924);
+pub(crate) const VIP_GOLD_MUTED: Rgba = hex_rgb(0x9c7842);
+pub(crate) const VIP_GOLD_ICON_BG: Rgba = hex_rgb(0xfef3c7);
+pub(crate) const VIP_GOLD_ICON_FG: Rgba = hex_rgb(0xd97706);
+
+/// 曲目列表单行高度（桌面端单行表格规范）
+pub(crate) const ROW_HEIGHT: f32 = 48.0;
 
 /// 生成等高虚拟列表行高集合
 pub(crate) fn row_sizes(n: usize) -> std::rc::Rc<Vec<Size<Pixels>>> {
@@ -90,6 +102,71 @@ pub(crate) fn sq_badge() -> impl IntoElement {
         .child("SQ")
 }
 
+/// 构造骨架屏微光条纹占位组件（用于时长等未就绪数据，消除 0:00 悬空感）
+pub(crate) fn skeleton_shimmer(width: f32, height: f32, id: impl Into<ElementId>) -> AnyElement {
+    div()
+        .w(px(width))
+        .h(px(height))
+        .rounded(px(height / 2.0))
+        .bg(hex_rgb(0xe5e7eb))
+        .with_animation(
+            id,
+            Animation::new(Duration::from_millis(1400))
+                .repeat()
+                .with_easing(pulsating_between(0.35, 0.85)),
+            gpui_kit::Styled::opacity,
+        )
+        .into_any_element()
+}
+
+/// 构造 3 柱实时动态声波均衡器图标组件（跳动的柱形频谱，暂停时平滑回落平齐）
+pub(crate) fn audio_equalizer(is_playing: bool, id: impl Into<ElementId>) -> AnyElement {
+    let id_base: ElementId = id.into();
+    if is_playing {
+        h_flex()
+            .gap(px(2.0))
+            .items_end()
+            .h(px(14.0))
+            .child(
+                div().w(px(2.5)).rounded(px(1.0)).bg(ACCENT_GREEN).with_animation(
+                    (id_base.clone(), "eq_bar_1"),
+                    Animation::new(Duration::from_millis(650))
+                        .repeat()
+                        .with_easing(pulsating_between(0.35, 1.0)),
+                    |bar, delta| bar.h(px(4.0 + 10.0 * delta)),
+                ),
+            )
+            .child(
+                div().w(px(2.5)).rounded(px(1.0)).bg(ACCENT_GREEN).with_animation(
+                    (id_base.clone(), "eq_bar_2"),
+                    Animation::new(Duration::from_millis(500))
+                        .repeat()
+                        .with_easing(pulsating_between(0.20, 0.90)),
+                    |bar, delta| bar.h(px(3.0 + 11.0 * delta)),
+                ),
+            )
+            .child(
+                div().w(px(2.5)).rounded(px(1.0)).bg(ACCENT_GREEN).with_animation(
+                    (id_base, "eq_bar_3"),
+                    Animation::new(Duration::from_millis(800))
+                        .repeat()
+                        .with_easing(pulsating_between(0.40, 1.0)),
+                    |bar, delta| bar.h(px(5.0 + 9.0 * delta)),
+                ),
+            )
+            .into_any_element()
+    } else {
+        h_flex()
+            .gap(px(2.0))
+            .items_end()
+            .h(px(14.0))
+            .child(div().w(px(2.5)).h(px(4.0)).rounded(px(1.0)).bg(ACCENT_GREEN))
+            .child(div().w(px(2.5)).h(px(4.0)).rounded(px(1.0)).bg(ACCENT_GREEN))
+            .child(div().w(px(2.5)).h(px(4.0)).rounded(px(1.0)).bg(ACCENT_GREEN))
+            .into_any_element()
+    }
+}
+
 /// 构造区块标题组件
 pub(crate) fn title(text: impl Into<SharedString>) -> impl IntoElement {
     div()
@@ -119,13 +196,7 @@ pub(crate) fn notice_with_icon(icon: IconName, text: impl Into<SharedString>) ->
         .justify_center()
         .gap(px(10.0))
         .text_color(TEXT_MUTED)
-        .child(
-            div()
-                .p_3()
-                .rounded_full()
-                .bg(SURFACE_HOVER)
-                .child(icon_element),
-        )
+        .child(div().p_3().rounded_full().bg(SURFACE_HOVER).child(icon_element))
         .child(div().text_sm().font_weight(FontWeight::MEDIUM).child(text.into()))
         .into_any_element()
 }
@@ -164,11 +235,7 @@ pub(crate) fn cover_box(_label: &str, edge: f32) -> AnyElement {
             .flex()
             .items_center()
             .justify_center()
-            .child(
-                svg()
-                    .data(VINYL_ART_SVG.as_bytes())
-                    .size(px(icon_edge)),
-            )
+            .child(svg().data(VINYL_ART_SVG.as_bytes()).size(px(icon_edge)))
             .into_any_element()
     } else {
         // 紧凑列表场景（40px / 44px / 28px）：与全局浅色层级一致的冷银音符卡片，绝非突兀黑块
@@ -184,10 +251,7 @@ pub(crate) fn cover_box(_label: &str, edge: f32) -> AnyElement {
             .flex()
             .items_center()
             .justify_center()
-            .child(
-                Icon::new(IconName::Music)
-                    .size(px((edge * 0.45).clamp(12.0, 24.0))),
-            )
+            .child(Icon::new(IconName::Music).size(px((edge * 0.45).clamp(12.0, 24.0))))
             .into_any_element()
     }
 }
@@ -241,7 +305,11 @@ pub(crate) fn friendly_error_message(error: &str) -> String {
         "今日领取条件未达成（概念版需先试听歌曲几秒后再试）".to_owned()
     } else if lower.contains("error_code") || lower.contains("upstream") {
         "服务响应异常，请稍后重试".to_owned()
-    } else if lower.contains("network") || lower.contains("timeout") || lower.contains("connection") || lower.contains("dns") {
+    } else if lower.contains("network")
+        || lower.contains("timeout")
+        || lower.contains("connection")
+        || lower.contains("dns")
+    {
         "网络连接不稳定，请检查网络".to_owned()
     } else if lower.contains("login") || lower.contains("auth") || lower.contains("token") {
         "账号登录态已过期，请重新登录".to_owned()

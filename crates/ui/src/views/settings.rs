@@ -11,8 +11,9 @@ use lyra_api::model::VipStatus;
 use crate::bridge::{Backend, Msg};
 use crate::format::QUALITY_CHOICES;
 use crate::theme::{
-    ACCENT_GREEN, ACCENT_GREEN_HOVER, ACCENT_GREEN_LIGHT, CANVAS_BG, CARD_BG, CARD_BORDER, TEXT_FAINT, TEXT_MUTED,
-    TEXT_PRIMARY, badge, hex_rgb, title,
+    ACCENT_GREEN, ACCENT_GREEN_BORDER, ACCENT_GREEN_HOVER, ACCENT_GREEN_LIGHT, CANVAS_BG, CARD_BG, CARD_BORDER,
+    TEXT_FAINT, TEXT_MUTED, TEXT_PRIMARY, VIP_GOLD_BG, VIP_GOLD_BORDER, VIP_GOLD_ICON_BG, VIP_GOLD_ICON_FG,
+    VIP_GOLD_MUTED, VIP_GOLD_TEXT, badge, hex_rgb, title,
 };
 
 /// 缓存容量预设选项
@@ -31,6 +32,7 @@ pub(crate) struct SettingsView {
     backend: Backend,
     quality: String,
     cache_dir: Entity<InputState>,
+    saved_cache_dir: String,
     max_cache_bytes: u64,
     vip: Option<VipStatus>,
     loaded: bool,
@@ -52,6 +54,7 @@ impl SettingsView {
         let max_cache_bytes = settings
             .as_ref()
             .map_or(DEFAULT_MAX_CACHE_BYTES, |value| value.max_cache_bytes);
+        let saved_cache_dir = cache_dir_value.clone();
         let cache_dir = cx.new(|cx| {
             InputState::new(window, cx)
                 .placeholder("留空使用默认系统音乐缓存目录")
@@ -61,6 +64,7 @@ impl SettingsView {
             backend,
             quality,
             cache_dir,
+            saved_cache_dir,
             max_cache_bytes,
             vip: None,
             loaded: false,
@@ -117,7 +121,8 @@ impl SettingsView {
             Err(error) => {
                 tracing::warn!(%error, "领取 VIP 失败");
                 self.last_action = Some(SharedString::new_static("网络连接不稳定，请稍后重试"));
-                self.backend.send(Msg::Toast("领取失败: 网络连接不稳定，请稍后重试".to_owned()));
+                self.backend
+                    .send(Msg::Toast("领取失败: 网络连接不稳定，请稍后重试".to_owned()));
             }
         }
         cx.notify();
@@ -153,6 +158,7 @@ impl SettingsView {
     /// 保存自定义缓存目录
     fn save_cache_dir(&mut self, cx: &mut Context<Self>) {
         let value = self.cache_dir.read(cx).value().to_string();
+        self.saved_cache_dir.clone_from(&value);
         let app = self.backend.app();
         self.backend.spawn(async move {
             Msg::SettingsSaved(
@@ -162,6 +168,7 @@ impl SettingsView {
                 .map_err(|error| error.to_string()),
             )
         });
+        cx.notify();
     }
 
     /// 设置最大缓存容量并保存
@@ -243,7 +250,7 @@ impl Render for SettingsView {
             );
         }
 
-        // VIP 权益卡片（沉稳暗金质感，沉敛高级，告别页游风格）
+        // VIP 权益卡片（低饱和度浅金/暖灰微渐变底色，搭配深金褐色文字与极细柔和边框，层级收敛且具品质感）
         let is_vip_active = self
             .vip
             .as_ref()
@@ -252,10 +259,10 @@ impl Render for SettingsView {
             .w_full()
             .p_4()
             .rounded(px(12.0))
-            .bg(hex_rgb(0x181a20))
+            .bg(VIP_GOLD_BG)
             .border_1()
-            .border_color(hex_rgb(0x2d323b))
-            .shadow_sm()
+            .border_color(VIP_GOLD_BORDER)
+            .shadow_xs()
             .items_center()
             .gap(px(14.0))
             .child(
@@ -263,13 +270,13 @@ impl Render for SettingsView {
                     .w(px(40.0))
                     .h(px(40.0))
                     .rounded_full()
-                    .bg(hex_rgb(0x262a34))
+                    .bg(VIP_GOLD_ICON_BG)
                     .border_1()
-                    .border_color(hex_rgb(0x383e4c))
+                    .border_color(hex_rgb(0xfde68a))
                     .flex()
                     .items_center()
                     .justify_center()
-                    .child(Icon::new(IconName::Crown).size(px(20.0)).text_color(hex_rgb(0xf59e0b))),
+                    .child(Icon::new(IconName::Crown).size(px(20.0)).text_color(VIP_GOLD_ICON_FG)),
             )
             .child(
                 v_flex()
@@ -283,27 +290,31 @@ impl Render for SettingsView {
                                 div()
                                     .text_sm()
                                     .font_weight(FontWeight::BOLD)
-                                    .text_color(hex_rgb(0xf3f4f6))
+                                    .text_color(VIP_GOLD_TEXT)
                                     .child("Lyra音乐 畅听 VIP"),
                             )
                             .child(badge(
-                                if is_vip_active { "权益生效中" } else { "今日未领取" },
                                 if is_vip_active {
-                                    hex_rgb(0x064e3b)
+                                    "权益生效中"
                                 } else {
-                                    hex_rgb(0x27272a)
+                                    "今日未领取"
                                 },
                                 if is_vip_active {
-                                    hex_rgb(0x34d399)
+                                    hex_rgb(0xfef3c7)
                                 } else {
-                                    hex_rgb(0x9ca3af)
+                                    hex_rgb(0xf3f4f6)
+                                },
+                                if is_vip_active {
+                                    hex_rgb(0xb45309)
+                                } else {
+                                    hex_rgb(0x6b7280)
                                 },
                             )),
                     )
                     .child(
                         div()
                             .text_xs()
-                            .text_color(hex_rgb(0x9ca3af))
+                            .text_color(VIP_GOLD_MUTED)
                             .child(SharedString::from(self.vip_label())),
                     ),
             )
@@ -339,33 +350,58 @@ impl Render for SettingsView {
             );
         }
 
-        // 缓存路径（现代文件选择器布局：只读展示 + 更改/保存）
+        // 缓存路径（内置操作按钮 Inside Action Button：未保存时高亮，已保存时转为灰色只读状态）
+        let current_cache_dir_val = self.cache_dir.read(cx).value().to_string();
+        let is_path_modified = current_cache_dir_val != self.saved_cache_dir;
+
+        let inside_action_btn = if is_path_modified {
+            Button::new("save_cache_dir")
+                .primary()
+                .small()
+                .icon(IconName::Check)
+                .label("保存")
+                .tooltip("保存更改的路径")
+                .on_click(cx.listener(|view, _event, _window, cx| view.save_cache_dir(cx)))
+                .into_any_element()
+        } else {
+            h_flex()
+                .gap(px(3.0))
+                .items_center()
+                .px_2()
+                .py(px(2.0))
+                .text_xs()
+                .text_color(TEXT_FAINT)
+                .child(Icon::new(IconName::Check).size(px(13.0)))
+                .child("已保存")
+                .into_any_element()
+        };
+
         let cache_row = h_flex()
-            .gap(px(10.0))
+            .w_full()
+            .px_3()
+            .py(px(4.0))
+            .rounded(px(8.0))
+            .bg(CANVAS_BG)
+            .border_1()
+            .border_color(if is_path_modified {
+                ACCENT_GREEN_BORDER
+            } else {
+                CARD_BORDER
+            })
+            .gap(px(8.0))
             .items_center()
             .child(
-                h_flex()
-                    .flex_1()
-                    .min_w(px(0.0))
-                    .px_3()
-                    .py(px(4.0))
-                    .rounded(px(8.0))
-                    .bg(CANVAS_BG)
-                    .border_1()
-                    .border_color(CARD_BORDER)
-                    .gap(px(8.0))
-                    .items_center()
-                    .child(Icon::new(IconName::Folder).size(px(16.0)).text_color(TEXT_MUTED))
-                    .child(div().flex_1().child(Input::new(&self.cache_dir).appearance(false))),
+                Icon::new(IconName::Folder)
+                    .size(px(16.0))
+                    .text_color(if is_path_modified { ACCENT_GREEN } else { TEXT_MUTED }),
             )
             .child(
-                Button::new("save_cache_dir")
-                    .ghost()
-                    .small()
-                    .icon(IconName::Check)
-                    .label("保存路径")
-                    .on_click(cx.listener(|view, _event, _window, cx| view.save_cache_dir(cx))),
-            );
+                div()
+                    .flex_1()
+                    .min_w(px(0.0))
+                    .child(Input::new(&self.cache_dir).appearance(false)),
+            )
+            .child(inside_action_btn);
 
         // 账号与维护
         let account_row = h_flex()

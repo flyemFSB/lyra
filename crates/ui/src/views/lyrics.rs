@@ -14,10 +14,9 @@ use lyra_api::model::LyricLine;
 
 use crate::bridge::Backend;
 use crate::format::lyric_index;
+use crate::palette::{AlbumPalette, fallback_palette};
 use crate::shell::AppShell;
-use crate::theme::{
-    CARD_BORDER, TEXT_MUTED, TEXT_PRIMARY, hex_rgb, notice_with_icon, song_cover, sq_badge,
-};
+use crate::theme::{TEXT_MUTED, TEXT_PRIMARY, hex_rgb, notice_with_icon, song_cover, sq_badge};
 use crate::views::player::PlayerModel;
 
 /// 歌词视图
@@ -44,6 +43,8 @@ pub(crate) struct LyricsView {
     scroll_settled: Rc<Cell<bool>>,
     /// 是否已安排下一帧的跟随回调（避免重复排队）
     follow_scheduled: bool,
+    /// 当前专辑提取的光晕调色盘（滤除脏灰，动态自适应封面色调）
+    palette: AlbumPalette,
     _sub: Subscription,
 }
 
@@ -55,13 +56,14 @@ fn center_offset(viewport: Bounds<Pixels>, item: Bounds<Pixels>) -> Pixels {
     viewport.center().y - item.center().y
 }
 
-/// 离当前行越远的歌词呈阶梯式平滑衰减
+/// 离当前行越远的歌词严格按照距离衰减模型衰减：
+/// 距离当前句最近的上一句/下一句透明度为 60%，上下第二句为 35%，更远的句为 15%
 fn lyric_fade(distance: usize) -> f32 {
     match distance {
         0 => 1.0,
         1 => 0.60,
-        2 => 0.38,
-        _ => 0.20,
+        2 => 0.35,
+        _ => 0.15,
     }
 }
 
@@ -94,6 +96,7 @@ impl LyricsView {
             scroll_target: 0.0,
             scroll_settled: Rc::new(Cell::new(true)),
             follow_scheduled: false,
+            palette: AlbumPalette::default(),
             _sub: sub,
         }
     }
@@ -108,12 +111,12 @@ impl LyricsView {
         self.current_hash = None;
         self.status = None;
         self.followed = None;
+        self.palette = AlbumPalette::default();
         cx.notify();
     }
 
     /// 设置歌词行列表
     pub(crate) fn set_lines(&mut self, result: Result<Vec<LyricLine>, String>, cx: &mut Context<Self>) {
-        // 换歌后行高全变了，等新布局出来再重新跟随
         self.followed = None;
         match result {
             Ok(lines) => {
@@ -136,15 +139,12 @@ impl LyricsView {
     }
 
     /// 跟随当前行：行号变化时重新开始一次居中滚动，目标偏移逐帧按最新布局校正
-    ///
-    /// 返回值表示状态是否发生变化（用于决定要不要重绘）。
     fn follow_lyrics(&mut self, current: Option<usize>) -> bool {
         if self.followed != current {
             let Some(index) = current else {
                 self.followed = None;
                 return true;
             };
-            // 子元素边界来自上一帧布局，首帧或换歌当帧还没有，下一帧再跟随
             let Some(item) = self.scroll.bounds_for_item(index) else {
                 return false;
             };
@@ -157,9 +157,7 @@ impl LyricsView {
         if let Some(index) = current
             && let Some(item) = self.scroll.bounds_for_item(index)
         {
-            // 行边界来自上一帧：当前行放大、窗口缩放都会让目标偏移变，变了就再滚一次
             let target: f32 = center_offset(self.scroll.bounds(), item).into();
-            // 亚像素的抖动没必要重新滚
             if (target - self.scroll_target).abs() > 0.5 {
                 self.scroll_target = target;
                 self.scroll_settled.set(false);
@@ -170,9 +168,6 @@ impl LyricsView {
     }
 
     /// 安排下一帧执行跟随计算
-    ///
-    /// 跟随依赖上一帧的布局结果，属于「渲染之后的测量」，
-    /// 必须在 render 之外进行（GPUI 要求 render 不改动自身状态）。
     fn schedule_follow(&mut self, current: Option<usize>, window: &mut Window, cx: &mut Context<Self>) {
         if self.follow_scheduled {
             return;
@@ -193,10 +188,8 @@ impl LyricsView {
         }
     }
 
-    /// 刷新当前曲目标题与歌手
+    /// 刷新当前曲目标题、歌手与专辑调色盘
     fn refresh_title(&mut self, cx: &Context<Self>) {
-        // 播放器每 180ms 通知一次（进度在变），但歌名几乎不变：
-        // 先零分配地比对哈希，确认换歌了才重新格式化标题。
         let changed = {
             let model = self.player.read(cx);
             model.current_hash() != self.current_hash.as_deref()
@@ -206,12 +199,36 @@ impl LyricsView {
         }
         let (hash, title, singer, cover) = self.player.read(cx).current_labels();
         self.current_hash = hash;
-        self.title = title;
-        self.singer = singer;
-        self.cover = cover;
+        self.title = title.clone();
+        self.singer = singer.clone();
+        self.cover = cover.clone();
+
+        // 优先使用高品质亮温调色盘即刻铺底
+        self.palette = fallback_palette(title.as_ref(), singer.as_ref());
+
+        // 异步提取封面真实量化主色调
+        let cover_url = cover.to_string();
+        if cover_url.starts_with("http") {
+            cx.spawn(async move |this, cx| {
+                let client = reqwest::Client::builder()
+                    .timeout(Duration::from_secs(5))
+                    .build()
+                    .unwrap_or_default();
+                if let Ok(resp) = client.get(&cover_url).send().await
+                    && let Ok(bytes) = resp.bytes().await
+                    && let Some(extracted) = crate::palette::extract_palette_from_bytes(&bytes)
+                {
+                    let _ = this.update(cx, |view, cx| {
+                        view.palette = extracted;
+                        cx.notify();
+                    });
+                }
+            })
+            .detach();
+        }
     }
 
-    /// 渲染歌词流：当前行固定在滚动区正中，切换时平滑滚过去并淡入
+    /// 渲染歌词流：当前行放大至 26px 加粗，非活动行按距离模型渐隐，上下双端柔光蒙版
     fn lyric_stream(&self, current: Option<usize>, cx: &Context<Self>) -> AnyElement {
         if let Some(status) = &self.status {
             return notice_with_icon(IconName::CircleAlert, status.clone()).into_any_element();
@@ -230,7 +247,7 @@ impl LyricsView {
             .id("lyrics-scroll-body")
             .size_full()
             .items_start()
-            .gap(px(12.0))
+            .gap(px(14.0))
             .pt(pad)
             .pb(pad)
             .overflow_y_scroll()
@@ -240,36 +257,43 @@ impl LyricsView {
             let active = current == Some(index);
             let text = self.texts.get(index).cloned().unwrap_or_default();
             let time_ms = line.time_ms;
+            let distance = current.map_or(usize::MAX, |current| index.abs_diff(current));
 
+            // 当前正在播放的歌词放大至 26px Semi-Bold（深色 #1C1C1E），未播放的保持 16px Regular
             let label = div()
                 .when(active, |this| {
-                    this.text_xl()
+                    this.text_size(px(26.0))
                         .font_weight(FontWeight::BOLD)
-                        .text_color(TEXT_PRIMARY)
+                        .text_color(hex_rgb(0x1c1c1e))
                 })
-                .when(!active, |this| {
-                    this.text_base()
+                .when(distance == 1, |this| {
+                    this.text_size(px(18.0))
+                        .font_weight(FontWeight::MEDIUM)
+                        .text_color(hex_rgb(0x1c1c1e))
+                })
+                .when(distance == 2, |this| {
+                    this.text_size(px(16.0))
                         .font_weight(FontWeight::NORMAL)
                         .text_color(TEXT_MUTED)
-                        .hover(|s| s.text_color(TEXT_PRIMARY))
                 })
+                .when(distance >= 3, |this| {
+                    this.text_size(px(15.0))
+                        .font_weight(FontWeight::NORMAL)
+                        .text_color(TEXT_MUTED)
+                })
+                .hover(|s| s.text_color(hex_rgb(0x1c1c1e)))
                 .child(text);
 
-            // 当前行淡入并轻微放大，其余行阶梯式淡化
             let label = if active {
                 label
                     .with_animation(
                         ("lyric_active", index),
-                        Animation::new(LYRIC_ANIMATION).with_easing(ease_in_out),
-                        |label, delta| label.text_size(rems(1.20 + 0.15 * delta)).opacity(delta),
+                        Animation::new(LYRIC_ANIMATION).with_easing(crate::motion::apple_damping_spring()),
+                        |label, delta| label.opacity(0.80 + 0.20 * delta),
                     )
                     .into_any_element()
             } else {
-                label
-                    .opacity(lyric_fade(
-                        current.map_or(usize::MAX, |current| index.abs_diff(current)),
-                    ))
-                    .into_any_element()
+                label.opacity(lyric_fade(distance)).into_any_element()
             };
 
             body = body.child(
@@ -278,10 +302,9 @@ impl LyricsView {
                     .role(Role::Button)
                     .cursor_pointer()
                     .w_full()
-                    .py(px(5.0))
+                    .py(px(4.0))
                     .flex()
                     .items_center()
-                    .gap(px(10.0))
                     .on_click(cx.listener(move |this, _event, _window, _cx| {
                         this.seek_to(time_ms);
                     }))
@@ -289,7 +312,32 @@ impl LyricsView {
             );
         }
 
-        // 隐藏系统原生滚动条，支持平滑惯性滚动
+        // 双端自然渐隐蒙版（融合底层色相，消除生硬裁切与灰白条色块）
+        let mask_tint = self.palette.surface_tint;
+        let top_feather_mask = div()
+            .absolute()
+            .top_0()
+            .left_0()
+            .right_0()
+            .h(px(64.0))
+            .bg(linear_gradient(
+                180.0,
+                linear_color_stop(mask_tint, 0.0),
+                linear_color_stop(mask_tint.opacity(0.0), 1.0),
+            ));
+
+        let bottom_feather_mask = div()
+            .absolute()
+            .bottom_0()
+            .left_0()
+            .right_0()
+            .h(px(64.0))
+            .bg(linear_gradient(
+                180.0,
+                linear_color_stop(mask_tint.opacity(0.0), 0.0),
+                linear_color_stop(mask_tint, 1.0),
+            ));
+
         div()
             .id("lyrics-scroll")
             .flex_1()
@@ -298,9 +346,8 @@ impl LyricsView {
             .relative()
             .child(body.with_animation(
                 ("lyrics-scroll-follow", self.followed.unwrap_or(usize::MAX)),
-                Animation::new(LYRIC_ANIMATION).with_easing(ease_in_out),
+                Animation::new(LYRIC_ANIMATION).with_easing(crate::motion::fluid_scroll_spring()),
                 move |body, delta| {
-                    // 落位后不再干预偏移，把滚动交还给用户
                     if delta < 1.0 || !settled.get() {
                         scroll.set_offset(point(px(0.0), px(from + (to - from) * delta)));
                         settled.set(delta >= 1.0);
@@ -308,12 +355,15 @@ impl LyricsView {
                     body
                 },
             ))
+            .child(top_feather_mask)
+            .child(bottom_feather_mask)
             .into_any_element()
     }
 
-    /// 渲染现代沉浸风大尺寸专辑封面与动态弥散光晕舞台（方案 B）
+    /// 渲染大尺寸封面与自适应柔光漫反射舞台
     fn vinyl_turntable_stage(&self, is_playing: bool) -> impl IntoElement {
         let title_label = self.title.as_ref();
+        let glow_color = self.palette.glow;
 
         div()
             .id("vinyl-turntable-container")
@@ -331,21 +381,21 @@ impl LyricsView {
                     .flex()
                     .items_center()
                     .justify_center()
-                    // 四周动态弥散模糊光晕（播放时呼吸微光）
+                    // 封面边缘微弱同色柔光漫反射投影（随呼吸舒缓律动）
                     .child({
                         let ambient_glow = div()
                             .absolute()
-                            .size(px(340.0))
-                            .rounded(px(28.0))
-                            .bg(hsla(160.0 / 360.0, 0.45, 0.75, 0.22))
-                            .shadow_xl();
+                            .size(px(350.0))
+                            .rounded(px(32.0))
+                            .bg(glow_color)
+                            .shadow_2xl();
                         if is_playing {
                             ambient_glow
                                 .with_animation(
                                     "ambient_glow",
-                                    Animation::new(Duration::from_millis(3000))
+                                    Animation::new(Duration::from_millis(3200))
                                         .repeat()
-                                        .with_easing(pulsating_between(0.18, 0.55)),
+                                        .with_easing(pulsating_between(0.18, 0.42)),
                                     gpui_kit::Styled::opacity,
                                 )
                                 .into_any_element()
@@ -353,13 +403,13 @@ impl LyricsView {
                             ambient_glow.opacity(0.18).into_any_element()
                         }
                     })
-                    // 大尺寸质感封面（支持高清网络封面与优雅矢量降级）
+                    // 大尺寸质感封面（圆角柔和投影）
                     .child(
                         div()
                             .size(px(320.0))
                             .rounded(px(16.0))
                             .overflow_hidden()
-                            .shadow_lg()
+                            .shadow_2xl()
                             .flex()
                             .items_center()
                             .justify_center()
@@ -379,17 +429,13 @@ impl Render for LyricsView {
             )
         };
         let current = lyric_index(&self.lines, position);
-        // 跟随计算依赖上一帧的布局，放到下一帧执行（render 内不改状态）
         self.schedule_follow(current, window, cx);
         let shell_exit = self.shell.clone();
 
-        // 唱片区域
         let turntable_stage = self.vinyl_turntable_stage(is_playing);
-
-        // 歌词流区域
         let lyric_stream = self.lyric_stream(current, cx);
 
-        // 曲目信息与歌词主体
+        // 曲目信息与歌词主体（彻底移除违和的白色半透明矩形与生硬边界）
         let right_lyrics_section = v_flex()
             .flex_1()
             .min_w(px(0.0))
@@ -398,14 +444,11 @@ impl Render for LyricsView {
             .pr_12()
             .py_10()
             .justify_center()
-            // 曲名与歌手
             .child(
                 v_flex()
                     .w_full()
                     .gap(px(4.0))
                     .pb_4()
-                    .border_b_1()
-                    .border_color(CARD_BORDER)
                     .child(
                         h_flex()
                             .gap(px(10.0))
@@ -431,14 +474,36 @@ impl Render for LyricsView {
             )
             .child(lyric_stream);
 
-        // 主容器
+        // 自适应动态弥散光晕底层（Ambient Mesh Blur）：大半径双核柔和漫射球，彻底告别脏色暗块
+        let mesh_glow_1 = div()
+            .absolute()
+            .top(px(-80.0))
+            .left(px(30.0))
+            .size(px(520.0))
+            .rounded_full()
+            .bg(self.palette.primary)
+            .shadow_2xl();
+
+        let mesh_glow_2 = div()
+            .absolute()
+            .bottom(px(-70.0))
+            .right(px(80.0))
+            .size(px(480.0))
+            .rounded_full()
+            .bg(self.palette.secondary)
+            .shadow_2xl();
+
+        // 沉浸页顶层容器：微光浅渐变透亮底色 + 自适应双核弥散光晕
         div()
             .size_full()
-            .bg(hex_rgb(0xfcfdfe))
+            .bg(self.palette.surface_tint)
             .relative()
+            .overflow_hidden()
             .flex()
             .flex_row()
             .items_center()
+            .child(mesh_glow_1)
+            .child(mesh_glow_2)
             .child(turntable_stage)
             .child(right_lyrics_section)
             // 返回按钮
@@ -465,7 +530,6 @@ impl Render for LyricsView {
 mod tests {
     #![allow(clippy::pedantic)]
 
-    // 避免与 gpui_kit::* 宏冲突
     use gpui_kit::{Bounds, Pixels, point, px, size};
 
     use super::center_offset;
@@ -480,9 +544,7 @@ mod tests {
     #[test]
     fn center_offset_puts_item_middle_on_viewport_middle() {
         let viewport = bounds(100.0, 400.0);
-        // 行中线 320 在视口中线 300 下方 → 向上滚 20
         assert_eq!(center_offset(viewport, bounds(300.0, 40.0)), px(-20.0));
-        // 行中线 220 在视口中线 300 上方 → 向下滚 80
         assert_eq!(center_offset(viewport, bounds(200.0, 40.0)), px(80.0));
     }
 }

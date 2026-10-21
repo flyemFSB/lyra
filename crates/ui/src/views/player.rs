@@ -1,5 +1,6 @@
 //! 底部播放控制条与共享播放模型。
 
+use std::collections::HashSet;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
@@ -17,8 +18,8 @@ use crate::bridge::{Backend, Msg, Nav};
 use crate::format::{format_duration, progress_percent};
 use crate::shell::AppShell;
 use crate::theme::{
-    ACCENT_GREEN, ACCENT_GREEN_HOVER, CARD_BG, TEXT_FAINT, TEXT_MUTED, TEXT_PRIMARY, badge,
-    hex_rgb, song_cover, sq_badge,
+    ACCENT_GREEN, ACCENT_GREEN_HOVER, CARD_BG, TEXT_FAINT, TEXT_MUTED, TEXT_PRIMARY, badge, hex_rgb, song_cover,
+    sq_badge,
 };
 use crate::views::tracks::{TrackRow, build_rows};
 
@@ -51,6 +52,24 @@ pub(crate) fn next_mode(mode: PlayMode) -> PlayMode {
     }
 }
 
+/// 播放与暂停状态的矢量图形（流体平滑圆角几何，无硬切顿挫感）
+const PLAY_MORPH_SVG: &[u8] = br#"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="currentColor">
+  <path d="M 7.5 5.2 C 6.6 4.7 5.5 5.3 5.5 6.4 L 5.5 17.6 C 5.5 18.7 6.6 19.3 7.5 18.8 L 17.5 13.2 C 18.3 12.7 18.3 11.3 17.5 10.8 Z" />
+</svg>"#;
+
+const PAUSE_MORPH_SVG: &[u8] = br#"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="currentColor">
+  <rect x="6" y="4.5" width="3.6" height="15" rx="1.6" />
+  <rect x="14.4" y="4.5" width="3.6" height="15" rx="1.6" />
+</svg>"#;
+
+fn play_pause_icon(playing: bool) -> AnyElement {
+    svg()
+        .data(if playing { PAUSE_MORPH_SVG } else { PLAY_MORPH_SVG })
+        .size(px(16.0))
+        .text_color(rgb(0xffffff))
+        .into_any_element()
+}
+
 /// 播放状态共享数据模型
 pub(crate) struct PlayerModel {
     /// 音频引擎状态快照
@@ -74,14 +93,14 @@ pub(crate) struct PlayerModel {
 
 impl PlayerModel {
     /// 创建初始播放状态
-    pub(crate) fn new(has_engine: bool, mode: PlayMode) -> Self {
+    pub(crate) fn new(has_engine: bool, mode: PlayMode, volume: f32) -> Self {
         Self {
             snapshot: Snapshot {
                 state: State::Idle,
                 track: None,
                 position_ms: 0,
                 duration_ms: 0,
-                volume: 0.8,
+                volume: volume.clamp(0.0, 1.0),
             },
             has_engine,
             queue: Arc::new(Vec::new()),
@@ -96,6 +115,11 @@ impl PlayerModel {
                     | 1,
             ),
         }
+    }
+
+    /// 更新音量大小
+    pub(crate) fn set_volume(&mut self, volume: f32) {
+        self.snapshot.volume = volume.clamp(0.0, 1.0);
     }
 
     /// 取下一个伪随机数（xorshift64*）
@@ -157,6 +181,19 @@ impl PlayerModel {
         }
     }
 
+    /// 电台顺序播放：只前进一位，绝不回绕到队首
+    ///
+    /// 红心电台是无限流：播放模式对它无效，队列用尽时返回 `None`，
+    /// 由上层继续拉取下一批。
+    pub(crate) fn sequential_next(&self) -> Option<usize> {
+        (self.index + 1 < self.queue.len()).then_some(self.index + 1)
+    }
+
+    /// 电台顺序回退：只后退一位，队首不再回绕
+    pub(crate) fn sequential_prev(&self) -> Option<usize> {
+        self.index.checked_sub(1)
+    }
+
     /// 获取当前曲目的哈希（零分配，用于判断曲目是否变化）
     pub(crate) fn current_hash(&self) -> Option<&str> {
         self.current_song().map(|song| song.hash.as_str())
@@ -165,7 +202,14 @@ impl PlayerModel {
     /// 获取当前曲目标题、歌手与封面（仅在曲目真正变化时调用）
     pub(crate) fn current_labels(&self) -> (Option<String>, SharedString, SharedString, SharedString) {
         self.current_song().map_or_else(
-            || (None, SharedString::new_static("未在播放"), SharedString::new_static(""), SharedString::new_static("")),
+            || {
+                (
+                    None,
+                    SharedString::new_static("未在播放"),
+                    SharedString::new_static(""),
+                    SharedString::new_static(""),
+                )
+            },
             |song| {
                 (
                     Some(song.hash.clone()),
@@ -192,14 +236,25 @@ impl PlayerModel {
     }
 
     /// 追加新曲目至队列末尾（用于红心电台连续流推荐）
-    pub(crate) fn append_songs(&mut self, new_songs: Vec<Song>) {
-        if new_songs.is_empty() {
-            return;
-        }
+    ///
+    /// 跳过队列里已有的 hash：上游偶发重复推荐时，去重是“不重样”的兜底。
+    /// 返回第一首新歌的下标；全是旧歌时返回 `None`。
+    pub(crate) fn append_songs(&mut self, new_songs: Vec<Song>) -> Option<usize> {
+        let mut seen: HashSet<String> = self.queue.iter().map(|song| song.hash.clone()).collect();
+        let start = self.queue.len();
         let mut queue = (*self.queue).clone();
-        queue.extend(new_songs);
+        for song in new_songs {
+            if !song.hash.is_empty() && !seen.insert(song.hash.clone()) {
+                continue;
+            }
+            queue.push(song);
+        }
+        if queue.len() == start {
+            return None;
+        }
         self.rows = Arc::new(build_rows(&queue));
         self.queue = Arc::new(queue);
+        Some(start)
     }
 
     /// 只切换当前索引（进度归零，避免沿用上一首的位置）
@@ -232,6 +287,11 @@ pub(crate) struct PlayerBar {
     volume: Entity<SliderState>,
     dragging: bool,
     volume_dragging: bool,
+    volume_hovered: bool,
+    progress_hovered: bool,
+    hover_scrub_x: f32,
+    hover_scrub_ratio: Option<f32>,
+    play_btn_clicked_seq: u64,
     playing: bool,
     title: SharedString,
     singer: SharedString,
@@ -247,6 +307,8 @@ pub(crate) struct PlayerBar {
     last_duration: u64,
     last_queue_len: usize,
     last_mode: PlayMode,
+    /// 记录最近一次非静音时的音量（供再次点击静音按钮时无损恢复）
+    last_unmuted_volume: f32,
     /// 进度文本复用缓冲区（进度每帧都在变）
     pos_buf: String,
     _subs: Vec<Subscription>,
@@ -262,6 +324,14 @@ impl PlayerBar {
         cx: &mut Context<Self>,
     ) -> Self {
         let initial_volume = player.read(cx).snapshot.volume;
+        let backend_volume = backend.app().volume();
+        let last_unmuted_volume = if backend_volume > 0.001 {
+            backend_volume
+        } else if initial_volume > 0.001 {
+            initial_volume
+        } else {
+            0.8
+        };
         let progress = cx.new(|_| SliderState::new().min(0.0).max(100.0).step(0.5));
         let volume = cx.new(|_| {
             SliderState::new()
@@ -278,7 +348,7 @@ impl PlayerBar {
                 this.seek_percent(value_single(*value), cx);
             }
         });
-        let volume_sub = cx.subscribe(&volume, |this, _state, event: &SliderEvent, _cx| {
+        let volume_sub = cx.subscribe(&volume, |this, _state, event: &SliderEvent, cx| {
             let (value, persist) = match event {
                 SliderEvent::Change(value) => {
                     this.volume_dragging = true;
@@ -289,7 +359,13 @@ impl PlayerBar {
                     (*value, true)
                 }
             };
-            this.apply_volume(value_single(value) / 100.0, persist);
+            let val = (value_single(value) / 100.0).clamp(0.0, 1.0);
+            if val > 0.001 {
+                this.last_unmuted_volume = val;
+                this.set_volume_and_muted(val, false, persist, cx);
+            } else {
+                this.set_volume_and_muted(this.last_unmuted_volume, true, persist, cx);
+            }
         });
 
         if let Some(engine) = backend.engine() {
@@ -316,6 +392,11 @@ impl PlayerBar {
             volume,
             dragging: false,
             volume_dragging: false,
+            volume_hovered: false,
+            progress_hovered: false,
+            hover_scrub_x: 0.0,
+            hover_scrub_ratio: None,
+            play_btn_clicked_seq: 0,
             playing: false,
             title: SharedString::new_static("未在播放"),
             singer: SharedString::new_static(""),
@@ -327,6 +408,7 @@ impl PlayerBar {
             last_duration: 0,
             last_queue_len: 0,
             last_mode: PlayMode::ListLoop,
+            last_unmuted_volume,
             pos_buf: String::new(),
             _subs: vec![progress_sub, volume_sub],
         }
@@ -365,6 +447,10 @@ impl PlayerBar {
             )
         };
         self.playing = playing;
+
+        if volume > 0.001 {
+            self.last_unmuted_volume = volume;
+        }
 
         if !self.dragging {
             self.progress.update(cx, |state, state_cx| {
@@ -438,21 +524,30 @@ impl PlayerBar {
         });
     }
 
-    /// 调整音量并在释放时持久化
-    fn apply_volume(&self, value: f32, persist: bool) {
-        let value = value.clamp(0.0, 1.0);
+    /// 统一调整音量与静音状态，即时通知 UI 并按需持久化
+    fn set_volume_and_muted(&mut self, volume: f32, muted: bool, persist: bool, cx: &mut Context<Self>) {
+        let volume = volume.clamp(0.0, 1.0);
+        let effective_volume = if muted { 0.0 } else { volume };
+        self.player.update(cx, |model, model_cx| {
+            model.set_volume(effective_volume);
+            model_cx.notify();
+        });
         if let Some(engine) = self.backend.engine() {
-            engine.set_volume(value);
+            engine.set_volume(effective_volume);
         }
         if persist {
             let app = self.backend.app();
             self.backend.spawn(async move {
-                match app.update_settings(|settings| settings.volume = value) {
+                match app.update_settings(|settings| {
+                    settings.volume = volume;
+                    settings.muted = muted;
+                }) {
                     Ok(()) => Msg::Noop,
                     Err(error) => Msg::Toast(format!("保存音量失败: {error}")),
                 }
             });
         }
+        cx.notify();
     }
 }
 
@@ -479,12 +574,11 @@ impl Render for PlayerBar {
                 model.mode,
             )
         };
+        let has_song = queue.get(current_index).is_some();
 
         // 进度每帧都在变：复用缓冲区格式化，再转成可廉价克隆的 SharedString
         crate::format::write_duration(&mut self.pos_buf, position);
         let position_text = SharedString::new(self.pos_buf.as_str());
-
-        let play_icon = if self.playing { IconName::Pause } else { IconName::Play };
 
         let is_muted = volume <= 0.001;
         let vol_icon = if is_muted { IconName::VolumeX } else { IconName::Volume2 };
@@ -533,7 +627,23 @@ impl Render for PlayerBar {
                                 }).ok();
                             })
                             .hover(|s| s.opacity(0.85))
-                            .child(song_cover(self.cover.as_ref(), self.title.as_ref(), 44.0)),
+                            .child(if has_song {
+                                song_cover(self.cover.as_ref(), self.title.as_ref(), 44.0)
+                            } else {
+                                div()
+                                    .size(px(44.0))
+                                    .rounded(px(8.0))
+                                    .bg(linear_gradient(
+                                        135.0,
+                                        linear_color_stop(hex_rgb(0xf3f4f6), 0.0),
+                                        linear_color_stop(hex_rgb(0xe5e7eb), 1.0),
+                                    ))
+                                    .flex()
+                                    .items_center()
+                                    .justify_center()
+                                    .child(Icon::new(IconName::Music).size(px(20.0)).text_color(TEXT_FAINT))
+                                    .into_any_element()
+                            }),
                     )
                     .child(
                         v_flex()
@@ -552,7 +662,7 @@ impl Render for PlayerBar {
                                             .truncate()
                                             .child(self.title.clone()),
                                     )
-                                    .child(sq_badge()),
+                                    .when(has_song, |this| this.child(sq_badge())),
                             )
                             .child(
                                 div()
@@ -583,16 +693,18 @@ impl Render for PlayerBar {
                             }),
                     ),
             )
-            // 核心控制区与进度条（紧凑居中平衡布局）
+            // 核心控制区与进度条（紧凑居中平衡布局，固定槽高防止 Hover 晃动）
             .child(
                 v_flex()
                     .flex_1()
                     .min_w(px(0.0))
+                    .h_full()
                     .items_center()
                     .justify_center()
-                    .gap(px(4.0))
+                    .gap(px(2.0))
                     .child(
                         h_flex()
+                            .h(px(38.0))
                             .gap(px(12.0))
                             .items_center()
                             // 切换播放模式
@@ -621,23 +733,48 @@ impl Render for PlayerBar {
                                         shell_prev.update(cx, AppShell::play_prev).ok();
                                     }),
                             )
-                            // 播放/暂停按钮
+                            // 播放/暂停按钮（形态变换 Morphing 与微弹性回缩 Scale: 1.0 -> 0.94 -> 1.0）
                             .child(
                                 div()
                                     .id("toggle_play_btn")
                                     .role(Role::Button)
                                     .cursor_pointer()
-                                    .w(px(36.0))
-                                    .h(px(36.0))
+                                    .w(px(38.0))
+                                    .h(px(38.0))
                                     .rounded_full()
                                     .bg(ACCENT_GREEN)
                                     .hover(|s| s.bg(ACCENT_GREEN_HOVER))
+                                    .active(|s| s.bg(hex_rgb(0x047857)))
                                     .shadow_sm()
                                     .flex()
                                     .items_center()
                                     .justify_center()
-                                    .on_click(cx.listener(|this, _event, _window, _cx| this.toggle()))
-                                    .child(Icon::new(play_icon).size(px(18.0)).text_color(rgb(0xffffff))),
+                                    .on_click(cx.listener(|this, _event, _window, cx| {
+                                        this.play_btn_clicked_seq += 1;
+                                        this.toggle();
+                                        cx.notify();
+                                    }))
+                                    .with_animation(
+                                        ("play_btn_press", self.play_btn_clicked_seq),
+                                        Animation::new(crate::motion::DURATION_MICRO).with_easing(crate::motion::apple_damping_spring()),
+                                        |btn, delta| {
+                                            let s = if delta < 0.5 {
+                                                38.0 - 2.4 * (delta * 2.0)
+                                            } else {
+                                                35.6 + 2.4 * ((delta - 0.5) * 2.0)
+                                            };
+                                            btn.w(px(s)).h(px(s))
+                                        },
+                                    )
+                                    .child(
+                                        div()
+                                            .with_animation(
+                                                ("play_icon_morph", usize::from(self.playing)),
+                                                Animation::new(crate::motion::DURATION_MICRO).with_easing(crate::motion::apple_damping_spring()),
+                                                |icon, delta| icon.opacity(0.70 + 0.30 * delta),
+                                            )
+                                            .child(play_pause_icon(self.playing)),
+                                    ),
                             )
                             .child(
                                 Button::new("next")
@@ -650,9 +787,10 @@ impl Render for PlayerBar {
                                     }),
                             ),
                     )
-                    // 进度条与对齐时间
+                    // 进度条与对齐时间（固定高度槽位与精准时间点跟随预览 Timeline Scrubbing）
                     .child(
                         h_flex()
+                            .h(px(20.0))
                             .w_full()
                             .gap(px(8.0))
                             .items_center()
@@ -665,12 +803,91 @@ impl Render for PlayerBar {
                                     .text_right()
                                     .child(position_text),
                             )
-                            .child(
+                            .child({
+                                let played_pct = progress_percent(position, self.player.read(cx).snapshot.duration_ms);
                                 div()
+                                    .id("progress_scrub_wrap")
                                     .flex_1()
                                     .min_w(px(0.0))
-                                    .child(Slider::new(&self.progress).w_full()),
-                            )
+                                    .h(px(20.0))
+                                    .flex()
+                                    .items_center()
+                                    .relative()
+                                    .when(has_song, |this| {
+                                        this.cursor_pointer()
+                                            .on_hover(cx.listener(|this, hovered, _window, cx| {
+                                                this.progress_hovered = *hovered;
+                                                if !*hovered {
+                                                    this.hover_scrub_ratio = None;
+                                                }
+                                                cx.notify();
+                                            }))
+                                            .on_mouse_move(cx.listener(|this, event: &MouseMoveEvent, _window, cx| {
+                                                let bounds = this.progress.read(cx).bounds();
+                                                let width = f32::from(bounds.size.width);
+                                                if width > 0.0 {
+                                                    let offset_x = (f32::from(event.position.x) - f32::from(bounds.origin.x)).clamp(0.0, width);
+                                                    let ratio = (offset_x / width).clamp(0.0, 1.0);
+                                                    this.hover_scrub_x = offset_x;
+                                                    this.hover_scrub_ratio = Some(ratio);
+                                                    cx.notify();
+                                                }
+                                            }))
+                                    })
+                                    .when(!has_song, |this| {
+                                        // 未播放状态（Idle State）：细灰线（opacity: 0.35），无滑块手柄，禁用交互
+                                        this.child(
+                                            div()
+                                                .w_full()
+                                                .h(px(2.5))
+                                                .rounded_full()
+                                                .bg(hex_rgb(0xe5e7eb))
+                                                .opacity(0.35),
+                                        )
+                                    })
+                                    .when(has_song && !self.progress_hovered && !self.dragging, |this| {
+                                        // 正常播放状态：3px 极细条（无滑块手柄），高级克制美感
+                                        this.child(
+                                            div()
+                                                .w_full()
+                                                .h(px(3.0))
+                                                .rounded_full()
+                                                .bg(hex_rgb(0xe5e7eb))
+                                                .overflow_hidden()
+                                                .child(
+                                                    div()
+                                                        .h_full()
+                                                        .rounded_full()
+                                                        .bg(ACCENT_GREEN)
+                                                        .w(relative(played_pct / 100.0)),
+                                                ),
+                                        )
+                                    })
+                                    .when(has_song && (self.progress_hovered || self.dragging), |this| {
+                                        // 悬停/拖拽状态：进度条加粗至 5px，浮现滑块与精准时间点跟随气泡 (Timeline Scrubbing)
+                                        this.child(Slider::new(&self.progress).w_full())
+                                            .when_some(self.hover_scrub_ratio, |this, ratio| {
+                                                let duration = self.player.read(cx).snapshot.duration_ms;
+                                                #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+                                                let scrub_ms = (f64::from(ratio) * duration as f64).round() as u64;
+                                                this.child(
+                                                    div()
+                                                        .absolute()
+                                                        .bottom(px(20.0))
+                                                        .left(px((self.hover_scrub_x - 18.0).max(0.0)))
+                                                        .px_1p5()
+                                                        .py(px(1.5))
+                                                        .rounded(px(4.0))
+                                                        .bg(hex_rgb(0x1f2937))
+                                                        .shadow_md()
+                                                        .text_color(hex_rgb(0xffffff))
+                                                        .text_size(px(10.5))
+                                                        .font_weight(FontWeight::MEDIUM)
+                                                        .child(format_duration(scrub_ms)),
+                                                )
+                                            })
+                                    })
+                            })
                             .child(
                                 div()
                                     .w(px(38.0))
@@ -691,11 +908,63 @@ impl Render for PlayerBar {
                     .when(!has_engine, |this| {
                         this.child(badge("无音频设备", hsla(0.0, 0.85, 0.95, 1.0), hsla(0.0, 0.85, 0.45, 1.0)))
                     })
-                    // 音量调节
+                    // 音量调节（支持悬浮滚轮直接微调与数值提示气泡 Tooltip）
                     .child(
                         h_flex()
+                            .id("vol_control_wrapper")
+                            .relative()
                             .items_center()
                             .gap(px(4.0))
+                            .on_hover(cx.listener(|this, hovered, _window, cx| {
+                                this.volume_hovered = *hovered;
+                                cx.notify();
+                            }))
+                            .on_scroll_wheel(cx.listener(|this, event: &ScrollWheelEvent, window, cx| {
+                                let dy = match event.delta {
+                                    ScrollDelta::Pixels(p) => f32::from(p.y),
+                                    ScrollDelta::Lines(p) => p.y * 16.0,
+                                };
+                                if dy.abs() > 0.01 {
+                                    let step = if dy > 0.0 { 0.03 } else { -0.03 };
+                                    let cur = this.player.read(cx).snapshot.volume;
+                                    let base = if cur <= 0.001 && dy > 0.0 {
+                                        this.last_unmuted_volume
+                                    } else {
+                                        cur
+                                    };
+                                    let next = (base + step).clamp(0.0, 1.0);
+                                    if next > 0.001 {
+                                        this.last_unmuted_volume = next;
+                                        this.volume.update(cx, |state, state_cx| {
+                                            state.set_value(next * 100.0, window, state_cx);
+                                        });
+                                        this.set_volume_and_muted(next, false, true, cx);
+                                    } else {
+                                        this.volume.update(cx, |state, state_cx| {
+                                            state.set_value(0.0, window, state_cx);
+                                        });
+                                        this.set_volume_and_muted(this.last_unmuted_volume, true, true, cx);
+                                    }
+                                    this.volume_hovered = true;
+                                }
+                            }))
+                            .when(self.volume_hovered || self.volume_dragging, |this| {
+                                this.child(
+                                    div()
+                                        .absolute()
+                                        .bottom(px(26.0))
+                                        .left(px(28.0))
+                                        .px_2()
+                                        .py(px(1.5))
+                                        .rounded(px(4.0))
+                                        .bg(hex_rgb(0x1f2937))
+                                        .shadow_md()
+                                        .text_color(hex_rgb(0xffffff))
+                                        .text_size(px(10.5))
+                                        .font_weight(FontWeight::BOLD)
+                                        .child(format!("{vol_num}%")),
+                                )
+                            })
                             .child(
                                 Button::new("vol_toggle")
                                     .ghost()
@@ -704,11 +973,24 @@ impl Render for PlayerBar {
                                     .tooltip(if is_muted { "恢复音量" } else { "静音" })
                                     .on_click(cx.listener(|this, _event, window, cx| {
                                         let current = this.player.read(cx).snapshot.volume;
-                                        let target = if current > 0.001 { 0.0 } else { 0.8 };
-                                        this.volume.update(cx, |state, state_cx| {
-                                            state.set_value(target * 100.0, window, state_cx);
-                                        });
-                                        this.apply_volume(target, true);
+                                        let is_currently_muted = current <= 0.001;
+                                        if is_currently_muted {
+                                            let target = if this.last_unmuted_volume > 0.001 {
+                                                this.last_unmuted_volume
+                                            } else {
+                                                0.8
+                                            };
+                                            this.volume.update(cx, |state, state_cx| {
+                                                state.set_value(target * 100.0, window, state_cx);
+                                            });
+                                            this.set_volume_and_muted(target, false, true, cx);
+                                        } else {
+                                            this.last_unmuted_volume = current;
+                                            this.volume.update(cx, |state, state_cx| {
+                                                state.set_value(0.0, window, state_cx);
+                                            });
+                                            this.set_volume_and_muted(current, true, true, cx);
+                                        }
                                     })),
                             )
                             .child(
@@ -760,7 +1042,7 @@ mod tests {
                 ..Song::default()
             })
             .collect();
-        let mut model = PlayerModel::new(true, mode);
+        let mut model = PlayerModel::new(true, mode, 0.8);
         model.set_queue(Arc::new(songs), index);
         model
     }
@@ -768,14 +1050,25 @@ mod tests {
     #[test]
     fn persisted_mode_is_what_the_session_starts_with() {
         // 恢复持久化的播放模式
-        assert_eq!(PlayerModel::new(true, PlayMode::Shuffle).mode, PlayMode::Shuffle);
-        assert_eq!(PlayerModel::new(true, PlayMode::SingleLoop).mode, PlayMode::SingleLoop);
-        assert_eq!(PlayerModel::new(true, PlayMode::ListLoop).mode, PlayMode::ListLoop);
+        assert_eq!(PlayerModel::new(true, PlayMode::Shuffle, 0.8).mode, PlayMode::Shuffle);
+        assert_eq!(
+            PlayerModel::new(true, PlayMode::SingleLoop, 0.8).mode,
+            PlayMode::SingleLoop
+        );
+        assert_eq!(PlayerModel::new(true, PlayMode::ListLoop, 0.8).mode, PlayMode::ListLoop);
+    }
+
+    #[test]
+    fn persisted_volume_is_what_the_session_starts_with() {
+        // 恢复持久化的音量设置（含范围限制）
+        assert!((PlayerModel::new(true, PlayMode::ListLoop, 0.35).snapshot.volume - 0.35).abs() < f32::EPSILON);
+        assert!((PlayerModel::new(true, PlayMode::ListLoop, 1.5).snapshot.volume - 1.0).abs() < f32::EPSILON);
+        assert!((PlayerModel::new(true, PlayMode::ListLoop, -0.2).snapshot.volume - 0.0).abs() < f32::EPSILON);
     }
 
     #[test]
     fn cycling_visits_every_mode_and_wraps() {
-        let mut model = PlayerModel::new(true, PlayMode::ListLoop);
+        let mut model = PlayerModel::new(true, PlayMode::ListLoop, 0.8);
         assert_eq!(model.cycle_mode(), PlayMode::SingleLoop);
         assert_eq!(model.cycle_mode(), PlayMode::Shuffle);
         assert_eq!(model.cycle_mode(), PlayMode::ListLoop);
@@ -799,9 +1092,44 @@ mod tests {
 
     #[test]
     fn empty_queue_has_no_next_or_previous() {
-        let model = PlayerModel::new(true, PlayMode::ListLoop);
+        let model = PlayerModel::new(true, PlayMode::ListLoop, 0.8);
         assert_eq!(model.next_index(), None);
         assert_eq!(model.prev_index(), None);
         assert!(model.current_song().is_none());
+    }
+
+    fn songs(hashes: &[&str]) -> Vec<Song> {
+        hashes
+            .iter()
+            .map(|hash| Song {
+                hash: (*hash).to_owned(),
+                ..Song::default()
+            })
+            .collect()
+    }
+
+    #[test]
+    fn radio_advances_sequentially_without_wrapping() {
+        // 红心电台不理播放模式：单曲循环 / 随机也必须往后走，且到队尾不回绕
+        for mode in [PlayMode::ListLoop, PlayMode::SingleLoop, PlayMode::Shuffle] {
+            let mut model = model(mode, 0);
+            assert_eq!(model.sequential_next(), Some(1), "{mode:?}");
+            model.set_index(2);
+            assert_eq!(model.sequential_next(), None, "{mode:?} 不得回到队首");
+            assert_eq!(model.sequential_prev(), Some(1));
+            model.set_index(0);
+            assert_eq!(model.sequential_prev(), None, "队首不再回绕");
+        }
+    }
+
+    #[test]
+    fn append_skips_songs_already_in_the_queue() {
+        let mut model = model(PlayMode::ListLoop, 0);
+        // 上游重复推荐同一批歌时，队列不能长出重复曲目
+        assert_eq!(model.append_songs(songs(&["b", "d", "d"])), Some(3));
+        let hashes: Vec<&str> = model.queue.iter().map(|song| song.hash.as_str()).collect();
+        assert_eq!(hashes, vec!["a", "b", "c", "d"]);
+        assert_eq!(model.append_songs(songs(&["a", "b"])), None, "全是旧歌时不推进");
+        assert_eq!(model.queue.len(), 4);
     }
 }

@@ -7,6 +7,7 @@ mod format;
 mod http;
 pub(crate) mod logo;
 mod motion;
+pub(crate) mod palette;
 mod shell;
 mod theme;
 mod views;

@@ -21,6 +21,7 @@ tracing     = { workspace = true }
 reqwest     = { workspace = true }
 anyhow      = { workspace = true }
 futures     = { workspace = true }
+image       = { version = "0.25", default-features = false, features = ["jpeg", "png"] }
 
 # 纯函数单测使用普通 #[test]，无需启用 gpui-kit 的 test-support
 

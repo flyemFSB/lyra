@@ -119,9 +119,13 @@ impl Kugou {
         let fetcher = Arc::new(BlobFetcher::new(self.blobs.clone(), self.runtime.clone()));
         match lyra_audio::spawn(fetcher, events) {
             Ok(engine) => {
-                // 同步持久化的音量设置至音频引擎
-                let volume = self.settings().map_or(1.0, |settings| settings.volume);
-                engine.set_volume(volume.clamp(0.0, 1.0));
+                // 同步持久化的音量与静音设置至音频引擎
+                let (volume, muted) = match self.settings() {
+                    Ok(s) => (s.volume.clamp(0.0, 1.0), s.muted),
+                    Err(_) => (0.8, false),
+                };
+                let effective_volume = if muted { 0.0 } else { volume };
+                engine.set_volume(effective_volume);
                 self.engine = Some(engine);
                 Ok(true)
             }
@@ -185,11 +189,37 @@ impl Kugou {
         }
     }
 
+    /// 获取当前播放音量配置（缺省回落为 0.8）
+    #[must_use]
+    pub fn volume(&self) -> f32 {
+        match self.settings() {
+            Ok(settings) => settings.volume.clamp(0.0, 1.0),
+            Err(error) => {
+                tracing::warn!(%error, "读取音量配置失败，回落到默认值");
+                0.8
+            }
+        }
+    }
+
+    /// 获取当前是否处于静音状态（缺省为 false）
+    #[must_use]
+    pub fn is_muted(&self) -> bool {
+        match self.settings() {
+            Ok(settings) => settings.muted,
+            Err(_) => false,
+        }
+    }
+
     /// 保存用户配置并同步音量与缓存上限
     pub fn set_settings(&self, settings: &Settings) -> Result<()> {
         self.store.set_settings(settings)?;
         if let Some(engine) = &self.engine {
-            engine.set_volume(settings.volume.clamp(0.0, 1.0));
+            let effective_volume = if settings.muted {
+                0.0
+            } else {
+                settings.volume.clamp(0.0, 1.0)
+            };
+            engine.set_volume(effective_volume);
         }
         // 运行时更新缓存上限并按 LRU 即时收敛
         self.blobs.set_max_bytes(settings.max_cache_bytes);
@@ -441,9 +471,12 @@ impl Kugou {
         Ok(flow::daily(&self.api, "android").await?.items)
     }
 
-    /// 分页获取个性化电台歌曲
-    pub async fn personal_fm(&self, cursor: Option<&str>, mode: &str) -> Result<Page<Song>> {
-        Ok(flow::personal_fm(&self.api, "play", mode, cursor, None).await?)
+    /// 拉取个性化电台歌曲
+    ///
+    /// 首进传 `previous=None`；续拉必须传本地队列最后一首与剩余首数，
+    /// 否则上游会把每次请求都当成重新开始，反复返回同一批歌。
+    pub async fn personal_fm(&self, previous: Option<&Song>, remain: u32, mark: Option<&str>) -> Result<Page<Song>> {
+        Ok(flow::personal_fm(&self.api, "normal", previous, remain, mark).await?)
     }
 
     /// 获取首页发现歌曲推荐

@@ -271,7 +271,7 @@ fn smoke() -> anyhow::Result<()> {
             Ok(items) => report_count(&mut warnings, "/everyday_song_recommend", items.len()),
             Err(error) => report_error(&mut failures, "/everyday_song_recommend", &error),
         }
-        match app.personal_fm(None, "normal").await {
+        match app.personal_fm(None, 0, None).await {
             Ok(page) => {
                 report_count(&mut warnings, "/v2/personal_recommend", page.items.len());
                 println!("     游标 {:?}", page.cursor);

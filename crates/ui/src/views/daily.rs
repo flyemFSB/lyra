@@ -13,8 +13,8 @@ use lyra_api::model::Song;
 use crate::bridge::{Backend, Msg};
 use crate::shell::AppShell;
 use crate::theme::{
-    ACCENT_GREEN, ACCENT_GREEN_HOVER, ACCENT_GREEN_LIGHT, CARD_BG, TEXT_MUTED, TEXT_PRIMARY,
-    badge, friendly_error_message, hex_rgb, notice_with_icon, row_sizes, title,
+    ACCENT_GREEN, ACCENT_GREEN_HOVER, ACCENT_GREEN_LIGHT, CARD_BG, TEXT_MUTED, TEXT_PRIMARY, badge,
+    friendly_error_message, hex_rgb, notice_with_icon, row_sizes, title,
 };
 use crate::views::player::PlayerModel;
 use crate::views::tracks::{RowContext, TrackRow, build_rows, current_play_state, song_row};
@@ -29,6 +29,9 @@ pub(crate) struct DailyView {
     rows: Arc<Vec<TrackRow>>,
     sizes: Rc<Vec<Size<Pixels>>>,
     scroll_handle: VirtualListScrollHandle,
+    focus_handle: FocusHandle,
+    /// 选中的曲目索引（键盘导航/单击选中）
+    pub(crate) selected_index: Option<usize>,
     loading: bool,
     loaded: bool,
     error: Option<SharedString>,
@@ -54,6 +57,8 @@ impl DailyView {
             rows: Arc::new(Vec::new()),
             sizes: row_sizes(0),
             scroll_handle: VirtualListScrollHandle::new(),
+            focus_handle: cx.focus_handle(),
+            selected_index: None,
             loading: false,
             loaded: false,
             error: None,
@@ -67,6 +72,7 @@ impl DailyView {
         self.rows = Arc::new(Vec::new());
         self.sizes = row_sizes(0);
         self.scroll_handle = VirtualListScrollHandle::new();
+        self.selected_index = None;
         self.loading = false;
         self.loaded = false;
         self.error = None;
@@ -116,89 +122,298 @@ impl DailyView {
 impl Render for DailyView {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let shell_fm = self.shell.clone();
+        let shell_daily = self.shell.clone();
+        let shell_radar = self.shell.clone();
+        let shell_shuffle = self.shell.clone();
+        let songs_daily = self.songs.clone();
+        let songs_shuffle = self.songs.clone();
 
-        // 顶部“红心 Radio”正方形卡片（轻快温润淡粉底，告别沉重压抑黑底）
-        let radio_card = v_flex()
-            .id("personal_fm_square_card")
+        // 卡片 1：红心漫游（私人 FM 随心畅听）
+        let card_radio = v_flex()
+            .id("personal_fm_card")
             .role(Role::Button)
             .cursor_pointer()
-            .w(px(140.0))
-            .gap(px(6.0))
+            .flex_1()
+            .min_w(px(130.0))
+            .p_3()
+            .rounded(px(14.0))
+            .bg(hex_rgb(0xfff1f2))
+            .border_1()
+            .border_color(hex_rgb(0xfecdd3))
+            .shadow_xs()
+            .hover(|s| s.bg(hex_rgb(0xfee2e2)).shadow_sm())
             .on_click(move |_event, _window, cx| {
-                shell_fm
-                    .update(cx, |shell, cx| {
-                        shell.start_personal_fm(cx);
-                    })
-                    .ok();
+                shell_fm.update(cx, AppShell::start_personal_fm).ok();
             })
             .child(
-                div()
-                    .w(px(140.0))
-                    .h(px(140.0))
-                    .rounded(px(14.0))
-                    .bg(hex_rgb(0xfff1f2))
-                    .border_1()
-                    .border_color(hex_rgb(0xfecdd3))
-                    .shadow_xs()
-                    .hover(|s| s.bg(hex_rgb(0xfee2e2)))
-                    .relative()
-                    .flex()
-                    .items_center()
-                    .justify_center()
-                    .child(
-                        Icon::new(IconName::Heart)
-                            .size(px(48.0))
-                            .text_color(hex_rgb(0xef4444)),
-                    )
+                h_flex()
+                    .w_full()
+                    .justify_between()
+                    .items_start()
                     .child(
                         div()
-                            .absolute()
-                            .bottom(px(8.0))
-                            .right(px(8.0))
-                            .w(px(32.0))
-                            .h(px(32.0))
+                            .w(px(40.0))
+                            .h(px(40.0))
                             .rounded_full()
-                            .bg(ACCENT_GREEN)
-                            .hover(|s| s.bg(ACCENT_GREEN_HOVER))
-                            .shadow_sm()
+                            .bg(hex_rgb(0xffe4e6))
                             .flex()
                             .items_center()
                             .justify_center()
-                            .child(Icon::new(IconName::Play).size(px(15.0)).text_color(CARD_BG)),
+                            .child(Icon::new(IconName::Heart).size(px(22.0)).text_color(hex_rgb(0xef4444))),
+                    )
+                    .child(
+                        div()
+                            .w(px(28.0))
+                            .h(px(28.0))
+                            .rounded_full()
+                            .bg(ACCENT_GREEN)
+                            .hover(|s| s.bg(ACCENT_GREEN_HOVER))
+                            .shadow_xs()
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .child(Icon::new(IconName::Play).size(px(13.0)).text_color(CARD_BG)),
                     ),
             )
             .child(
                 v_flex()
+                    .mt_3()
                     .gap(px(2.0))
                     .child(
                         div()
-                            .text_xs()
+                            .text_sm()
                             .font_weight(FontWeight::BOLD)
                             .text_color(TEXT_PRIMARY)
-                            .child("红心 Radio"),
+                            .child("红心漫游"),
+                    )
+                    .child(div().text_xs().text_color(TEXT_MUTED).child("私人电台 · 随心畅听")),
+            );
+
+        // 卡片 2：每日 30 首（今日专属定制）
+        let card_daily = v_flex()
+            .id("daily_30_card")
+            .role(Role::Button)
+            .cursor_pointer()
+            .flex_1()
+            .min_w(px(130.0))
+            .p_3()
+            .rounded(px(14.0))
+            .bg(hex_rgb(0xecfdf5))
+            .border_1()
+            .border_color(hex_rgb(0xa7f3d0))
+            .shadow_xs()
+            .hover(|s| s.bg(hex_rgb(0xd1fae5)).shadow_sm())
+            .on_click(move |_event, _window, cx| {
+                if !songs_daily.is_empty() {
+                    shell_daily
+                        .update(cx, |shell, cx| shell.play_queue(songs_daily.clone(), 0, cx))
+                        .ok();
+                }
+            })
+            .child(
+                h_flex()
+                    .w_full()
+                    .justify_between()
+                    .items_start()
+                    .child(
+                        div()
+                            .w(px(40.0))
+                            .h(px(40.0))
+                            .rounded_full()
+                            .bg(hex_rgb(0xd1fae5))
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .child(Icon::new(IconName::Sparkles).size(px(22.0)).text_color(ACCENT_GREEN)),
                     )
                     .child(
                         div()
-                            .text_size(px(11.0))
-                            .text_color(TEXT_MUTED)
-                            .child("私人漫游 · 随心畅听"),
+                            .w(px(28.0))
+                            .h(px(28.0))
+                            .rounded_full()
+                            .bg(ACCENT_GREEN)
+                            .hover(|s| s.bg(ACCENT_GREEN_HOVER))
+                            .shadow_xs()
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .child(Icon::new(IconName::Play).size(px(13.0)).text_color(CARD_BG)),
                     ),
+            )
+            .child(
+                v_flex()
+                    .mt_3()
+                    .gap(px(2.0))
+                    .child(
+                        div()
+                            .text_sm()
+                            .font_weight(FontWeight::BOLD)
+                            .text_color(TEXT_PRIMARY)
+                            .child("每日 30 首"),
+                    )
+                    .child(div().text_xs().text_color(TEXT_MUTED).child("专属精选 · 每日更新")),
             );
 
+        // 卡片 3：雷达推荐（相似探索）
+        let card_radar = v_flex()
+            .id("radar_rec_card")
+            .role(Role::Button)
+            .cursor_pointer()
+            .flex_1()
+            .min_w(px(130.0))
+            .p_3()
+            .rounded(px(14.0))
+            .bg(hex_rgb(0xf5f3ff))
+            .border_1()
+            .border_color(hex_rgb(0xddd6fe))
+            .shadow_xs()
+            .hover(|s| s.bg(hex_rgb(0xede9fe)).shadow_sm())
+            .on_click(move |_event, _window, cx| {
+                shell_radar.update(cx, AppShell::start_personal_fm).ok();
+            })
+            .child(
+                h_flex()
+                    .w_full()
+                    .justify_between()
+                    .items_start()
+                    .child(
+                        div()
+                            .w(px(40.0))
+                            .h(px(40.0))
+                            .rounded_full()
+                            .bg(hex_rgb(0xede9fe))
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .child(
+                                Icon::new(IconName::Compass)
+                                    .size(px(22.0))
+                                    .text_color(hex_rgb(0x8b5cf6)),
+                            ),
+                    )
+                    .child(
+                        div()
+                            .w(px(28.0))
+                            .h(px(28.0))
+                            .rounded_full()
+                            .bg(hex_rgb(0x8b5cf6))
+                            .hover(|s| s.bg(hex_rgb(0x7c3aed)))
+                            .shadow_xs()
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .child(Icon::new(IconName::Play).size(px(13.0)).text_color(CARD_BG)),
+                    ),
+            )
+            .child(
+                v_flex()
+                    .mt_3()
+                    .gap(px(2.0))
+                    .child(
+                        div()
+                            .text_sm()
+                            .font_weight(FontWeight::BOLD)
+                            .text_color(TEXT_PRIMARY)
+                            .child("雷达推荐"),
+                    )
+                    .child(div().text_xs().text_color(TEXT_MUTED).child("相似品味 · 探索发现")),
+            );
+
+        // 卡片 4：随机漫步（偶遇心动）
+        let card_shuffle = v_flex()
+            .id("shuffle_walk_card")
+            .role(Role::Button)
+            .cursor_pointer()
+            .flex_1()
+            .min_w(px(130.0))
+            .p_3()
+            .rounded(px(14.0))
+            .bg(hex_rgb(0xfffbeb))
+            .border_1()
+            .border_color(hex_rgb(0xfde68a))
+            .shadow_xs()
+            .hover(|s| s.bg(hex_rgb(0xfef3c7)).shadow_sm())
+            .on_click(move |_event, _window, cx| {
+                if !songs_shuffle.is_empty() {
+                    shell_shuffle
+                        .update(cx, |shell, cx| {
+                            shell.play_queue(songs_shuffle.clone(), 0, cx);
+                        })
+                        .ok();
+                }
+            })
+            .child(
+                h_flex()
+                    .w_full()
+                    .justify_between()
+                    .items_start()
+                    .child(
+                        div()
+                            .w(px(40.0))
+                            .h(px(40.0))
+                            .rounded_full()
+                            .bg(hex_rgb(0xfef3c7))
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .child(
+                                Icon::new(IconName::Shuffle)
+                                    .size(px(22.0))
+                                    .text_color(hex_rgb(0xf59e0b)),
+                            ),
+                    )
+                    .child(
+                        div()
+                            .w(px(28.0))
+                            .h(px(28.0))
+                            .rounded_full()
+                            .bg(hex_rgb(0xf59e0b))
+                            .hover(|s| s.bg(hex_rgb(0xd97706)))
+                            .shadow_xs()
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .child(Icon::new(IconName::Play).size(px(13.0)).text_color(CARD_BG)),
+                    ),
+            )
+            .child(
+                v_flex()
+                    .mt_3()
+                    .gap(px(2.0))
+                    .child(
+                        div()
+                            .text_sm()
+                            .font_weight(FontWeight::BOLD)
+                            .text_color(TEXT_PRIMARY)
+                            .child("随机漫步"),
+                    )
+                    .child(div().text_xs().text_color(TEXT_MUTED).child("偶遇心动 · 灵感碰撞")),
+            );
+
+        // 顶层电台与精选专区（4卡片横向排布，充实且层次分明，告别大片悬空空白）
         let top_section = v_flex()
             .w_full()
             .px_4()
             .pt_4()
             .pb_1()
-            .gap(px(8.0))
+            .gap(px(10.0))
             .child(
                 div()
                     .text_xs()
                     .font_weight(FontWeight::BOLD)
                     .text_color(TEXT_MUTED)
-                    .child("私人电台"),
+                    .child("私人漫游与精选专区"),
             )
-            .child(radio_card);
+            .child(
+                h_flex()
+                    .w_full()
+                    .gap(px(12.0))
+                    .items_center()
+                    .child(card_radio)
+                    .child(card_daily)
+                    .child(card_radar)
+                    .child(card_shuffle),
+            );
 
         // 歌曲列表标题栏
         let mut list_header = h_flex()
@@ -247,6 +462,7 @@ impl Render for DailyView {
         } else {
             let this = cx.entity();
             let sizes = self.sizes.clone();
+            let this_for_select = this.clone();
             v_virtual_list(
                 this,
                 ElementId::Name(SharedString::new_static("daily-tracks")),
@@ -255,15 +471,24 @@ impl Render for DailyView {
                     let app: &App = cx;
                     // 播放器状态整批读取一次，避免每行都做一次实体读取
                     let (cur_hash, is_playing) = current_play_state(&view.player, app);
+                    let sel_entity = this_for_select.clone();
+                    let on_select = std::rc::Rc::new(move |selected_idx: usize, _window: &mut Window, cx: &mut App| {
+                        sel_entity.update(cx, |daily, cx| {
+                            daily.selected_index = Some(selected_idx);
+                            cx.notify();
+                        });
+                    });
                     range
                         .map(|index| {
                             song_row(
                                 index,
                                 &RowContext {
-                                     queue: &view.songs,
-                                     rows: &view.rows,
-                                     shell: &view.shell,
-                                     backend: &view.backend,
+                                    queue: &view.songs,
+                                    rows: &view.rows,
+                                    shell: &view.shell,
+                                    backend: &view.backend,
+                                    selected_index: view.selected_index,
+                                    on_select: Some(on_select.clone()),
                                 },
                                 cur_hash.as_deref(),
                                 is_playing,
@@ -278,6 +503,43 @@ impl Render for DailyView {
 
         v_flex()
             .size_full()
+            .track_focus(&self.focus_handle)
+            .on_key_down(cx.listener(
+                |this, event: &KeyDownEvent, _window, cx| match event.keystroke.key.as_str() {
+                    "down" => {
+                        let total = this.songs.len();
+                        if total > 0 {
+                            this.selected_index = match this.selected_index {
+                                Some(i) if i + 1 < total => Some(i + 1),
+                                None => Some(0),
+                                other => other,
+                            };
+                            cx.notify();
+                        }
+                    }
+                    "up" => {
+                        this.selected_index = match this.selected_index {
+                            Some(i) if i > 0 => Some(i - 1),
+                            _ => Some(0),
+                        };
+                        cx.notify();
+                    }
+                    "space" => {
+                        if let Some(engine) = this.backend.engine() {
+                            engine.toggle();
+                        }
+                    }
+                    "enter" => {
+                        if let Some(idx) = this.selected_index
+                            && idx < this.songs.len()
+                        {
+                            let songs = this.songs.clone();
+                            this.shell.update(cx, |shell, cx| shell.play_queue(songs, idx, cx)).ok();
+                        }
+                    }
+                    _ => {}
+                },
+            ))
             .child(top_section)
             .child(list_header)
             .child(

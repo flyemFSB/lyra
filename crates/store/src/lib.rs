@@ -532,6 +532,7 @@ mod tests {
             cache_dir: Some("D:/cache".to_owned()),
             max_cache_bytes: 123,
             play_mode: PlayMode::Shuffle,
+            muted: true,
         };
         store.set_settings(&settings).unwrap();
         assert_eq!(store.settings().unwrap(), settings);
@@ -539,13 +540,14 @@ mod tests {
 
     #[test]
     fn settings_without_play_mode_still_deserialize() {
-        // 旧版本落的配置没有 play_mode 字段，必须回落到默认列表循环而不是报错。
+        // 旧版本落的配置没有 play_mode / muted 字段，必须回落到默认值而不是报错。
         let store = temp_store();
         let legacy = br#"{"volume":0.5,"quality":"128","cache_dir":null,"max_cache_bytes":10}"#;
         store.put_meta("settings", legacy).unwrap();
         let settings = store.settings().unwrap();
         assert_eq!(settings.volume, 0.5);
         assert_eq!(settings.play_mode, PlayMode::ListLoop);
+        assert!(!settings.muted);
     }
 
     #[test]

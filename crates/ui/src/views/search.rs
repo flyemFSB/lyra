@@ -1,13 +1,12 @@
-//! 歌曲搜索与结果列表视图。
+//! 歌曲搜索与结果列表视图（桌面端单搜索入口架构）。
 
 use std::rc::Rc;
 use std::sync::Arc;
 
 use gpui_kit::assets::IconName;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
-use gpui_kit::component::input::{Input, InputEvent, InputState};
 use gpui_kit::component::scroll::ScrollableElement as _;
-use gpui_kit::component::{Icon, Sizable as _, VirtualListScrollHandle, h_flex, v_flex, v_virtual_list};
+use gpui_kit::component::{Disableable as _, Icon, VirtualListScrollHandle, h_flex, v_flex, v_virtual_list};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use lyra_api::model::Song;
@@ -15,14 +14,14 @@ use lyra_api::model::Song;
 use crate::bridge::{Backend, Msg};
 use crate::shell::AppShell;
 use crate::theme::{
-    ACCENT_GREEN, ACCENT_GREEN_HOVER, ACCENT_GREEN_LIGHT, CANVAS_BG, CARD_BORDER, TEXT_MUTED, badge, chip,
-    friendly_error_message, notice_with_icon, row_sizes, title,
+    ACCENT_GREEN, ACCENT_GREEN_LIGHT, CARD_BORDER, SURFACE_HOVER, TEXT_FAINT, TEXT_MUTED, TEXT_PRIMARY, badge,
+    friendly_error_message, hex_rgb, notice_with_icon, row_sizes, title,
 };
 use crate::views::player::PlayerModel;
-use crate::views::tracks::{RowContext, TrackRow, build_rows, current_play_state, song_row};
+use crate::views::tracks::{RowContext, TrackRow, build_rows, current_play_state, song_row, table_header};
 
-/// 快捷热门搜索词
-const HOT_TAGS: &[&str] = &[
+/// 快捷热门搜索词（供顶部下拉浮层与探索建议共享）
+pub(crate) const HOT_TAGS: &[&str] = &[
     "周杰伦",
     "陈奕迅",
     "林俊杰",
@@ -33,12 +32,33 @@ const HOT_TAGS: &[&str] = &[
     "欧美流行",
 ];
 
+/// 搜索类型标签页
+#[derive(Clone, Copy, PartialEq, Eq, Default)]
+pub(crate) enum SearchTab {
+    #[default]
+    Songs,
+    Albums,
+    Artists,
+    Playlists,
+}
+
+/// 排序筛选条件
+#[derive(Clone, Copy, PartialEq, Eq, Default)]
+pub(crate) enum SearchSort {
+    #[default]
+    Default,
+    Latest,
+    Hottest,
+}
+
 /// 搜索视图
 pub(crate) struct SearchView {
     backend: Backend,
     shell: WeakEntity<AppShell>,
     player: Entity<PlayerModel>,
-    input: Entity<InputState>,
+    pub(crate) query: String,
+    pub(crate) tab: SearchTab,
+    pub(crate) sort: SearchSort,
     songs: Arc<Vec<Song>>,
     /// 预格式化的曲目展示模型
     rows: Arc<Vec<TrackRow>>,
@@ -54,23 +74,14 @@ pub(crate) struct SearchView {
 }
 
 impl SearchView {
-    /// 创建搜索视图并监听输入与播放器事件
+    /// 创建搜索视图并监听播放器事件
     pub(crate) fn new(
         backend: Backend,
         shell: WeakEntity<AppShell>,
         player: Entity<PlayerModel>,
-        window: &mut Window,
+        _window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
-        let input = cx.new(|cx| InputState::new(window, cx).placeholder("搜索歌曲、歌手或专辑，回车检索"));
-        let input_sub = cx.subscribe(&input, |this, _state, event: &InputEvent, cx| {
-            match event {
-                InputEvent::PressEnter { .. } => this.submit(cx),
-                // 输入框只让自己失效，父实体不会自动重绘；
-                // 不转发 Change 的话「清空输入」按钮永远不出现。
-                InputEvent::Change | InputEvent::Focus | InputEvent::Blur => cx.notify(),
-            }
-        });
         let player_sub = cx.observe(&player, |_this, _player, cx| {
             cx.notify();
         });
@@ -79,7 +90,9 @@ impl SearchView {
             backend,
             shell,
             player,
-            input,
+            query: String::new(),
+            tab: SearchTab::Songs,
+            sort: SearchSort::Default,
             songs: Arc::new(Vec::new()),
             rows: Arc::new(Vec::new()),
             sizes: row_sizes(0),
@@ -88,12 +101,13 @@ impl SearchView {
             searched: false,
             error: None,
             request_seq: 0,
-            _subs: vec![input_sub, player_sub],
+            _subs: vec![player_sub],
         }
     }
 
     /// 重置视图状态并废弃在途请求
     pub(crate) fn reset(&mut self, cx: &mut Context<Self>) {
+        self.query.clear();
         self.songs = Arc::new(Vec::new());
         self.rows = Arc::new(Vec::new());
         self.sizes = row_sizes(0);
@@ -105,25 +119,12 @@ impl SearchView {
         cx.notify();
     }
 
-    /// 提交当前输入关键词
-    pub(crate) fn submit(&mut self, cx: &mut Context<Self>) {
-        let keyword = self.input.read(cx).value().to_string();
-        self.execute_search(keyword, cx);
-    }
-
-    /// 按指定关键词执行检索
-    pub(crate) fn search_keyword(&mut self, keyword: &str, window: &mut Window, cx: &mut Context<Self>) {
-        self.input.update(cx, |input, input_cx| {
-            input.set_value(keyword.to_owned(), window, input_cx);
-        });
-        self.execute_search(keyword.to_owned(), cx);
-    }
-
-    /// 发起搜索请求
-    pub(crate) fn execute_search(&mut self, keyword: String, cx: &mut Context<Self>) {
-        if !is_searchable(&keyword) {
+    /// 发起全网搜索请求
+    pub(crate) fn execute_search(&mut self, keyword: &str, cx: &mut Context<Self>) {
+        if !is_searchable(keyword) {
             return;
         }
+        keyword.trim().clone_into(&mut self.query);
         self.loading = true;
         self.error = None;
         self.scroll_handle = VirtualListScrollHandle::new();
@@ -132,8 +133,9 @@ impl SearchView {
         cx.notify();
 
         let app = self.backend.app();
+        let kw = self.query.clone();
         self.backend
-            .spawn(async move { Msg::Search(seq, app.search(&keyword, 1).await.map_err(|error| error.to_string())) });
+            .spawn(async move { Msg::Search(seq, app.search(&kw, 1).await.map_err(|error| error.to_string())) });
     }
 
     /// 处理搜索响应结果（丢弃过期请求）
@@ -163,125 +165,250 @@ impl SearchView {
 }
 
 /// 检查关键词是否有效（非空且非全空白）
-fn is_searchable(keyword: &str) -> bool {
+pub(crate) fn is_searchable(keyword: &str) -> bool {
     !keyword.trim().is_empty()
 }
 
 impl Render for SearchView {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let has_input_text = !self.input.read(cx).value().is_empty();
+        let has_results = !self.songs.is_empty();
+        let songs_for_play = self.songs.clone();
+        let shell_for_play = self.shell.clone();
 
-        let mut header = v_flex()
+        let header_title = if self.query.is_empty() {
+            "搜索音乐".to_owned()
+        } else {
+            format!("“{}” 的搜索结果", self.query)
+        };
+
+        // 桌面端干净统一的信息架构：顶部无冗余输入框，呈现标题、播放全部、Tab 切换与排序筛选
+        let header = v_flex()
             .w_full()
-            .px_5()
-            .py_4()
-            .gap(px(12.0))
+            .px_6()
+            .pt_5()
+            .pb_3()
+            .gap(px(14.0))
             .border_b_1()
             .border_color(CARD_BORDER)
+            // 第一行：标题 + 结果数 + 播放全部 (主色胶囊)
             .child(
                 h_flex()
                     .w_full()
-                    .gap(px(10.0))
+                    .gap(px(12.0))
                     .items_center()
-                    .child(title("发现歌曲"))
-                    .child(badge(
-                        format!("{} 条搜索结果", self.songs.len()),
-                        ACCENT_GREEN_LIGHT,
-                        ACCENT_GREEN_HOVER,
-                    ))
+                    .child(title(header_title))
+                    .when(self.searched, |this| {
+                        this.child(badge(
+                            format!("{} 首单曲", self.songs.len()),
+                            ACCENT_GREEN_LIGHT,
+                            ACCENT_GREEN,
+                        ))
+                    })
                     .child(div().flex_1())
-                    .when(!self.songs.is_empty(), |this| {
-                        let songs = self.songs.clone();
-                        let shell = self.shell.clone();
-                        this.child(
-                            Button::new("search_play_all")
-                                .primary()
-                                .small()
-                                .icon(IconName::Play)
-                                .label("播放全部")
-                                .tooltip("按顺序播放全部检索结果")
-                                .on_click(move |_event, _window, cx| {
-                                    shell.update(cx, |shell, cx| shell.play_queue(songs.clone(), 0, cx)).ok();
-                                }),
-                        )
-                    }),
+                    .child(
+                        Button::new("search_play_all")
+                            .primary()
+                            .icon(IconName::Play)
+                            .label("播放全部")
+                            .tooltip("按顺序播放全部检索结果")
+                            .disabled(!has_results)
+                            .on_click(move |_event, _window, cx| {
+                                shell_for_play
+                                    .update(cx, |shell, cx| shell.play_queue(songs_for_play.clone(), 0, cx))
+                                    .ok();
+                            }),
+                    ),
             )
-            // 搜索输入栏
+            // 第二行：Tab 切换（单曲 / 专辑 / 歌手 / 歌单）与 筛选排序
             .child(
                 h_flex()
                     .w_full()
-                    .gap(px(10.0))
                     .items_center()
+                    .justify_between()
+                    // 左侧 Tab 切换
                     .child(
                         h_flex()
-                            .flex_1()
-                            .min_w(px(0.0))
-                            .h(px(38.0))
-                            .px_3()
-                            .rounded(px(10.0))
-                            .bg(CANVAS_BG)
-                            .border_1()
-                            .border_color(CARD_BORDER)
-                            .gap(px(8.0))
+                            .gap(px(4.0))
                             .items_center()
-                            .child(Icon::new(IconName::Search).size(px(16.0)).text_color(ACCENT_GREEN))
-                            .child(div().flex_1().child(Input::new(&self.input).appearance(false).w_full()))
-                            .when(has_input_text, |this| {
-                                this.child(
-                                    Button::new("clear_input")
-                                        .ghost()
-                                        .small()
-                                        .icon(IconName::X)
-                                        .tooltip("清空输入")
-                                        .on_click(cx.listener(|this, _event, window, cx| {
-                                            this.input.update(cx, |input, input_cx| {
-                                                input.set_value(String::new(), window, input_cx);
-                                            });
-                                        })),
-                                )
+                            .child({
+                                let active = self.tab == SearchTab::Songs;
+                                div()
+                                    .id("tab_songs")
+                                    .role(Role::Button)
+                                    .cursor_pointer()
+                                    .px_3()
+                                    .py(px(4.0))
+                                    .rounded(px(6.0))
+                                    .text_xs()
+                                    .when(active, |s| {
+                                        s.bg(hex_rgb(0xf3f4f6))
+                                            .font_weight(FontWeight::BOLD)
+                                            .text_color(ACCENT_GREEN)
+                                    })
+                                    .when(!active, |s| s.text_color(TEXT_MUTED).hover(|h| h.bg(SURFACE_HOVER)))
+                                    .on_click(cx.listener(|this, _event, _window, cx| {
+                                        this.tab = SearchTab::Songs;
+                                        cx.notify();
+                                    }))
+                                    .child("单曲")
+                            })
+                            .child({
+                                let active = self.tab == SearchTab::Albums;
+                                div()
+                                    .id("tab_albums")
+                                    .role(Role::Button)
+                                    .cursor_pointer()
+                                    .px_3()
+                                    .py(px(4.0))
+                                    .rounded(px(6.0))
+                                    .text_xs()
+                                    .when(active, |s| {
+                                        s.bg(hex_rgb(0xf3f4f6))
+                                            .font_weight(FontWeight::BOLD)
+                                            .text_color(ACCENT_GREEN)
+                                    })
+                                    .when(!active, |s| s.text_color(TEXT_MUTED).hover(|h| h.bg(SURFACE_HOVER)))
+                                    .on_click(cx.listener(|this, _event, _window, cx| {
+                                        this.tab = SearchTab::Albums;
+                                        cx.notify();
+                                    }))
+                                    .child("专辑")
+                            })
+                            .child({
+                                let active = self.tab == SearchTab::Artists;
+                                div()
+                                    .id("tab_artists")
+                                    .role(Role::Button)
+                                    .cursor_pointer()
+                                    .px_3()
+                                    .py(px(4.0))
+                                    .rounded(px(6.0))
+                                    .text_xs()
+                                    .when(active, |s| {
+                                        s.bg(hex_rgb(0xf3f4f6))
+                                            .font_weight(FontWeight::BOLD)
+                                            .text_color(ACCENT_GREEN)
+                                    })
+                                    .when(!active, |s| s.text_color(TEXT_MUTED).hover(|h| h.bg(SURFACE_HOVER)))
+                                    .on_click(cx.listener(|this, _event, _window, cx| {
+                                        this.tab = SearchTab::Artists;
+                                        cx.notify();
+                                    }))
+                                    .child("歌手")
+                            })
+                            .child({
+                                let active = self.tab == SearchTab::Playlists;
+                                div()
+                                    .id("tab_playlists")
+                                    .role(Role::Button)
+                                    .cursor_pointer()
+                                    .px_3()
+                                    .py(px(4.0))
+                                    .rounded(px(6.0))
+                                    .text_xs()
+                                    .when(active, |s| {
+                                        s.bg(hex_rgb(0xf3f4f6))
+                                            .font_weight(FontWeight::BOLD)
+                                            .text_color(ACCENT_GREEN)
+                                    })
+                                    .when(!active, |s| s.text_color(TEXT_MUTED).hover(|h| h.bg(SURFACE_HOVER)))
+                                    .on_click(cx.listener(|this, _event, _window, cx| {
+                                        this.tab = SearchTab::Playlists;
+                                        cx.notify();
+                                    }))
+                                    .child("歌单")
                             }),
                     )
+                    // 右侧排序筛选：[ 综合排序 ]、[ 最新 ]、[ 最热 ]
                     .child(
-                        Button::new("search-go")
-                            .primary()
-                            .small()
-                            .icon(IconName::Search)
-                            .label("搜索")
-                            .on_click(cx.listener(|this, _event, _window, cx| this.submit(cx))),
+                        h_flex()
+                            .gap(px(6.0))
+                            .items_center()
+                            .text_xs()
+                            .child({
+                                let active = self.sort == SearchSort::Default;
+                                div()
+                                    .id("sort_default")
+                                    .role(Role::Button)
+                                    .cursor_pointer()
+                                    .px_2()
+                                    .py(px(2.0))
+                                    .rounded(px(4.0))
+                                    .when(active, |s| s.font_weight(FontWeight::BOLD).text_color(TEXT_PRIMARY))
+                                    .when(!active, |s| s.text_color(TEXT_FAINT).hover(|h| h.text_color(TEXT_MUTED)))
+                                    .on_click(cx.listener(|this, _event, _window, cx| {
+                                        this.sort = SearchSort::Default;
+                                        cx.notify();
+                                    }))
+                                    .child("综合排序")
+                            })
+                            .child(div().text_color(TEXT_FAINT).child("|"))
+                            .child({
+                                let active = self.sort == SearchSort::Latest;
+                                div()
+                                    .id("sort_latest")
+                                    .role(Role::Button)
+                                    .cursor_pointer()
+                                    .px_2()
+                                    .py(px(2.0))
+                                    .rounded(px(4.0))
+                                    .when(active, |s| s.font_weight(FontWeight::BOLD).text_color(TEXT_PRIMARY))
+                                    .when(!active, |s| s.text_color(TEXT_FAINT).hover(|h| h.text_color(TEXT_MUTED)))
+                                    .on_click(cx.listener(|this, _event, _window, cx| {
+                                        this.sort = SearchSort::Latest;
+                                        cx.notify();
+                                    }))
+                                    .child("最新")
+                            })
+                            .child(div().text_color(TEXT_FAINT).child("|"))
+                            .child({
+                                let active = self.sort == SearchSort::Hottest;
+                                div()
+                                    .id("sort_hottest")
+                                    .role(Role::Button)
+                                    .cursor_pointer()
+                                    .px_2()
+                                    .py(px(2.0))
+                                    .rounded(px(4.0))
+                                    .when(active, |s| s.font_weight(FontWeight::BOLD).text_color(TEXT_PRIMARY))
+                                    .when(!active, |s| s.text_color(TEXT_FAINT).hover(|h| h.text_color(TEXT_MUTED)))
+                                    .on_click(cx.listener(|this, _event, _window, cx| {
+                                        this.sort = SearchSort::Hottest;
+                                        cx.notify();
+                                    }))
+                                    .child("最热")
+                            }),
                     ),
             );
-
-        // 热门搜索词标签栏
-        let mut hot_row = h_flex().gap(px(8.0)).items_center().flex_wrap();
-        hot_row = hot_row.child(
-            div()
-                .text_xs()
-                .font_weight(FontWeight::BOLD)
-                .text_color(TEXT_MUTED)
-                .child("热门搜索："),
-        );
-        for (index, tag) in HOT_TAGS.iter().enumerate() {
-            // 热门词是 'static 字符串，直接借用，不构造中间 String
-            let kw: &'static str = tag;
-            hot_row = hot_row.child(
-                chip(kw, IconName::Sparkles)
-                    .id(("hot_tag", index))
-                    .on_click(cx.listener(move |this, _event, window, cx| {
-                        this.search_keyword(kw, window, cx);
-                    })),
-            );
-        }
-        header = header.child(hot_row);
 
         let body = if self.loading {
             notice_with_icon(IconName::RefreshCw, "正在全网曲库检索中…")
         } else if let Some(error) = &self.error {
             notice_with_icon(IconName::CircleAlert, error.clone())
         } else if !self.searched {
-            notice_with_icon(
-                IconName::Search,
-                "输入歌曲、歌手或专辑关键字，或点击上方热搜标签探索音乐",
-            )
+            v_flex()
+                .size_full()
+                .items_center()
+                .justify_center()
+                .gap(px(12.0))
+                .child(
+                    div()
+                        .size(px(64.0))
+                        .rounded_full()
+                        .bg(hex_rgb(0xf3f4f6))
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .child(Icon::new(IconName::Search).size(px(28.0)).text_color(TEXT_FAINT)),
+                )
+                .child(
+                    div()
+                        .text_sm()
+                        .font_weight(FontWeight::MEDIUM)
+                        .text_color(TEXT_MUTED)
+                        .child("在顶部搜索框输入歌曲、歌手或专辑，按回车即可全网检索"),
+                )
+                .into_any_element()
         } else if self.songs.is_empty() {
             notice_with_icon(IconName::Search, "没有找到相关歌曲，换个关键词试试吧")
         } else {
@@ -293,7 +420,6 @@ impl Render for SearchView {
                 sizes,
                 move |view, range, _window, cx| {
                     let app: &App = cx;
-                    // 播放器状态整批读取一次，避免每行都做一次实体读取
                     let (cur_hash, is_playing) = current_play_state(&view.player, app);
                     range
                         .map(|index| {
@@ -304,6 +430,8 @@ impl Render for SearchView {
                                     rows: &view.rows,
                                     shell: &view.shell,
                                     backend: &view.backend,
+                                    selected_index: None,
+                                    on_select: None,
                                 },
                                 cur_hash.as_deref(),
                                 is_playing,
@@ -316,12 +444,13 @@ impl Render for SearchView {
             .into_any_element()
         };
 
-        v_flex().size_full().child(header).child(
+        v_flex().size_full().child(header).child(table_header()).child(
             div()
                 .relative()
                 .flex_1()
                 .min_h(px(0.0))
-                .p_2()
+                .px_2()
+                .py_1()
                 .vertical_scrollbar(&self.scroll_handle)
                 .child(body),
         )

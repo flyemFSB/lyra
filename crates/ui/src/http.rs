@@ -31,10 +31,7 @@ impl HttpClient for LyraHttpClient {
         None
     }
 
-    fn send(
-        &self,
-        req: Request<AsyncBody>,
-    ) -> BoxFuture<'static, anyhow::Result<Response<AsyncBody>>> {
+    fn send(&self, req: Request<AsyncBody>) -> BoxFuture<'static, anyhow::Result<Response<AsyncBody>>> {
         let client = self.client.clone();
         let runtime = self.runtime.clone();
 

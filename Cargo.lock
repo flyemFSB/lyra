@@ -3829,6 +3829,7 @@ dependencies = [
  "async-channel",
  "futures",
  "gpui-kit",
+ "image",
  "lyra-api",
  "lyra-app",
  "lyra-audio",

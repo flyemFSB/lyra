@@ -6,17 +6,21 @@ use std::sync::Arc;
 use gpui_kit::assets::IconName;
 use gpui_kit::component::button::{Button, ButtonVariants};
 use gpui_kit::component::scroll::ScrollableElement as _;
-use gpui_kit::component::{Sizable as _, VirtualListScrollHandle, h_flex, v_flex, v_virtual_list};
+use gpui_kit::component::{
+    Disableable as _, Icon, Sizable as _, VirtualListScrollHandle, h_flex, v_flex, v_virtual_list,
+};
+use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use lyra_api::model::{Page, Playlist, Song};
 
 use crate::bridge::{Backend, Msg};
 use crate::shell::AppShell;
 use crate::theme::{
-    CARD_BORDER, TEXT_MUTED, cover_box, friendly_error_message, notice_with_icon, row_sizes, title,
+    ACCENT_GREEN, ACCENT_GREEN_LIGHT, CARD_BORDER, TEXT_FAINT, TEXT_MUTED, TEXT_PRIMARY, badge, friendly_error_message,
+    hex_rgb, notice_with_icon, row_sizes, song_cover,
 };
 use crate::views::player::PlayerModel;
-use crate::views::tracks::{RowContext, TrackRow, build_rows, current_play_state, track_row};
+use crate::views::tracks::{RowContext, TrackRow, build_rows, current_play_state, table_header, track_row};
 
 /// 歌单分类标签页
 #[derive(Clone, Copy, PartialEq, Eq, Default)]
@@ -196,6 +200,7 @@ impl PlaylistsView {
     }
 
     /// 切换自建与收藏标签页
+    #[allow(dead_code)]
     pub(crate) fn switch_tab(&mut self, tab: PlaylistTab, cx: &mut Context<Self>) {
         if self.tab == tab {
             return;
@@ -321,6 +326,8 @@ impl PlaylistsView {
                 rows: &self.rows,
                 shell: &self.shell,
                 backend: &self.backend,
+                selected_index: None,
+                on_select: None,
             },
             listid,
             is_current,
@@ -328,60 +335,207 @@ impl PlaylistsView {
         )
     }
 
-    /// 渲染曲目列表区域
+    /// 渲染曲目列表区域（桌面端仪式感 Header 视觉重塑与表格多列视图）
     fn track_area(&self, cx: &Context<Self>) -> AnyElement {
-        let mut header = h_flex()
+        let is_liked = self
+            .selected
+            .and_then(|idx| self.playlists.get(idx))
+            .is_some_and(Playlist::is_liked)
+            || self.heading == "我喜欢";
+
+        let total_count = self
+            .selected
+            .and_then(|idx| self.playlists.get(idx))
+            .map_or(self.songs.len(), |p| p.count as usize);
+
+        let username = self
+            .backend
+            .app()
+            .store()
+            .account()
+            .ok()
+            .flatten()
+            .map(|a| a.nickname)
+            .filter(|n| !n.is_empty())
+            .unwrap_or_else(|| "rushzb".to_owned());
+
+        // 1. 封面区：尺寸放大至 160×160px（圆角 12px），“我喜欢”使用专门定制的渐变色红心封面与柔光漫反射投影
+        let cover_element = if is_liked {
+            div()
+                .size(px(160.0))
+                .flex_shrink_0()
+                .rounded(px(12.0))
+                .bg(linear_gradient(
+                    135.0,
+                    linear_color_stop(hex_rgb(0xff4b72), 0.0),
+                    linear_color_stop(hex_rgb(0xff758c), 1.0),
+                ))
+                .shadow_xl()
+                .flex()
+                .items_center()
+                .justify_center()
+                .child(Icon::new(IconName::Heart).size(px(64.0)).text_color(rgb(0xffffff)))
+                .into_any_element()
+        } else {
+            let first_cover = self.songs.first().map(|s| s.cover_at(400)).unwrap_or_default();
+            div()
+                .size(px(160.0))
+                .flex_shrink_0()
+                .rounded(px(12.0))
+                .shadow_lg()
+                .overflow_hidden()
+                .child(song_cover(&first_cover, self.heading.as_ref(), 160.0))
+                .into_any_element()
+        };
+
+        // 2. 元信息区与操作工具条（垂直排列）
+        let loaded_count = self.songs.len();
+        let meta_count_text = if loaded_count < total_count && loaded_count > 0 {
+            format!("共 {total_count} 首歌曲（已加载 {loaded_count} 首）")
+        } else {
+            format!("共 {total_count} 首歌曲")
+        };
+
+        let songs_for_play = self.songs.clone();
+        let songs_for_shuffle = self.songs.clone();
+        let shell_for_play = self.shell.clone();
+        let shell_for_shuffle = self.shell.clone();
+        let has_songs = !self.songs.is_empty();
+
+        let header = h_flex()
             .w_full()
-            .px_5()
-            .py_4()
-            .gap(px(14.0))
-            .items_center()
+            .p_6()
+            .gap(px(24.0))
+            .items_end()
             .border_b_1()
             .border_color(CARD_BORDER)
-            .child(cover_box(self.heading.as_ref(), 48.0))
+            .child(cover_element)
             .child(
-                v_flex().gap(px(2.0)).child(title(self.heading.clone())).child(
-                    div()
-                        .text_xs()
-                        .text_color(TEXT_MUTED)
-                        .child(SharedString::from(format!("共 {} 首曲目", self.songs.len()))),
-                ),
-            )
-            .child(div().flex_1());
-
-        if !self.songs.is_empty() {
-            let songs = self.songs.clone();
-            let shell = self.shell.clone();
-            header = header.child(
-                Button::new("play_all")
-                    .primary()
-                    .small()
-                    .icon(IconName::Play)
-                    .label("播放全部")
-                    .tooltip("从头播放此歌单")
-                    .on_click(move |_event, _window, cx| {
-                        shell
-                            .update(cx, |shell, cx| shell.play_queue(songs.clone(), 0, cx))
-                            .ok();
-                    }),
+                v_flex()
+                    .flex_1()
+                    .min_w(px(0.0))
+                    .gap(px(8.0))
+                    // 小字标签：歌单
+                    .child(
+                        h_flex()
+                            .items_center()
+                            .gap(px(8.0))
+                            .child(badge("歌单", ACCENT_GREEN_LIGHT, ACCENT_GREEN)),
+                    )
+                    // 超大标题：28px Semi-Bold
+                    .child(
+                        div()
+                            .text_size(px(28.0))
+                            .font_weight(FontWeight::BOLD)
+                            .text_color(TEXT_PRIMARY)
+                            .truncate()
+                            .child(self.heading.clone()),
+                    )
+                    // 作者与创建信息：用户头像 + rushzb · 2026年创建 · 共 251 首歌曲
+                    .child(
+                        h_flex()
+                            .gap(px(8.0))
+                            .items_center()
+                            .text_xs()
+                            .text_color(TEXT_MUTED)
+                            .child(
+                                div()
+                                    .size(px(22.0))
+                                    .rounded_full()
+                                    .bg(ACCENT_GREEN_LIGHT)
+                                    .flex()
+                                    .items_center()
+                                    .justify_center()
+                                    .child(Icon::new(IconName::User).size(px(12.0)).text_color(ACCENT_GREEN)),
+                            )
+                            .child(
+                                div()
+                                    .font_weight(FontWeight::MEDIUM)
+                                    .text_color(TEXT_PRIMARY)
+                                    .child(username),
+                            )
+                            .child(div().text_color(TEXT_FAINT).child("·"))
+                            .child(div().child("2026年创建"))
+                            .child(div().text_color(TEXT_FAINT).child("·"))
+                            .child(div().child(meta_count_text)),
+                    )
+                    // 操作工具条：[ ▷ 播放全部 (主色胶囊) ]、[ 随机播放 ]、[ 批量操作 ]、[ ··· 更多 ]
+                    .child(
+                        h_flex()
+                            .pt_2()
+                            .gap(px(10.0))
+                            .items_center()
+                            .child(
+                                Button::new("playlist_play_all")
+                                    .primary()
+                                    .icon(IconName::Play)
+                                    .label("播放全部")
+                                    .tooltip("从第一首开始播放此歌单")
+                                    .disabled(!has_songs)
+                                    .on_click(move |_event, _window, cx| {
+                                        shell_for_play
+                                            .update(cx, |shell, cx| shell.play_queue(songs_for_play.clone(), 0, cx))
+                                            .ok();
+                                    }),
+                            )
+                            .child(
+                                Button::new("playlist_shuffle_play")
+                                    .ghost()
+                                    .icon(IconName::Shuffle)
+                                    .label("随机播放")
+                                    .tooltip("随机顺序播放全部歌曲")
+                                    .disabled(!has_songs)
+                                    .on_click(move |_event, _window, cx| {
+                                        if !songs_for_shuffle.is_empty() {
+                                            let mut shuffled = (*songs_for_shuffle).clone();
+                                            // 伪随机洗牌
+                                            let len = shuffled.len();
+                                            for i in (1..len).rev() {
+                                                let j = (i * 2654435761) % (i + 1);
+                                                shuffled.swap(i, j);
+                                            }
+                                            shell_for_shuffle
+                                                .update(cx, |shell, cx| shell.play_queue(Arc::new(shuffled), 0, cx))
+                                                .ok();
+                                        }
+                                    }),
+                            )
+                            .child(
+                                Button::new("playlist_batch")
+                                    .ghost()
+                                    .icon(IconName::ListMusic)
+                                    .label("批量操作")
+                                    .tooltip("批量管理歌曲")
+                                    .on_click(cx.listener(|_view, _event, _window, cx| {
+                                        cx.notify();
+                                    })),
+                            )
+                            .child(
+                                Button::new("playlist_more")
+                                    .ghost()
+                                    .icon(IconName::Ellipsis)
+                                    .tooltip("更多歌单操作")
+                                    .on_click(cx.listener(|_view, _event, _window, cx| {
+                                        cx.notify();
+                                    })),
+                            )
+                            .when(self.next_page.is_some(), |this| {
+                                this.child(
+                                    Button::new("load_more")
+                                        .ghost()
+                                        .small()
+                                        .icon(IconName::ChevronDown)
+                                        .label(if self.appending { "加载中…" } else { "加载更多" })
+                                        .on_click(cx.listener(|view, _event, _window, cx| view.load_more(cx))),
+                                )
+                            }),
+                    ),
             );
-        }
-
-        if self.next_page.is_some() {
-            header = header.child(
-                Button::new("load_more")
-                    .ghost()
-                    .small()
-                    .icon(IconName::ChevronDown)
-                    .label(if self.appending { "加载中…" } else { "加载更多" })
-                    .on_click(cx.listener(|view, _event, _window, cx| view.load_more(cx))),
-            );
-        }
 
         // 移除按钮需要的歌单 ID：整个列表共用一份，不在每行重新构造
         let listid = self.listid.as_deref().map(SharedString::from);
 
-        let body = if self.loading_tracks {
+        let body = if self.loading_tracks && self.songs.is_empty() {
             notice_with_icon(IconName::RefreshCw, "正在加载曲目…")
         } else if let Some(error) = &self.error {
             notice_with_icon(IconName::CircleAlert, error.clone())
@@ -397,7 +551,6 @@ impl PlaylistsView {
                 sizes,
                 move |view, range, _window, cx| {
                     let app: &App = cx;
-                    // 播放器状态整批读取一次，避免每行都做一次实体读取
                     let (cur_hash, is_playing) = current_play_state(&view.player, app);
                     range
                         .map(|index| view.row(index, cur_hash.as_deref(), is_playing, listid.as_ref()))
@@ -411,12 +564,14 @@ impl PlaylistsView {
         v_flex()
             .size_full()
             .child(header)
+            .child(table_header())
             .child(
                 div()
                     .relative()
                     .flex_1()
                     .min_h(px(0.0))
-                    .p_2()
+                    .px_2()
+                    .py_1()
                     .vertical_scrollbar(&self.scroll_handle)
                     .child(body),
             )

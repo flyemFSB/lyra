@@ -29,13 +29,19 @@ pub async fn daily(api: &Api, platform: &str) -> Result<Page<Song>> {
     Ok(Page::single(songs_of(&value)))
 }
 
-/// 分页获取私人 FM 电台歌曲
+/// 拉取私人 FM 电台歌曲（无状态推荐流）
+///
+/// 上游只在请求里带“当前曲目 + 剩余首数”时才会往后推荐：
+/// 首进用 `action=login`；续拉用 `action=play` 并带上本地队列最后一首
+/// （`hash`/`songid`/`mixsongid`）与 `remain_songcnt`。
+/// 缺了这些字段，服务端会把每次请求都当成新的开始，反复返回同一批歌。
+/// `mark` 回传上一页的 `mark_list`，让服务端接上同一条推荐流。
 pub async fn personal_fm(
     api: &Api,
-    action: &str,
     mode: &str,
-    cursor: Option<&str>,
     previous: Option<&Song>,
+    remain: u32,
+    mark: Option<&str>,
 ) -> Result<Page<Song>> {
     let session = api.session();
     let date_time = now_millis();
@@ -43,14 +49,14 @@ pub async fn personal_fm(
         "appid": APPID,
         "clienttime": date_time,
         "mid": session.device.mid,
-        "action": if action.is_empty() { "play" } else { action },
+        "action": if previous.is_some() { "play" } else { "login" },
         "recommend_source_locked": 0,
         "song_pool_id": 0,
         "callerid": 0,
         "m_type": 1,
         "platform": "ios",
         "area_code": 1,
-        "remain_songcnt": 0,
+        "remain_songcnt": remain,
         "clientver": CLIENTVER,
         "is_overplay": 0,
         "mode": if mode.is_empty() { "normal" } else { mode },
@@ -67,17 +73,21 @@ pub async fn personal_fm(
     }
     if let Some(song) = previous {
         body["hash"] = serde_json::json!(song.hash);
-        body["songid"] = serde_json::json!(song.mixsongid);
+        // 上游靠 mixsongid/songid 定位当前曲目；缺 id 时只靠 hash
+        if song.mixsongid > 0 {
+            body["songid"] = serde_json::json!(song.mixsongid.to_string());
+            body["mixsongid"] = serde_json::json!(song.mixsongid);
+        }
     }
-    if let Some(cursor) = cursor {
-        body["cur_mark"] = serde_json::json!(cursor);
+    if let Some(mark) = mark {
+        body["mark_list"] = serde_json::json!(mark);
     }
 
     let spec = RequestSpec::post("/v2/personal_recommend")
         .body(body)
         .header("x-router", "persnfm.service.kugou.com");
     let value = api.call(spec, Freshness::FLOW).await?;
-    let cursor = codec::find_str(&value, &["sync_point", "cur_mark", "syncpoint"]);
+    let cursor = codec::find_str(&value, &["mark_list"]);
     Ok(Page {
         items: songs_of(&value),
         cursor: if cursor.is_empty() { None } else { Some(cursor) },
@@ -167,24 +177,46 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn personal_fm_produces_a_cursor() {
+    async fn personal_fm_starts_with_login_then_continues_with_the_current_song() {
         let mock = Arc::new(MockTransport::new());
         mock.on_json(
             "/v2/personal_recommend",
-            &serde_json::json!({"status": 1, "data": {"song_list": [{"name": "A", "hash": "AA"}], "sync_point": "s=5", "mode": "normal"}}),
+            &serde_json::json!({"status": 1, "data": {"song_list": [{"name": "A", "hash": "AA"}], "mark_list": "ml=5", "mode": "normal"}}),
         );
         let api = api(mock.clone());
-        let page = personal_fm(&api, "play", "normal", None, None).await.unwrap();
+
+        let page = personal_fm(&api, "normal", None, 0, None).await.unwrap();
         assert_eq!(page.items.len(), 1);
-        assert_eq!(page.cursor.as_deref(), Some("s=5"));
+        assert_eq!(page.cursor.as_deref(), Some("ml=5"));
         assert!(page.has_more());
 
         let body: Value = serde_json::from_slice(mock.last_request().unwrap().body.as_deref().unwrap()).unwrap();
+        assert_eq!(body["action"], "login", "首进必须是 login，不能当续拉");
+        assert_eq!(body["remain_songcnt"], 0);
+        assert!(body.get("hash").is_none(), "首进没有当前曲目");
         assert_eq!(body["callerid"], 0);
         assert_eq!(body["m_type"], 1);
         assert_eq!(body["fakem"], "ca981cfc583a4c37f28d2d49000013c16a0a");
         assert!(body["key"].is_string(), "个人电台需要 signParamsKey");
         assert_eq!(body["kguid"], 2_043_841_403);
+
+        let previous = Song {
+            hash: "AA".to_owned(),
+            mixsongid: 42,
+            ..Song::default()
+        };
+        personal_fm(&api, "normal", Some(&previous), 2, Some("ml=5"))
+            .await
+            .unwrap();
+        let body: Value = serde_json::from_slice(mock.last_request().unwrap().body.as_deref().unwrap()).unwrap();
+        // 续拉必须带上一首与剩余首数，否则上游反复返回同一批推荐（红心电台死循环的根因）
+        assert_eq!(body["action"], "play");
+        assert_eq!(body["hash"], "AA");
+        assert_eq!(body["songid"], "42");
+        assert_eq!(body["mixsongid"], 42);
+        assert_eq!(body["remain_songcnt"], 2);
+        assert_eq!(body["mark_list"], "ml=5", "回传 mark_list 接上同一条流");
+        assert!(body.get("cur_mark").is_none(), "sync_point 不是分页游标");
     }
 
     #[tokio::test]

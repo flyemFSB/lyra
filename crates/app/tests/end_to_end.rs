@@ -285,6 +285,38 @@ async fn play_mode_survives_a_restart() {
     assert_eq!(reopened.play_mode(), PlayMode::Shuffle);
 }
 
+#[tokio::test]
+async fn volume_and_mute_survive_a_restart() {
+    let mock = Arc::new(MockTransport::new());
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("lyra.redb");
+
+    {
+        let store = lyra_store::open_with_secrets(&path, Box::new(lyra_store::MemorySecrets::new())).unwrap();
+        let app = Kugou::with_transport(mock.clone(), store, dir.path(), tokio::runtime::Handle::current()).unwrap();
+        assert!((app.volume() - 0.8).abs() < f32::EPSILON, "默认音量 0.8");
+        assert!(!app.is_muted(), "默认非静音");
+
+        app.set_settings(&lyra_store::Settings {
+            volume: 0.35,
+            muted: true,
+            ..Default::default()
+        })
+        .unwrap();
+    }
+
+    // 重启后保持上次配置的音量与静音状态
+    let reopened = Kugou::with_transport(
+        mock,
+        lyra_store::open_with_secrets(&path, Box::new(lyra_store::MemorySecrets::new())).unwrap(),
+        dir.path(),
+        tokio::runtime::Handle::current(),
+    )
+    .unwrap();
+    assert!((reopened.volume() - 0.35).abs() < f32::EPSILON);
+    assert!(reopened.is_muted());
+}
+
 // 模拟无版权歌曲与可选重传版响应
 fn no_copyright_stubs(mock: &MockTransport, with_replacement: bool) {
     let mut data = vec![serde_json::json!({

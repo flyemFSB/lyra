@@ -66,6 +66,9 @@ pub struct Settings {
     /// 播放模式
     #[serde(default)]
     pub play_mode: PlayMode,
+    /// 是否处于静音状态
+    #[serde(default)]
+    pub muted: bool,
 }
 
 /// 默认音量（供 serde 使用）
@@ -91,6 +94,7 @@ impl Default for Settings {
             cache_dir: None,
             max_cache_bytes: DEFAULT_MAX_CACHE_BYTES,
             play_mode: PlayMode::default(),
+            muted: false,
         }
     }
 }
@@ -144,6 +148,7 @@ mod tests {
         assert_eq!(settings.quality, "128");
         assert_eq!(settings.cache_dir, None);
         assert_eq!(settings.play_mode, PlayMode::ListLoop);
+        assert!(!settings.muted);
     }
 
     #[test]

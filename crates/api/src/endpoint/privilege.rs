@@ -406,8 +406,7 @@ pub async fn claim_daily_vip(api: &Api) -> Result<VipClaim> {
     crate::spec::ensure_logged_in(&session)?;
 
     let is_already_claimed = |err: &crate::error::Error| {
-        err.code() == Some(Code::AlreadyClaimed)
-            || err.code() == Some(Code::Other(297_002))
+        err.code() == Some(Code::AlreadyClaimed) || err.code() == Some(Code::Other(297_002))
     };
 
     // 1. 优先尝试升级激励端点
@@ -435,7 +434,10 @@ pub async fn claim_daily_vip(api: &Api) -> Result<VipClaim> {
             match api.call_auth(receive_spec).await {
                 Ok(value) => Ok(VipClaim {
                     already_claimed: false,
-                    recharge_hours: codec::pick_u64_paths(&value, &[&["data", "recharge_hours"][..], &["recharge_hours"][..]]),
+                    recharge_hours: codec::pick_u64_paths(
+                        &value,
+                        &[&["data", "recharge_hours"][..], &["recharge_hours"][..]],
+                    ),
                     raw: value,
                 }),
                 Err(error) if is_already_claimed(&error) => Ok(VipClaim {
