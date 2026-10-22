@@ -4,7 +4,6 @@ on:
   push:
     tags:
       - 'v*'
-  workflow_dispatch:
 
 permissions:
   contents: write
@@ -54,10 +53,20 @@ jobs:
       - name: 构建安装程序与绿色便携包
         run: cargo run -p xtask --locked -- package
 
+      - name: 上传打包产物
+        uses: actions/upload-artifact@v4
+        with:
+          name: lyra-windows-x64
+          path: target/dist/*
+          if-no-files-found: error
+
       - name: 发布至 GitHub Release
         uses: softprops/action-gh-release@v2
         with:
-          files: target/dist/*
+          files: |
+            target/dist/*.exe
+            target/dist/*.zip
+            target/dist/checksums.sha256
           draft: false
           prerelease: false
           generate_release_notes: true
