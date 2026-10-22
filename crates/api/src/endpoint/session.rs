@@ -10,7 +10,7 @@ use crate::client::Api;
 use crate::codec;
 use crate::error::{Error, Result};
 use crate::spec::RequestSpec;
-use crate::spec::{CAPTCHA_BASE, LOGIN_GATEWAY, USER_SERVICE, now_millis};
+use crate::spec::{CAPTCHA_BASE, LOGIN_GATEWAY, USER_SERVICE, now_millis, now_secs};
 
 /// 登录结果
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -146,6 +146,62 @@ fn finish(result: LoginResult) -> Result<LoginResult> {
         )));
     }
     Ok(result)
+}
+
+/// 用户资料（昵称与头像）
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct UserProfile {
+    /// 昵称
+    pub nickname: String,
+    /// 头像地址（上游可能给 http，展示层不做协议升级）
+    pub avatar: String,
+}
+
+/// 拉取当前登录用户的个人资料（`POST /v3/get_my_info`）
+///
+/// 鉴权走 body 里的 `p`：`{"token":…,"clienttime":<秒>}` 的无填充 RSA 密文
+/// （大写十六进制），而不是明文 token。
+pub async fn user_profile(api: &Api) -> Result<UserProfile> {
+    let session = api.session();
+    if !session.is_logged_in() {
+        return Err(Error::NotLoggedIn);
+    }
+    let clienttime = now_secs();
+    let token_json = serde_json::to_string(session.token()).map_err(|e| Error::Decode(e.to_string()))?;
+    // 字段顺序须与上游一致：token 在前、clienttime 在后
+    let plain = format!(r#"{{"token":{token_json},"clienttime":{clienttime}}}"#);
+    let spec = RequestSpec::post("/v3/get_my_info")
+        .header("x-router", "usercenter.kugou.com")
+        .param("plat", 1)
+        .body(serde_json::json!({
+            "visit_time": clienttime,
+            "usertype": 1,
+            "p": rsa_raw_encrypt_hex(plain.as_bytes(), RSA_PUBLIC)?.to_uppercase(),
+            "userid": session.userid(),
+        }));
+    Ok(parse_user_profile(&api.call_auth(spec).await?))
+}
+
+/// 解析用户资料响应
+///
+/// 上游各端字段命名不统一（`pic` / `user_pic` / `avatar`），逐级回退取第一个非空值。
+pub fn parse_user_profile(value: &Value) -> UserProfile {
+    let data = codec::pick(value, &["data"]).unwrap_or(value);
+    UserProfile {
+        nickname: codec::pick_str(data, &["nickname", "nick_name", "name"]),
+        avatar: codec::pick_str_paths(
+            data,
+            &[
+                &["pic"],
+                &["user_pic"],
+                &["avatar"],
+                &["head_img"],
+                &["img"],
+                &["info", "pic"],
+                &["base", "pic"],
+            ],
+        ),
+    }
 }
 
 /// 手机号掩码脱敏，保留前两位与末尾一位
@@ -345,6 +401,24 @@ mod tests {
         });
         let result = parse_login(&value, temp_key).unwrap();
         assert_eq!(result.token, "PLAINTOKEN");
+    }
+
+    #[test]
+    fn parses_user_profile_avatar_and_nickname() {
+        // 上游把头像放在 pic / user_pic 等不同字段里，逐级回退必须都能取到
+        let value = serde_json::json!({
+            "status": 1,
+            "data": {"nickname": "lyra", "userid": 2_043_841_403, "pic": "http://imge.kugou.com/a.jpg"}
+        });
+        let profile = parse_user_profile(&value);
+        assert_eq!(profile.nickname, "lyra");
+        assert_eq!(profile.avatar, "http://imge.kugou.com/a.jpg");
+
+        let nested = serde_json::json!({"data": {"base": {"pic": "http://cdn/b.png"}}});
+        assert_eq!(parse_user_profile(&nested).avatar, "http://cdn/b.png");
+
+        let empty = serde_json::json!({"data": {}});
+        assert!(parse_user_profile(&empty).avatar.is_empty());
     }
 
     #[test]

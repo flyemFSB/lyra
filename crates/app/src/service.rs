@@ -17,6 +17,9 @@ use crate::policy::{is_replacement, pick_quality};
 /// 换源搜索候选上限
 const REPLACEMENT_CANDIDATES: u32 = 10;
 
+/// 搜索结果单页条数（与上游默认一致）
+const SEARCH_PAGE_SIZE: u32 = 30;
+
 /// 单次播放请求结果
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct Playback {
@@ -425,7 +428,8 @@ impl Kugou {
         let hits = search::songs(&self.api, &keyword, 1, REPLACEMENT_CANDIDATES, None)
             .await
             .ok()?;
-        hits.into_iter()
+        hits.items
+            .into_iter()
             .filter(|hit| is_replacement(song, hit))
             // 优先选取免费条目，次选时长最接近项
             .min_by_key(|hit| (hit.privilege != 0, hit.duration_ms.abs_diff(song.duration_ms)))
@@ -459,6 +463,11 @@ impl Kugou {
         ))
     }
 
+    /// 获取当前登录用户资料（昵称与真实头像）
+    pub async fn profile(&self) -> Result<lyra_api::endpoint::session::UserProfile> {
+        Ok(session::user_profile(&self.api).await?)
+    }
+
     /// 获取逐行滚动歌词
     pub async fn lyrics(&self, song: &Song) -> Result<Vec<LyricLine>> {
         Ok(lyrics::lyric_for_song(&self.api, song).await?)
@@ -485,8 +494,8 @@ impl Kugou {
     }
 
     /// 搜索单曲列表
-    pub async fn search(&self, keyword: &str, page: u32) -> Result<Vec<Song>> {
-        Ok(lyra_api::endpoint::search::songs(&self.api, keyword, page, 30, None).await?)
+    pub async fn search(&self, keyword: &str, page: u32) -> Result<Page<Song>> {
+        Ok(lyra_api::endpoint::search::songs(&self.api, keyword, page, SEARCH_PAGE_SIZE, None).await?)
     }
 
     /// 获取推荐电台频道列表

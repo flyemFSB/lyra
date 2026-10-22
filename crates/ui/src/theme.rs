@@ -256,27 +256,6 @@ pub(crate) fn cover_box(_label: &str, edge: f32) -> AnyElement {
     }
 }
 
-/// 构造热门词胶囊组件
-pub(crate) fn chip(label: impl Into<SharedString>, icon: IconName) -> Div {
-    div()
-        .cursor_pointer()
-        .px_3()
-        .py_1()
-        .rounded(px(999.0))
-        .text_xs()
-        .font_weight(FontWeight::NORMAL)
-        .flex()
-        .items_center()
-        .gap(px(5.0))
-        .bg(CARD_BG)
-        .border_1()
-        .border_color(CARD_BORDER)
-        .text_color(TEXT_MUTED)
-        .hover(|s| s.bg(SURFACE_HOVER).text_color(TEXT_PRIMARY))
-        .child(Icon::new(icon).size(px(13.0)))
-        .child(label.into())
-}
-
 /// 构造歌曲封面组件（有网络封面图时展示高清圆角封面，无封面或加载失败时优雅降级）
 pub(crate) fn song_cover(cover_url: &str, title: &str, edge: f32) -> AnyElement {
     let radius = (edge * 0.15).clamp(4.0, 16.0);

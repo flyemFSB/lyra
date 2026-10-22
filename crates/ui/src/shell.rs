@@ -58,6 +58,8 @@ pub(crate) struct AppShell {
     logged_in: bool,
     /// 账号昵称（登录态变化时读一次，渲染期直接复用）
     nickname: Option<String>,
+    /// 真实用户头像地址（启动后异步拉取，取不到时回退为占位图标）
+    avatar: Option<SharedString>,
     player: Entity<PlayerModel>,
     views: Option<Views>,
     toast: Option<SharedString>,
@@ -84,8 +86,8 @@ pub(crate) struct AppShell {
     toast_task: Option<Task<()>>,
     top_search: Option<Entity<InputState>>,
     top_search_sub: Option<Subscription>,
+    /// 搜索框是否获焦（获焦时空格属于输入，不切换播放）
     top_search_focused: bool,
-    top_search_flyout_hovered: bool,
     personal_fm_mark: Option<String>,
     is_personal_fm_active: bool,
     is_fetching_personal_fm: bool,
@@ -98,6 +100,29 @@ pub(crate) struct AppShell {
     /// 侧边栏“收藏的歌单”折叠状态
     collected_playlists_expanded: bool,
     _drain: Task<()>,
+}
+
+/// 用户头像占位（未取到真实头像或加载失败时的降级样式）
+fn avatar_placeholder(logged_in: bool) -> AnyElement {
+    div()
+        .w(px(24.0))
+        .h(px(24.0))
+        .flex_shrink_0()
+        .rounded_full()
+        .bg(if logged_in {
+            ACCENT_GREEN_LIGHT
+        } else {
+            hex_rgb(0xe5e7eb)
+        })
+        .flex()
+        .items_center()
+        .justify_center()
+        .child(Icon::new(IconName::User).size(px(13.0)).text_color(if logged_in {
+            ACCENT_GREEN
+        } else {
+            TEXT_MUTED
+        }))
+        .into_any_element()
 }
 
 /// 读取当前账号昵称（只在登录态变化时调用，渲染期不得碰数据库）
@@ -139,6 +164,7 @@ impl AppShell {
             history_idx: 0,
             logged_in,
             nickname,
+            avatar: None,
             player,
             views: None,
             toast: None,
@@ -156,7 +182,6 @@ impl AppShell {
             top_search: None,
             top_search_sub: None,
             top_search_focused: false,
-            top_search_flyout_hovered: false,
             personal_fm_mark: None,
             is_personal_fm_active: false,
             is_fetching_personal_fm: false,
@@ -195,7 +220,6 @@ impl AppShell {
                 let kw = state.read(cx).value().to_string();
                 if !kw.trim().is_empty() {
                     this.top_search_focused = false;
-                    this.top_search_flyout_hovered = false;
                     this.set_nav(Nav::Search, cx);
                     search_for_sub.update(cx, |view, cx| view.execute_search(&kw, cx));
                 }
@@ -226,6 +250,18 @@ impl AppShell {
         });
         self.ensure_loaded(cx);
         playlists.update(cx, PlaylistsView::ensure);
+        // 启动即拉取一次真实头像（昵称与头像以服务端为准）
+        self.request_profile();
+    }
+
+    /// 拉取登录用户资料（昵称与真实头像）
+    fn request_profile(&self) {
+        if !self.logged_in {
+            return;
+        }
+        let app = self.backend.app();
+        self.backend
+            .spawn(async move { Msg::Profile(app.profile().await.map_err(|error| error.to_string())) });
     }
 
     /// 分发处理后台异步事件
@@ -316,6 +352,17 @@ impl AppShell {
             }
             // 播放失败处理：提示并尝试跳过
             Msg::EngineFailed(message) => self.on_engine_failed(&message, cx),
+            // 当前登录用户资料（昵称与真实头像）
+            Msg::Profile(result) => match result {
+                Ok(profile) => {
+                    if !profile.nickname.is_empty() {
+                        self.nickname = Some(profile.nickname);
+                    }
+                    self.avatar = Some(SharedString::from(profile.avatar)).filter(|url| !url.is_empty());
+                    cx.notify();
+                }
+                Err(error) => tracing::warn!(%error, "获取用户资料失败"),
+            },
             Msg::Noop => {}
             Msg::Toast(text) => self.set_toast(text, cx),
             Msg::LoggedOut => self.on_logged_out(cx),
@@ -731,6 +778,8 @@ impl AppShell {
     fn on_logged_in(&mut self, cx: &mut Context<Self>) {
         self.logged_in = true;
         self.nickname = read_nickname(&self.backend.app());
+        self.avatar = None;
+        self.request_profile();
         if let Some(views) = self.views.as_ref() {
             views.login.update(cx, LoginView::reset);
             views.playlists.update(cx, PlaylistsView::reload);
@@ -746,6 +795,7 @@ impl AppShell {
     fn on_logged_out(&mut self, cx: &mut Context<Self>) {
         self.logged_in = false;
         self.nickname = None;
+        self.avatar = None;
         // 清除旧账号视图状态
         if let Some(views) = self.views.as_ref() {
             views.playlists.update(cx, PlaylistsView::reset);
@@ -822,15 +872,9 @@ impl AppShell {
                             .on_click(cx.listener(|shell, _event, _window, cx| shell.go_forward(cx))),
                     ),
             )
-            // 顶部直接可编辑的搜索框与热门搜索下拉浮层
+            // 顶部全局搜索框（不挂热门搜索下拉浮层）
             .child({
-                let has_empty_input = self.top_search.as_ref().is_some_and(|s| s.read(cx).value().trim().is_empty());
-                let show_flyout = has_empty_input && (self.top_search_focused || self.top_search_flyout_hovered);
-                let top_search_ent = self.top_search.clone();
-                let search_view = self.views.as_ref().map(|v| v.search.clone());
-
                 div()
-                    .relative()
                     .w(px(260.0))
                     .h(px(34.0))
                     .ml_3()
@@ -851,69 +895,6 @@ impl AppShell {
                                         .text_color(if is_search { ACCENT_GREEN } else { TEXT_FAINT }),
                                 )
                                 .cleanable(true),
-                        )
-                    })
-                    // 热门搜索下拉浮层（Flyout / Dropdown，仅在获焦且未输入文本时展开）
-                    .when(show_flyout, |this| {
-                        let mut tag_wrap = h_flex().gap(px(8.0)).items_center().flex_wrap();
-                        for (index, &tag) in crate::views::search::HOT_TAGS.iter().enumerate() {
-                            let kw = tag.to_owned();
-                            let top_search_clone = top_search_ent.clone();
-                            let search_view_clone = search_view.clone();
-                            tag_wrap = tag_wrap.child(
-                                crate::theme::chip(tag, IconName::Sparkles)
-                                    .id(("flyout_hot_tag", index))
-                                    .on_click(cx.listener(move |shell, _event, window, cx| {
-                                        if let Some(input_state) = &top_search_clone {
-                                            input_state.update(cx, |input, input_cx| {
-                                                input.set_value(kw.clone(), window, input_cx);
-                                            });
-                                        }
-                                        shell.top_search_focused = false;
-                                        shell.top_search_flyout_hovered = false;
-                                        shell.set_nav(Nav::Search, cx);
-                                        if let Some(sv) = &search_view_clone {
-                                            sv.update(cx, |view, cx| view.execute_search(&kw, cx));
-                                        }
-                                        cx.notify();
-                                    }))
-                            );
-                        }
-
-                        this.child(
-                            div()
-                                .id("search_hot_flyout")
-                                .absolute()
-                                .top(px(40.0))
-                                .left_0()
-                                .w(px(320.0))
-                                .p_3()
-                                .rounded(px(12.0))
-                                .bg(CARD_BG)
-                                .border_1()
-                                .border_color(CARD_BORDER)
-                                .shadow_xl()
-                                .gap(px(10.0))
-                                .flex()
-                                .flex_col()
-                                .on_hover(cx.listener(|shell, hovered, _window, cx| {
-                                    shell.top_search_flyout_hovered = *hovered;
-                                    cx.notify();
-                                }))
-                                .child(
-                                    h_flex()
-                                        .items_center()
-                                        .gap(px(6.0))
-                                        .child(Icon::new(IconName::Sparkles).size(px(13.0)).text_color(ACCENT_GREEN))
-                                        .child(
-                                            div()
-                                                .text_xs()
-                                                .font_weight(FontWeight::BOLD)
-                                                .text_color(TEXT_MUTED)
-                                                .child("热门搜索"),
-                                        ),
-                                )
-                                .child(tag_wrap),
                         )
                     })
             })
@@ -1325,6 +1306,21 @@ impl AppShell {
             }
         });
 
+        let avatar_element = match self.avatar.clone() {
+            Some(url) => {
+                let logged_in = self.logged_in;
+                img(url)
+                    .w(px(24.0))
+                    .h(px(24.0))
+                    .flex_shrink_0()
+                    .rounded_full()
+                    .object_fit(ObjectFit::Cover)
+                    .with_fallback(move || avatar_placeholder(logged_in))
+                    .into_any_element()
+            }
+            None => avatar_placeholder(self.logged_in),
+        };
+
         let user_capsule = div()
             .id("sidebar_user_capsule")
             .role(Role::Button)
@@ -1332,6 +1328,8 @@ impl AppShell {
             .flex_1()
             .min_w(px(0.0))
             .h(px(32.0))
+            .flex()
+            .items_center()
             .px_2()
             .rounded(px(6.0))
             .hover(|s| s.bg(SURFACE_HOVER))
@@ -1347,25 +1345,7 @@ impl AppShell {
                     .w_full()
                     .gap(px(8.0))
                     .items_center()
-                    .child(
-                        div()
-                            .w(px(24.0))
-                            .h(px(24.0))
-                            .rounded_full()
-                            .bg(if self.logged_in {
-                                ACCENT_GREEN_LIGHT
-                            } else {
-                                hex_rgb(0xe5e7eb)
-                            })
-                            .flex()
-                            .items_center()
-                            .justify_center()
-                            .child(Icon::new(IconName::User).size(px(13.0)).text_color(if self.logged_in {
-                                ACCENT_GREEN
-                            } else {
-                                TEXT_MUTED
-                            })),
-                    )
+                    .child(avatar_element)
                     .child(
                         div()
                             .flex_1()
@@ -1717,7 +1697,6 @@ impl Render for AppShell {
                         .min_h(px(0.0))
                         .w_full()
                         .p(px(8.0))
-                        .pb_0()
                         .child(lyrics_card)
                         .children(self.queue_drawer(cx)),
                 )
@@ -1779,7 +1758,6 @@ impl Render for AppShell {
                     .flex_1()
                     .min_h(px(0.0))
                     .p(px(8.0))
-                    .pb_0()
                     .gap(px(8.0))
                     .child(self.sidebar(cx))
                     .child(

@@ -53,10 +53,18 @@ pub async fn playlist_tracks(api: &Api, global_collection_id: &str, page: u32, p
     let songs = codec::find_array(&value, &["songs", "song_list", "info", "list"])
         .map(|items| Song::list_from(items))
         .unwrap_or_default();
-    let has_next = codec::find_i64(&value, &["has_next"]);
+    // 该端点从不返回 has_next，只能靠总曲目数（data.count）推算是否还有下一页；
+    // 拿不到总数时退化为「满页即可能还有」
+    let total = codec::pick_i64_paths(&value, &[&["data", "count"], &["data", "total"], &["count"]]);
+    let loaded = begin_idx.saturating_add(songs.len() as u64);
+    let has_next = if total > 0 {
+        loaded < u64::try_from(total).unwrap_or(u64::MAX)
+    } else {
+        songs.len() == pagesize as usize && !songs.is_empty()
+    };
     Ok(Page {
         items: songs,
-        cursor: if has_next == 1 {
+        cursor: if has_next {
             Some(page.saturating_add(1).to_string())
         } else {
             None
@@ -106,21 +114,34 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn playlist_tracks_computes_begin_idx() {
+    async fn playlist_tracks_computes_begin_idx_and_keeps_paging_off_the_total() {
         let mock = Arc::new(MockTransport::new());
+        // 实网响应没有 has_next，只有 data.count 总数
         mock.on_json(
             "/pubsongs/v2/get_other_list_file_nofilt",
-            &serde_json::json!({"status": 1, "data": {"songs": [{"name": "A", "hash": "AB"}], "has_next": 1}}),
+            &serde_json::json!({"status": 1, "data": {"count": 200, "songs": [{"name": "A", "hash": "AB"}]}}),
         );
-        let api = api(mock.clone());
+        let api = crate::testing::api(mock.clone());
         let page = playlist_tracks(&api, "gcid", 3, 30).await.unwrap();
         assert_eq!(page.items.len(), 1);
-        assert_eq!(page.cursor.as_deref(), Some("4"));
+        assert_eq!(page.cursor.as_deref(), Some("4"), "61 < 200，还有下一页");
         let request = mock.last_request().unwrap();
         assert_eq!(request.query.iter().find(|(k, _)| k == "begin_idx").unwrap().1, "60");
         assert_eq!(
             request.query.iter().find(|(k, _)| k == "extend_fields").unwrap().1,
             "abtags,hot_cmt,popularization"
+        );
+
+        // 已经取满总数时不再给游标，避免无限翻页
+        let last = Arc::new(MockTransport::new());
+        last.on_json(
+            "/pubsongs/v2/get_other_list_file_nofilt",
+            &serde_json::json!({"status": 1, "data": {"count": 61, "songs": [{"name": "B", "hash": "CD"}]}}),
+        );
+        let api = crate::testing::api(last);
+        assert!(
+            playlist_tracks(&api, "gcid", 3, 30).await.unwrap().cursor.is_none(),
+            "60 + 1 >= 61，无更多"
         );
     }
 

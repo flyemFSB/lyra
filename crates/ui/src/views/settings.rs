@@ -291,7 +291,7 @@ impl Render for SettingsView {
                                     .text_sm()
                                     .font_weight(FontWeight::BOLD)
                                     .text_color(VIP_GOLD_TEXT)
-                                    .child("Lyra音乐 畅听 VIP"),
+                                    .child("畅听 VIP"),
                             )
                             .child(badge(
                                 if is_vip_active {

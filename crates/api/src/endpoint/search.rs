@@ -6,22 +6,25 @@ use crate::cache::Freshness;
 use crate::client::Api;
 use crate::codec;
 use crate::error::{Error, Result};
-use crate::model::Song;
+use crate::model::{Page, Song};
 use crate::spec::RequestSpec;
+use serde_json::Value;
 
 /// 搜索网关路由主机
 const SEARCH_ROUTER: &str = "complexsearch.kugou.com";
 
 /// 依据关键词分页搜索单曲
-pub async fn songs(api: &Api, keyword: &str, page: u32, pagesize: u32, tag: Option<&str>) -> Result<Vec<Song>> {
+pub async fn songs(api: &Api, keyword: &str, page: u32, pagesize: u32, tag: Option<&str>) -> Result<Page<Song>> {
     let keyword = keyword.trim();
     if keyword.is_empty() {
         return Err(Error::Decode("搜索关键词为空".to_owned()));
     }
+    let page = if page == 0 { 1 } else { page };
+    let pagesize = if pagesize == 0 { 30 } else { pagesize };
     let mut spec = RequestSpec::get("/v2/search/song")
         .param("keyword", keyword)
-        .param("page", if page == 0 { 1 } else { page })
-        .param("pagesize", if pagesize == 0 { 30 } else { pagesize })
+        .param("page", page)
+        .param("pagesize", pagesize)
         .param("platform", "AndroidFilter")
         .param("iscorrection", 1)
         .param("privilegefilter", 0)
@@ -35,9 +38,26 @@ pub async fn songs(api: &Api, keyword: &str, page: u32, pagesize: u32, tag: Opti
     }
 
     let value = api.call(spec, Freshness::CATALOG).await?;
-    Ok(codec::find_array(&value, &["lists", "list", "songs", "info"])
+    let hits = codec::find_array(&value, &["lists", "list", "songs", "info"])
         .map(|items| Song::list_from(items))
-        .unwrap_or_default())
+        .unwrap_or_default();
+    // total 是命中的全量条数；拿不到时退化为「满页即可能还有」
+    let total = codec::pick_i64_paths(&value, &[&["data", "total"], &["total"]]);
+    let loaded = u64::from(page.saturating_sub(1)) * u64::from(pagesize) + hits.len() as u64;
+    let has_next = if total > 0 {
+        loaded < u64::try_from(total).unwrap_or(u64::MAX)
+    } else {
+        hits.len() == pagesize as usize && !hits.is_empty()
+    };
+    Ok(Page {
+        items: hits,
+        cursor: if has_next {
+            Some(page.saturating_add(1).to_string())
+        } else {
+            None
+        },
+        meta: Value::Null,
+    })
 }
 
 #[cfg(test)]
@@ -63,9 +83,9 @@ mod tests {
             }]}}),
         );
         let api = api(mock.clone());
-        let songs = songs(&api, "夜曲", 1, 30, None).await.unwrap();
-        assert_eq!(songs.len(), 1);
-        let song = &songs[0];
+        let page = songs(&api, "夜曲", 1, 30, None).await.unwrap();
+        assert_eq!(page.items.len(), 1);
+        let song = &page.items[0];
         assert_eq!(song.name, "夜曲");
         assert_eq!(song.singer, "周杰伦");
         assert_eq!(song.hash, "abc123def", "FileHash 必须被识别并归一化为小写");
@@ -82,6 +102,29 @@ mod tests {
         assert_eq!(get("platform").unwrap(), "AndroidFilter");
         assert_eq!(get("dopicfull").unwrap(), "1");
         assert!(get("signature").is_some());
+    }
+
+    #[tokio::test]
+    async fn pagination_follows_the_reported_total() {
+        let mock = Arc::new(MockTransport::new());
+        mock.on_json(
+            "/v2/search/song",
+            &serde_json::json!({"status": 1, "data": {"total": 75, "lists": [{"FileHash": "AB", "SongName": "x"}]}}),
+        );
+        let api = api(mock.clone());
+        let first = songs(&api, "夜曲", 1, 30, None).await.unwrap();
+        assert_eq!(first.cursor.as_deref(), Some("2"), "1 < 75，还有下一页");
+
+        let last = Arc::new(MockTransport::new());
+        last.on_json(
+            "/v2/search/song",
+            &serde_json::json!({"status": 1, "data": {"total": 61, "lists": [{"FileHash": "AB", "SongName": "x"}]}}),
+        );
+        let api = crate::testing::anonymous_api(last);
+        assert!(
+            songs(&api, "夜曲", 3, 30, None).await.unwrap().cursor.is_none(),
+            "60 + 1 >= 61，无更多"
+        );
     }
 
     #[tokio::test]

@@ -36,8 +36,8 @@ pub(crate) enum Msg {
     Daily(Result<Vec<Song>, String>),
     /// 红心电台歌曲分页结果
     PersonalFm(Result<Page<Song>, String>),
-    /// 搜索结果（附带请求序号）
-    Search(u64, Result<Vec<Song>, String>),
+    /// 搜索结果分页（附带请求序号）
+    Search(u64, Result<Page<Song>, String>),
     /// 歌词获取结果（附带请求序号）
     Lyrics(u64, Result<Vec<LyricLine>, String>),
     /// 会员状态查询结果
@@ -72,6 +72,8 @@ pub(crate) enum Msg {
     },
     /// 音频引擎拉流或解码异常
     EngineFailed(String),
+    /// 当前登录用户资料（昵称与真实头像）
+    Profile(Result<lyra_api::endpoint::session::UserProfile, String>),
     /// 空操作
     Noop,
     /// 顶部气泡提示
@@ -114,6 +116,13 @@ impl Backend {
     /// 获取音频引擎副本
     pub(crate) fn engine(&self) -> Option<lyra_audio::Engine> {
         self.app.engine().cloned()
+    }
+
+    /// 获取 Tokio 运行时句柄
+    ///
+    /// GPUI 的前台执行器没有 Tokio reactor，任何网络 I/O 都必须挂到这个运行时上执行。
+    pub(crate) fn runtime(&self) -> tokio::runtime::Handle {
+        self.handle.clone()
     }
 
     /// 发送消息至 UI 主线程

@@ -7,9 +7,8 @@ use gpui_kit::assets::IconName;
 use gpui_kit::component::button::{Button, ButtonVariants};
 use gpui_kit::component::scroll::ScrollableElement as _;
 use gpui_kit::component::{
-    Disableable as _, Icon, Sizable as _, VirtualListScrollHandle, h_flex, v_flex, v_virtual_list,
+    Disableable as _, Icon, VirtualListScrollHandle, h_flex, v_flex, v_virtual_list,
 };
-use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use lyra_api::model::{Page, Playlist, Song};
 
@@ -29,6 +28,9 @@ pub(crate) enum PlaylistTab {
     Created,
     Collected,
 }
+
+/// 提前预取行数：滚动到距末尾不足这么多行时自动拉下一页
+const PREFETCH_ROWS: usize = 20;
 
 /// 侧边栏歌单条目的展示模型（预格式化，渲染期零分配）
 pub(crate) struct PlaylistEntry {
@@ -246,7 +248,12 @@ impl PlaylistsView {
         self.loading_tracks = false;
         match result {
             Ok(page) => {
-                self.next_page = page.cursor.as_deref().and_then(|cursor| cursor.parse().ok());
+                // 空页不能留下游标，否则滚动预取会无限空转
+                self.next_page = if page.items.is_empty() {
+                    None
+                } else {
+                    page.cursor.as_deref().and_then(|cursor| cursor.parse().ok())
+                };
                 // 追加时优先零拷贝接管旧列表；队列仍持有引用时才退化为深拷贝
                 // 注意：必须先把自己这份 Arc 换走，否则引用计数永远大于 1，
                 // try_unwrap 必然失败，退化成每次翻页都深拷贝整张歌单。
@@ -302,6 +309,13 @@ impl PlaylistsView {
                 app.tracks(&global_id, page).await.map_err(|error| error.to_string()),
             )
         });
+    }
+
+    /// 虚拟列表滚到接近底部时自动续取下一页（不限量滚动加载）
+    fn maybe_load_more(&mut self, visible_end: usize, cx: &mut Context<Self>) {
+        if self.next_page.is_some() && visible_end + PREFETCH_ROWS >= self.songs.len() {
+            self.load_more(cx);
+        }
     }
 
     /// 刷新当前选中歌单
@@ -397,9 +411,7 @@ impl PlaylistsView {
         };
 
         let songs_for_play = self.songs.clone();
-        let songs_for_shuffle = self.songs.clone();
         let shell_for_play = self.shell.clone();
-        let shell_for_shuffle = self.shell.clone();
         let has_songs = !self.songs.is_empty();
 
         let header = h_flex()
@@ -479,28 +491,6 @@ impl PlaylistsView {
                                     }),
                             )
                             .child(
-                                Button::new("playlist_shuffle_play")
-                                    .ghost()
-                                    .icon(IconName::Shuffle)
-                                    .label("随机播放")
-                                    .tooltip("随机顺序播放全部歌曲")
-                                    .disabled(!has_songs)
-                                    .on_click(move |_event, _window, cx| {
-                                        if !songs_for_shuffle.is_empty() {
-                                            let mut shuffled = (*songs_for_shuffle).clone();
-                                            // 伪随机洗牌
-                                            let len = shuffled.len();
-                                            for i in (1..len).rev() {
-                                                let j = (i * 2654435761) % (i + 1);
-                                                shuffled.swap(i, j);
-                                            }
-                                            shell_for_shuffle
-                                                .update(cx, |shell, cx| shell.play_queue(Arc::new(shuffled), 0, cx))
-                                                .ok();
-                                        }
-                                    }),
-                            )
-                            .child(
                                 Button::new("playlist_batch")
                                     .ghost()
                                     .icon(IconName::ListMusic)
@@ -518,17 +508,7 @@ impl PlaylistsView {
                                     .on_click(cx.listener(|_view, _event, _window, cx| {
                                         cx.notify();
                                     })),
-                            )
-                            .when(self.next_page.is_some(), |this| {
-                                this.child(
-                                    Button::new("load_more")
-                                        .ghost()
-                                        .small()
-                                        .icon(IconName::ChevronDown)
-                                        .label(if self.appending { "加载中…" } else { "加载更多" })
-                                        .on_click(cx.listener(|view, _event, _window, cx| view.load_more(cx))),
-                                )
-                            }),
+                            ),
                     ),
             );
 
@@ -552,9 +532,13 @@ impl PlaylistsView {
                 move |view, range, _window, cx| {
                     let app: &App = cx;
                     let (cur_hash, is_playing) = current_play_state(&view.player, app);
-                    range
+                    let rows = range
+                        .clone()
                         .map(|index| view.row(index, cur_hash.as_deref(), is_playing, listid.as_ref()))
-                        .collect::<Vec<_>>()
+                        .collect::<Vec<_>>();
+                    // 滚到接近末尾就自动续取下一页，直到整张歌单全部可用
+                    view.maybe_load_more(range.end, cx);
+                    rows
                 },
             )
             .track_scroll(&self.scroll_handle)

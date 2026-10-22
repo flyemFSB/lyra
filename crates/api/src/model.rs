@@ -178,7 +178,19 @@ impl Song {
             hash,
             album_id,
             album_audio_id,
-            album_name: codec::pick_str_cow(value, &["albumname", "album_name", "album"]).into_owned(),
+            // 专辑名不在顶层：歌单端点只给嵌套的 albuminfo.name（顶层 album_id 也常是 "0"）
+            album_name: codec::pick_str_paths(
+                value,
+                &[
+                    &["albumname"],
+                    &["album_name"],
+                    &["album_info", "album_name"],
+                    &["album_info", "name"],
+                    &["albuminfo", "album_name"],
+                    &["albuminfo", "name"],
+                    &["album"],
+                ],
+            ),
             duration_ms,
             fileid: codec::pick_i64(value, &["fileid", "file_id"]),
             mixsongid: codec::pick_i64(value, &["mixsongid", "mix_song_id"]),
@@ -808,6 +820,21 @@ mod tests {
         assert_eq!(Song::from_value(&value).unwrap().album_id, "42");
         let nested = json!({"hash": "a", "trans_param": {"album_id": "77"}});
         assert_eq!(Song::from_value(&nested).unwrap().album_id, "77");
+    }
+
+    #[test]
+    fn album_name_comes_from_the_nested_albuminfo_object() {
+        // 歌单端点不返回顶层 albumname：专辑名只存在于 albuminfo.name，缺了它列表整列都是「—」
+        let playlist = json!({"songname": "x", "hash": "AB", "album_id": "967638",
+            "albuminfo": {"name": "Love", "id": 967638, "publish": 1}});
+        assert_eq!(Song::from_value(&playlist).unwrap().album_name, "Love");
+
+        // 顶层字段仍然优先，且 albuminfo 为空对象时不得覆盖为空白
+        let explicit = json!({"songname": "x", "hash": "AB", "albumname": "顶层专辑",
+            "albuminfo": {"name": "嵌套专辑"}});
+        assert_eq!(Song::from_value(&explicit).unwrap().album_name, "顶层专辑");
+        let empty_nested = json!({"songname": "x", "hash": "AB", "albuminfo": {"name": ""}});
+        assert_eq!(Song::from_value(&empty_nested).unwrap().album_name, "");
     }
 
     #[test]

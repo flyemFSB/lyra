@@ -9,7 +9,7 @@ use gpui_kit::component::scroll::ScrollableElement as _;
 use gpui_kit::component::{Disableable as _, Icon, VirtualListScrollHandle, h_flex, v_flex, v_virtual_list};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
-use lyra_api::model::Song;
+use lyra_api::model::{Page, Song};
 
 use crate::bridge::{Backend, Msg};
 use crate::shell::AppShell;
@@ -20,17 +20,8 @@ use crate::theme::{
 use crate::views::player::PlayerModel;
 use crate::views::tracks::{RowContext, TrackRow, build_rows, current_play_state, song_row, table_header};
 
-/// 快捷热门搜索词（供顶部下拉浮层与探索建议共享）
-pub(crate) const HOT_TAGS: &[&str] = &[
-    "周杰伦",
-    "陈奕迅",
-    "林俊杰",
-    "王菲",
-    "轻音乐",
-    "国风民乐",
-    "粤语经典",
-    "欧美流行",
-];
+/// 提前预取页数：滚动到距末尾不足这么多行时自动拉下一页
+const PREFETCH_ROWS: usize = 20;
 
 /// 搜索类型标签页
 #[derive(Clone, Copy, PartialEq, Eq, Default)]
@@ -70,6 +61,10 @@ pub(crate) struct SearchView {
     error: Option<SharedString>,
     /// 请求序号（用于丢弃过期响应）
     request_seq: u64,
+    /// 下一页页码（None 表示已加载完毕）
+    next_page: Option<u32>,
+    /// 是否为追加分页数据
+    appending: bool,
     _subs: Vec<Subscription>,
 }
 
@@ -101,6 +96,8 @@ impl SearchView {
             searched: false,
             error: None,
             request_seq: 0,
+            next_page: None,
+            appending: false,
             _subs: vec![player_sub],
         }
     }
@@ -115,6 +112,8 @@ impl SearchView {
         self.loading = false;
         self.searched = false;
         self.error = None;
+        self.next_page = None;
+        self.appending = false;
         self.request_seq += 1;
         cx.notify();
     }
@@ -127,6 +126,8 @@ impl SearchView {
         keyword.trim().clone_into(&mut self.query);
         self.loading = true;
         self.error = None;
+        self.next_page = None;
+        self.appending = false;
         self.scroll_handle = VirtualListScrollHandle::new();
         self.request_seq += 1;
         let seq = self.request_seq;
@@ -138,15 +139,56 @@ impl SearchView {
             .spawn(async move { Msg::Search(seq, app.search(&kw, 1).await.map_err(|error| error.to_string())) });
     }
 
+    /// 加载下一页搜索结果
+    fn load_more(&mut self, cx: &mut Context<Self>) {
+        if self.loading || self.appending {
+            return;
+        }
+        let Some(page) = self.next_page else {
+            return;
+        };
+        self.appending = true;
+        self.request_seq += 1;
+        let seq = self.request_seq;
+        cx.notify();
+        let app = self.backend.app();
+        let kw = self.query.clone();
+        self.backend
+            .spawn(async move { Msg::Search(seq, app.search(&kw, page).await.map_err(|error| error.to_string())) });
+    }
+
+    /// 虚拟列表滚到接近底部时自动预取下一页（不限量滚动加载）
+    fn maybe_load_more(&mut self, visible_end: usize, cx: &mut Context<Self>) {
+        if self.next_page.is_some() && visible_end + PREFETCH_ROWS >= self.songs.len() {
+            self.load_more(cx);
+        }
+    }
+
     /// 处理搜索响应结果（丢弃过期请求）
-    pub(crate) fn on_search(&mut self, seq: u64, result: Result<Vec<Song>, String>, cx: &mut Context<Self>) {
+    pub(crate) fn on_search(&mut self, seq: u64, result: Result<Page<Song>, String>, cx: &mut Context<Self>) {
         if seq != self.request_seq {
             return;
         }
+        let appending = std::mem::take(&mut self.appending);
         self.loading = false;
         self.searched = true;
         match result {
-            Ok(songs) => {
+            Ok(page) => {
+                // 空页不能留下游标，否则滚动预取会无限空转
+                self.next_page = if page.items.is_empty() {
+                    None
+                } else {
+                    page.cursor.as_deref().and_then(|cursor| cursor.parse().ok())
+                };
+                // 追加时优先零拷贝接管旧列表（队列仍持有引用时才退化为深拷贝）
+                let mut songs = match Arc::try_unwrap(std::mem::replace(&mut self.songs, Arc::new(Vec::new()))) {
+                    Ok(owned) => owned,
+                    Err(shared) => (*shared).clone(),
+                };
+                if !appending {
+                    songs.clear();
+                }
+                songs.extend(page.items);
                 self.rows = Arc::new(build_rows(&songs));
                 self.songs = Arc::new(songs);
                 self.sizes = row_sizes(self.songs.len());
@@ -154,10 +196,16 @@ impl SearchView {
             }
             Err(error) => {
                 tracing::warn!(%error, "搜索歌曲失败");
-                self.songs = Arc::new(Vec::new());
-                self.rows = Arc::new(Vec::new());
-                self.sizes = row_sizes(0);
-                self.error = Some(friendly_error_message(&error).into());
+                if appending {
+                    // 翻页失败不能清空已经拿到的结果
+                    self.backend.send(Msg::Toast(friendly_error_message(&error)));
+                } else {
+                    self.next_page = None;
+                    self.songs = Arc::new(Vec::new());
+                    self.rows = Arc::new(Vec::new());
+                    self.sizes = row_sizes(0);
+                    self.error = Some(friendly_error_message(&error).into());
+                }
             }
         }
         cx.notify();
@@ -421,7 +469,8 @@ impl Render for SearchView {
                 move |view, range, _window, cx| {
                     let app: &App = cx;
                     let (cur_hash, is_playing) = current_play_state(&view.player, app);
-                    range
+                    let rows = range
+                        .clone()
                         .map(|index| {
                             song_row(
                                 index,
@@ -437,7 +486,10 @@ impl Render for SearchView {
                                 is_playing,
                             )
                         })
-                        .collect::<Vec<_>>()
+                        .collect::<Vec<_>>();
+                    // 滚到接近末尾就自动续取下一页
+                    view.maybe_load_more(range.end, cx);
+                    rows
                 },
             )
             .track_scroll(&self.scroll_handle)

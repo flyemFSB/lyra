@@ -207,22 +207,34 @@ impl LyricsView {
         self.palette = fallback_palette(title.as_ref(), singer.as_ref());
 
         // 异步提取封面真实量化主色调
+        //
+        // 请求必须交给 Tokio 运行时：GPUI 前台执行器没有 Tokio reactor，
+        // 在 `cx.spawn` 里直接 await reqwest 会 panic
+        // （release 开了 panic = "abort"，一播放带封面的歌曲就整个进程闪退）。
         let cover_url = cover.to_string();
         if cover_url.starts_with("http") {
+            let runtime = self.backend.runtime();
             cx.spawn(async move |this, cx| {
-                let client = reqwest::Client::builder()
-                    .timeout(Duration::from_secs(5))
-                    .build()
-                    .unwrap_or_default();
-                if let Ok(resp) = client.get(&cover_url).send().await
-                    && let Ok(bytes) = resp.bytes().await
-                    && let Some(extracted) = crate::palette::extract_palette_from_bytes(&bytes)
-                {
-                    let _ = this.update(cx, |view, cx| {
-                        view.palette = extracted;
-                        cx.notify();
-                    });
-                }
+                let fetched = runtime
+                    .spawn(async move {
+                        let client = reqwest::Client::builder()
+                            .timeout(Duration::from_secs(5))
+                            .build()
+                            .ok()?;
+                        let resp = client.get(&cover_url).send().await.ok()?;
+                        resp.bytes().await.ok()
+                    })
+                    .await;
+                let Ok(Some(bytes)) = fetched else {
+                    return;
+                };
+                let Some(extracted) = crate::palette::extract_palette_from_bytes(&bytes) else {
+                    return;
+                };
+                let _ = this.update(cx, |view, cx| {
+                    view.palette = extracted;
+                    cx.notify();
+                });
             })
             .detach();
         }
