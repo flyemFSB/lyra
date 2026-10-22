@@ -6,9 +6,7 @@ use std::sync::Arc;
 use gpui_kit::assets::IconName;
 use gpui_kit::component::button::{Button, ButtonVariants};
 use gpui_kit::component::scroll::ScrollableElement as _;
-use gpui_kit::component::{
-    Disableable as _, Icon, VirtualListScrollHandle, h_flex, v_flex, v_virtual_list,
-};
+use gpui_kit::component::{Disableable as _, Icon, VirtualListScrollHandle, h_flex, v_flex, v_virtual_list};
 use gpui_kit::*;
 use lyra_api::model::{Page, Playlist, Song};
 

@@ -117,11 +117,11 @@ fn avatar_placeholder(logged_in: bool) -> AnyElement {
         .flex()
         .items_center()
         .justify_center()
-        .child(Icon::new(IconName::User).size(px(13.0)).text_color(if logged_in {
-            ACCENT_GREEN
-        } else {
-            TEXT_MUTED
-        }))
+        .child(
+            Icon::new(IconName::User)
+                .size(px(13.0))
+                .text_color(if logged_in { ACCENT_GREEN } else { TEXT_MUTED }),
+        )
         .into_any_element()
 }
 
