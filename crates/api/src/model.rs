@@ -693,13 +693,33 @@ impl VipStatus {
         self.concept().map(|e| e.end_ms)
     }
 
-    /// 获取畅听 VIP 到期时间字符串（如 "2026-10-21 13:41:21"）
+    /// 获取畅听 VIP 在自然日内的到期时刻文本（如 "今日 23:59"）
+    ///
+    /// 上游 `vip_end_time` 是「领取时刻 + 24 小时」，直接展示必然跨出自然日；
+    /// 而权益语义是「每日领取、自然日内有效」，因此收敛到北京时间当日 23:59:59
+    /// 与真实到期时间二者的较小值。
     #[must_use]
-    pub fn concept_expires_str(&self) -> Option<&str> {
-        self.concept()
-            .map(|e| e.end_time_str.as_str())
-            .filter(|s| !s.is_empty())
+    pub fn concept_natural_day_expires(&self) -> Option<String> {
+        let end_ms = self.concept()?.end_ms;
+        if end_ms <= 0 {
+            return None;
+        }
+        let end_ms = end_ms.min(day_end_ms(crate::spec::now_millis()));
+        let time_of_day = (end_ms + CST_OFFSET_MS).rem_euclid(DAY_MS);
+        let (hours, minutes) = (time_of_day / HOUR_MS, time_of_day % HOUR_MS / MINUTE_MS);
+        Some(format!("今日 {hours:02}:{minutes:02}"))
     }
+}
+
+/// 北京时间偏移（上游会员时间均为北京时间）
+const CST_OFFSET_MS: i64 = 8 * HOUR_MS;
+const MINUTE_MS: i64 = 60_000;
+const HOUR_MS: i64 = 60 * MINUTE_MS;
+const DAY_MS: i64 = 24 * HOUR_MS;
+
+/// 指定时刻所在自然日（北京时间）的最后毫秒
+fn day_end_ms(now_ms: i64) -> i64 {
+    (now_ms + CST_OFFSET_MS).div_euclid(DAY_MS) * DAY_MS - CST_OFFSET_MS + DAY_MS - 1
 }
 
 /// 分页通用数据结构
@@ -1001,6 +1021,27 @@ mod tests {
             {"busi_type": "concept", "product_type": "svip", "vip_begin_time": 0, "vip_end_time": 1}
         ]}});
         assert!(!VipStatus::from_value(&value).is_concept_active());
+    }
+
+    #[test]
+    fn natural_day_end_is_the_last_millisecond_of_beijing_day() {
+        // 2026-10-21 13:41:21 +08:00 → 当日最后一毫秒
+        assert_eq!(day_end_ms(1_792_561_281_000), 1_792_598_399_999);
+        // 北京时间 23:59:59.999 仍在当天
+        assert_eq!(day_end_ms(1_792_598_399_999), 1_792_598_399_999);
+    }
+
+    #[test]
+    fn vip_expiry_is_clamped_into_the_natural_day() {
+        // 上游把有效期回成「领取时刻 + 24h」，展示时必须收敛到当日 23:59
+        let end_ms = crate::spec::now_millis() + DAY_MS;
+        let value = json!({"data": {"busi_vip": [
+            {"busi_type": "concept", "product_type": "svip", "vip_begin_time": 1, "vip_end_time": end_ms}
+        ]}});
+        assert_eq!(
+            VipStatus::from_value(&value).concept_natural_day_expires().as_deref(),
+            Some("今日 23:59")
+        );
     }
 
     #[test]

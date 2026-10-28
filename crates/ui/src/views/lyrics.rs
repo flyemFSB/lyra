@@ -324,32 +324,8 @@ impl LyricsView {
             );
         }
 
-        // 双端自然渐隐蒙版（融合底层色相，消除生硬裁切与灰白条色块）
-        let mask_tint = self.palette.surface_tint;
-        let top_feather_mask = div()
-            .absolute()
-            .top_0()
-            .left_0()
-            .right_0()
-            .h(px(64.0))
-            .bg(linear_gradient(
-                180.0,
-                linear_color_stop(mask_tint, 0.0),
-                linear_color_stop(mask_tint.opacity(0.0), 1.0),
-            ));
-
-        let bottom_feather_mask = div()
-            .absolute()
-            .bottom_0()
-            .left_0()
-            .right_0()
-            .h(px(64.0))
-            .bg(linear_gradient(
-                180.0,
-                linear_color_stop(mask_tint.opacity(0.0), 0.0),
-                linear_color_stop(mask_tint, 1.0),
-            ));
-
+        // 背景色由整页的调色盘渐变提供，这里不再盖不透明的上下渐变蒙版：
+        // 那两条与底层光晕不同色的矩形会硬切背景，看起来就像浮在页面上的白框
         div()
             .id("lyrics-scroll")
             .flex_1()
@@ -367,8 +343,6 @@ impl LyricsView {
                     body
                 },
             ))
-            .child(top_feather_mask)
-            .child(bottom_feather_mask)
             .into_any_element()
     }
 

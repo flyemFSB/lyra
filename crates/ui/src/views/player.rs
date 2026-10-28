@@ -25,6 +25,12 @@ use crate::views::tracks::{TrackRow, build_rows};
 
 pub(crate) use lyra_app::PlayMode;
 
+/// 音量滑轨宽度（像素）
+///
+/// 100 级音量铺在这条滑轨上：越宽，每像素对应的音量越细，
+/// 拖拽才能精确落到目标值上。
+const VOLUME_TRACK_WIDTH: f32 = 112.0;
+
 /// 播放模式的展示文本
 pub(crate) fn mode_label(mode: PlayMode) -> &'static str {
     match mode {
@@ -865,7 +871,13 @@ impl Render for PlayerBar {
                                     })
                                     .when(has_song && (self.progress_hovered || self.dragging), |this| {
                                         // 悬停/拖拽状态：进度条加粗至 5px，浮现滑块与精准时间点跟随气泡 (Timeline Scrubbing)
-                                        this.child(Slider::new(&self.progress).w_full())
+                                        this.child(
+                                            Slider::new(&self.progress)
+                                                .w_full()
+                                                // 必须显式着色：默认主题的滑块是近白色、手柄是黑色
+                                                .bg(ACCENT_GREEN)
+                                                .text_color(ACCENT_GREEN),
+                                        )
                                             .when_some(self.hover_scrub_ratio, |this, ratio| {
                                                 let duration = self.player.read(cx).snapshot.duration_ms;
                                                 #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
@@ -948,23 +960,6 @@ impl Render for PlayerBar {
                                     this.volume_hovered = true;
                                 }
                             }))
-                            .when(self.volume_hovered || self.volume_dragging, |this| {
-                                this.child(
-                                    div()
-                                        .absolute()
-                                        .bottom(px(26.0))
-                                        .left(px(28.0))
-                                        .px_2()
-                                        .py(px(1.5))
-                                        .rounded(px(4.0))
-                                        .bg(hex_rgb(0x1f2937))
-                                        .shadow_md()
-                                        .text_color(hex_rgb(0xffffff))
-                                        .text_size(px(10.5))
-                                        .font_weight(FontWeight::BOLD)
-                                        .child(format!("{vol_num}%")),
-                                )
-                            })
                             .child(
                                 Button::new("vol_toggle")
                                     .ghost()
@@ -995,8 +990,34 @@ impl Render for PlayerBar {
                             )
                             .child(
                                 div()
-                                    .w(px(72.0))
-                                    .child(Slider::new(&self.volume).w_full()),
+                                    .w(px(VOLUME_TRACK_WIDTH))
+                                    .relative()
+                                    .child(
+                                        Slider::new(&self.volume)
+                                            .w_full()
+                                            // 默认主题的滑轨是近白色，白底上看不见已填充的部分
+                                            .bg(ACCENT_GREEN)
+                                            .text_color(ACCENT_GREEN),
+                                    )
+                                    // 数值气泡跟随滑块，拖拽时能直接看到落在哪个值上
+                                    .when(self.volume_hovered || self.volume_dragging, |this| {
+                                        let knob = VOLUME_TRACK_WIDTH * (vol_num as f32 / 100.0);
+                                        this.child(
+                                            div()
+                                                .absolute()
+                                                .bottom(px(18.0))
+                                                .left(px((knob - 14.0).clamp(0.0, VOLUME_TRACK_WIDTH - 30.0)))
+                                                .px_2()
+                                                .py(px(1.5))
+                                                .rounded(px(4.0))
+                                                .bg(hex_rgb(0x1f2937))
+                                                .shadow_md()
+                                                .text_color(hex_rgb(0xffffff))
+                                                .text_size(px(10.5))
+                                                .font_weight(FontWeight::BOLD)
+                                                .child(SharedString::from(format!("{vol_num}%"))),
+                                        )
+                                    }),
                             )
                             .child(
                                 div()

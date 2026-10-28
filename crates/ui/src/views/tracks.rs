@@ -69,11 +69,11 @@ pub(crate) struct RowContext<'a> {
     pub(crate) backend: &'a Backend,
     /// 当前选中的曲目索引（键盘导航或单击选中态）
     pub(crate) selected_index: Option<usize>,
-    /// 单击选中回调
+    /// 单击行时的回调（同时写入选中态，供键盘导航复用）
     pub(crate) on_select: Option<SelectCallback>,
 }
 
-/// 单击选中行回调函数类型
+/// 单击行回调函数类型
 pub(crate) type SelectCallback = std::rc::Rc<dyn Fn(usize, &mut Window, &mut App)>;
 
 /// 渲染普通歌曲行（无移除按钮）
@@ -192,19 +192,17 @@ pub(crate) fn track_row(
             this.hover(|style| style.bg(SURFACE_HOVER))
         })
         .on_click(move |event, window, cx| {
+            // 双击的第二下不再重复触发：第一下已经插队播放了
             if event.click_count() >= 2 {
-                // 双击：立即插队并播放此曲，避免单击误触
-                play_shell
-                    .update(cx, |shell, cx| shell.play_queue(play_queue.clone(), index, cx))
-                    .ok();
-            } else if let Some(select_fn) = &on_select {
-                // 单击：选中该行
-                select_fn(index, window, cx);
-            } else {
-                play_shell
-                    .update(cx, |shell, cx| shell.play_queue(play_queue.clone(), index, cx))
-                    .ok();
+                return;
             }
+            if let Some(select_fn) = &on_select {
+                // 选中态只用于键盘导航高亮，单击仍然直接播放
+                select_fn(index, window, cx);
+            }
+            play_shell
+                .update(cx, |shell, cx| shell.play_queue(play_queue.clone(), index, cx))
+                .ok();
         })
         // 1. [ # 序号 / 3柱声波均衡器 (40px 固定居中) ]
         .child(

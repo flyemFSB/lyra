@@ -30,8 +30,8 @@ pub(crate) enum Msg {
     Login(Result<(), String>),
     /// 歌单列表结果
     Playlists(Result<Vec<Playlist>, String>),
-    /// 歌单歌曲分页结果（附带请求序号以过滤过期响应）
-    Tracks(u64, Result<Page<Song>, String>),
+    /// 歌单歌曲完整列表结果（附带请求序号以过滤过期响应）
+    Tracks(u64, Result<Vec<Song>, String>),
     /// 每日推荐歌曲列表
     Daily(Result<Vec<Song>, String>),
     /// 红心电台歌曲分页结果

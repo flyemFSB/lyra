@@ -8,7 +8,7 @@ use gpui_kit::component::button::{Button, ButtonVariants};
 use gpui_kit::component::scroll::ScrollableElement as _;
 use gpui_kit::component::{Disableable as _, Icon, VirtualListScrollHandle, h_flex, v_flex, v_virtual_list};
 use gpui_kit::*;
-use lyra_api::model::{Page, Playlist, Song};
+use lyra_api::model::{Playlist, Song};
 
 use crate::bridge::{Backend, Msg};
 use crate::shell::AppShell;
@@ -26,9 +26,6 @@ pub(crate) enum PlaylistTab {
     Created,
     Collected,
 }
-
-/// 提前预取行数：滚动到距末尾不足这么多行时自动拉下一页
-const PREFETCH_ROWS: usize = 20;
 
 /// 侧边栏歌单条目的展示模型（预格式化，渲染期零分配）
 pub(crate) struct PlaylistEntry {
@@ -65,10 +62,6 @@ pub(crate) struct PlaylistsView {
     listid: Option<String>,
     /// 请求序号（用于丢弃过期响应）
     request_seq: u64,
-    /// 下一页页码（None 表示已加载完毕）
-    next_page: Option<u32>,
-    /// 是否为追加分页数据
-    appending: bool,
     /// 标签页切换序号（驱动过渡动效）
     pub(crate) tab_seq: u64,
     _sub: Subscription,
@@ -104,8 +97,6 @@ impl PlaylistsView {
             heading: SharedString::new_static("歌单"),
             listid: None,
             request_seq: 0,
-            next_page: None,
-            appending: false,
             tab_seq: 1,
             _sub: sub,
         }
@@ -149,8 +140,6 @@ impl PlaylistsView {
         self.error = None;
         self.heading = SharedString::new_static("歌单");
         self.listid = None;
-        self.next_page = None;
-        self.appending = false;
         self.request_seq += 1;
         cx.notify();
     }
@@ -225,7 +214,6 @@ impl PlaylistsView {
         self.listid = Some(list.listid.clone());
         self.loading_tracks = true;
         self.error = None;
-        self.appending = false;
         self.scroll_handle = VirtualListScrollHandle::new();
         self.request_seq += 1;
         let seq = self.request_seq;
@@ -233,87 +221,33 @@ impl PlaylistsView {
 
         let app = self.backend.app();
         let global_id = list.global_collection_id.clone();
-        self.backend
-            .spawn(async move { Msg::Tracks(seq, app.tracks(&global_id, 1).await.map_err(|error| error.to_string())) });
+        self.backend.spawn(async move {
+            Msg::Tracks(seq, app.tracks_all(&global_id).await.map_err(|error| error.to_string()))
+        });
     }
 
-    /// 处理曲目列表分页响应
-    pub(crate) fn on_tracks(&mut self, seq: u64, result: Result<Page<Song>, String>, cx: &mut Context<Self>) {
+    /// 处理曲目列表响应（整张歌单一次取回）
+    pub(crate) fn on_tracks(&mut self, seq: u64, result: Result<Vec<Song>, String>, cx: &mut Context<Self>) {
         if seq != self.request_seq {
             return;
         }
-        let appending = std::mem::take(&mut self.appending);
         self.loading_tracks = false;
         match result {
-            Ok(page) => {
-                // 空页不能留下游标，否则滚动预取会无限空转
-                self.next_page = if page.items.is_empty() {
-                    None
-                } else {
-                    page.cursor.as_deref().and_then(|cursor| cursor.parse().ok())
-                };
-                // 追加时优先零拷贝接管旧列表；队列仍持有引用时才退化为深拷贝
-                // 注意：必须先把自己这份 Arc 换走，否则引用计数永远大于 1，
-                // try_unwrap 必然失败，退化成每次翻页都深拷贝整张歌单。
-                let mut songs = match Arc::try_unwrap(std::mem::replace(&mut self.songs, Arc::new(Vec::new()))) {
-                    Ok(owned) => owned,
-                    Err(shared) => (*shared).clone(),
-                };
-                if !appending {
-                    songs.clear();
-                }
-                songs.extend(page.items);
+            Ok(songs) => {
                 self.rows = Arc::new(build_rows(&songs));
+                self.sizes = row_sizes(songs.len());
                 self.songs = Arc::new(songs);
-                self.sizes = row_sizes(self.songs.len());
                 self.error = None;
             }
             Err(error) => {
                 tracing::warn!(%error, "加载曲目失败");
-                if appending {
-                    self.backend.send(Msg::Toast(friendly_error_message(&error)));
-                } else {
-                    self.next_page = None;
-                    self.error = Some(friendly_error_message(&error).into());
-                }
+                self.songs = Arc::new(Vec::new());
+                self.rows = Arc::new(Vec::new());
+                self.sizes = row_sizes(0);
+                self.error = Some(friendly_error_message(&error).into());
             }
         }
         cx.notify();
-    }
-
-    /// 加载下一页曲目
-    fn load_more(&mut self, cx: &mut Context<Self>) {
-        if self.loading_tracks || self.appending {
-            return;
-        }
-        let Some(page) = self.next_page else {
-            return;
-        };
-        let Some(index) = self.selected else {
-            return;
-        };
-        let Some(list) = self.playlists.get(index) else {
-            return;
-        };
-        self.appending = true;
-        self.request_seq += 1;
-        let seq = self.request_seq;
-        cx.notify();
-        let app = self.backend.app();
-        let global_id = list.global_collection_id.clone();
-        self.backend.spawn(async move {
-            Msg::Tracks(
-                seq,
-                app.tracks(&global_id, page).await.map_err(|error| error.to_string()),
-            )
-        });
-    }
-
-    /// 虚拟列表滚到接近底部时自动续取下一页（不限量滚动加载）
-    fn maybe_load_more(&mut self, visible_end: usize, cx: &mut Context<Self>) {
-        if self.next_page.is_some() && visible_end + PREFETCH_ROWS >= self.songs.len() {
-            self.load_more(cx);
-        }
     }
 
     /// 刷新当前选中歌单
@@ -401,12 +335,7 @@ impl PlaylistsView {
         };
 
         // 2. 元信息区与操作工具条（垂直排列）
-        let loaded_count = self.songs.len();
-        let meta_count_text = if loaded_count < total_count && loaded_count > 0 {
-            format!("共 {total_count} 首歌曲（已加载 {loaded_count} 首）")
-        } else {
-            format!("共 {total_count} 首歌曲")
-        };
+        let meta_count_text = format!("共 {total_count} 首歌曲");
 
         let songs_for_play = self.songs.clone();
         let shell_for_play = self.shell.clone();
@@ -441,7 +370,7 @@ impl PlaylistsView {
                             .truncate()
                             .child(self.heading.clone()),
                     )
-                    // 作者与创建信息：用户头像 + rushzb · 2026年创建 · 共 251 首歌曲
+                    // 作者与曲目总数：用户头像 + rushzb · 共 241 首歌曲
                     .child(
                         h_flex()
                             .gap(px(8.0))
@@ -464,8 +393,6 @@ impl PlaylistsView {
                                     .text_color(TEXT_PRIMARY)
                                     .child(username),
                             )
-                            .child(div().text_color(TEXT_FAINT).child("·"))
-                            .child(div().child("2026年创建"))
                             .child(div().text_color(TEXT_FAINT).child("·"))
                             .child(div().child(meta_count_text)),
                     )
@@ -530,13 +457,10 @@ impl PlaylistsView {
                 move |view, range, _window, cx| {
                     let app: &App = cx;
                     let (cur_hash, is_playing) = current_play_state(&view.player, app);
-                    let rows = range
+                    range
                         .clone()
                         .map(|index| view.row(index, cur_hash.as_deref(), is_playing, listid.as_ref()))
-                        .collect::<Vec<_>>();
-                    // 滚到接近末尾就自动续取下一页，直到整张歌单全部可用
-                    view.maybe_load_more(range.end, cx);
-                    rows
+                        .collect::<Vec<_>>()
                 },
             )
             .track_scroll(&self.scroll_handle)

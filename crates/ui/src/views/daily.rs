@@ -123,10 +123,7 @@ impl Render for DailyView {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let shell_fm = self.shell.clone();
         let shell_daily = self.shell.clone();
-        let shell_radar = self.shell.clone();
-        let shell_shuffle = self.shell.clone();
         let songs_daily = self.songs.clone();
-        let songs_shuffle = self.songs.clone();
 
         // 卡片 1：红心漫游（私人 FM 随心畅听）
         let card_radio = v_flex()
@@ -254,143 +251,7 @@ impl Render for DailyView {
                     .child(div().text_xs().text_color(TEXT_MUTED).child("专属精选 · 每日更新")),
             );
 
-        // 卡片 3：雷达推荐（相似探索）
-        let card_radar = v_flex()
-            .id("radar_rec_card")
-            .role(Role::Button)
-            .cursor_pointer()
-            .flex_1()
-            .min_w(px(130.0))
-            .p_3()
-            .rounded(px(14.0))
-            .bg(hex_rgb(0xf5f3ff))
-            .border_1()
-            .border_color(hex_rgb(0xddd6fe))
-            .shadow_xs()
-            .hover(|s| s.bg(hex_rgb(0xede9fe)).shadow_sm())
-            .on_click(move |_event, _window, cx| {
-                shell_radar.update(cx, AppShell::start_personal_fm).ok();
-            })
-            .child(
-                h_flex()
-                    .w_full()
-                    .justify_between()
-                    .items_start()
-                    .child(
-                        div()
-                            .w(px(40.0))
-                            .h(px(40.0))
-                            .rounded_full()
-                            .bg(hex_rgb(0xede9fe))
-                            .flex()
-                            .items_center()
-                            .justify_center()
-                            .child(
-                                Icon::new(IconName::Compass)
-                                    .size(px(22.0))
-                                    .text_color(hex_rgb(0x8b5cf6)),
-                            ),
-                    )
-                    .child(
-                        div()
-                            .w(px(28.0))
-                            .h(px(28.0))
-                            .rounded_full()
-                            .bg(hex_rgb(0x8b5cf6))
-                            .hover(|s| s.bg(hex_rgb(0x7c3aed)))
-                            .shadow_xs()
-                            .flex()
-                            .items_center()
-                            .justify_center()
-                            .child(Icon::new(IconName::Play).size(px(13.0)).text_color(CARD_BG)),
-                    ),
-            )
-            .child(
-                v_flex()
-                    .mt_3()
-                    .gap(px(2.0))
-                    .child(
-                        div()
-                            .text_sm()
-                            .font_weight(FontWeight::BOLD)
-                            .text_color(TEXT_PRIMARY)
-                            .child("雷达推荐"),
-                    )
-                    .child(div().text_xs().text_color(TEXT_MUTED).child("相似品味 · 探索发现")),
-            );
-
-        // 卡片 4：随机漫步（偶遇心动）
-        let card_shuffle = v_flex()
-            .id("shuffle_walk_card")
-            .role(Role::Button)
-            .cursor_pointer()
-            .flex_1()
-            .min_w(px(130.0))
-            .p_3()
-            .rounded(px(14.0))
-            .bg(hex_rgb(0xfffbeb))
-            .border_1()
-            .border_color(hex_rgb(0xfde68a))
-            .shadow_xs()
-            .hover(|s| s.bg(hex_rgb(0xfef3c7)).shadow_sm())
-            .on_click(move |_event, _window, cx| {
-                if !songs_shuffle.is_empty() {
-                    shell_shuffle
-                        .update(cx, |shell, cx| {
-                            shell.play_queue(songs_shuffle.clone(), 0, cx);
-                        })
-                        .ok();
-                }
-            })
-            .child(
-                h_flex()
-                    .w_full()
-                    .justify_between()
-                    .items_start()
-                    .child(
-                        div()
-                            .w(px(40.0))
-                            .h(px(40.0))
-                            .rounded_full()
-                            .bg(hex_rgb(0xfef3c7))
-                            .flex()
-                            .items_center()
-                            .justify_center()
-                            .child(
-                                Icon::new(IconName::Shuffle)
-                                    .size(px(22.0))
-                                    .text_color(hex_rgb(0xf59e0b)),
-                            ),
-                    )
-                    .child(
-                        div()
-                            .w(px(28.0))
-                            .h(px(28.0))
-                            .rounded_full()
-                            .bg(hex_rgb(0xf59e0b))
-                            .hover(|s| s.bg(hex_rgb(0xd97706)))
-                            .shadow_xs()
-                            .flex()
-                            .items_center()
-                            .justify_center()
-                            .child(Icon::new(IconName::Play).size(px(13.0)).text_color(CARD_BG)),
-                    ),
-            )
-            .child(
-                v_flex()
-                    .mt_3()
-                    .gap(px(2.0))
-                    .child(
-                        div()
-                            .text_sm()
-                            .font_weight(FontWeight::BOLD)
-                            .text_color(TEXT_PRIMARY)
-                            .child("随机漫步"),
-                    )
-                    .child(div().text_xs().text_color(TEXT_MUTED).child("偶遇心动 · 灵感碰撞")),
-            );
-
-        // 顶层电台与精选专区（4卡片横向排布，充实且层次分明，告别大片悬空空白）
+        // 顶层只保留两个入口：红心漫游（私人电台）与今日推荐（每日 30 首）
         let top_section = v_flex()
             .w_full()
             .px_4()
@@ -402,7 +263,7 @@ impl Render for DailyView {
                     .text_xs()
                     .font_weight(FontWeight::BOLD)
                     .text_color(TEXT_MUTED)
-                    .child("私人漫游与精选专区"),
+                    .child("私人漫游与今日推荐"),
             )
             .child(
                 h_flex()
@@ -410,9 +271,7 @@ impl Render for DailyView {
                     .gap(px(12.0))
                     .items_center()
                     .child(card_radio)
-                    .child(card_daily)
-                    .child(card_radar)
-                    .child(card_shuffle),
+                    .child(card_daily),
             );
 
         // 歌曲列表标题栏

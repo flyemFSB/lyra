@@ -360,6 +360,25 @@ impl Kugou {
         Ok(library::playlist_tracks(&self.api, global_collection_id, page, 100).await?)
     }
 
+    /// 一次性获取指定歌单的全部歌曲（顺序翻页直到取完）
+    ///
+    /// 歌单页要展示完整曲目，不能只拉首页 100 首；
+    /// 上限 200 页只是上游游标异常时的死循环兜底。
+    pub async fn tracks_all(&self, global_collection_id: &str) -> Result<Vec<Song>> {
+        const PAGE_SIZE: u32 = 100;
+        const MAX_PAGES: u32 = 200;
+        let mut songs = Vec::new();
+        for page in 1..=MAX_PAGES {
+            let chunk = library::playlist_tracks(&self.api, global_collection_id, page, PAGE_SIZE).await?;
+            let last = chunk.items.is_empty() || chunk.cursor.is_none();
+            songs.extend(chunk.items);
+            if last {
+                break;
+            }
+        }
+        Ok(songs)
+    }
+
     /// 添加指定歌曲至“我喜欢”歌单
     pub async fn like(&self, song: &Song) -> Result<()> {
         Ok(playlist::add_songs(&self.api, Playlist::LIKED_LISTID, std::slice::from_ref(song)).await?)

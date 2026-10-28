@@ -222,8 +222,8 @@ impl SettingsView {
     fn vip_label(&self) -> String {
         match &self.vip {
             Some(vip) if vip.is_concept_active() => {
-                if let Some(exp) = vip.concept_expires_str() {
-                    format!("今日畅听 VIP 权益生效中（自然日有效，有效期至 {exp}）")
+                if let Some(exp) = vip.concept_natural_day_expires() {
+                    format!("今日畅听 VIP 权益生效中（自然日内有效，有效期至 {exp}）")
                 } else {
                     "今日畅听 VIP 权益生效中（自然日内有效）".to_string()
                 }
@@ -555,7 +555,12 @@ impl Render for SettingsView {
                                                             .text_color(TEXT_PRIMARY)
                                                             .child("Lyra音乐"),
                                                     )
-                                                    .child(badge("v0.1.0", ACCENT_GREEN_LIGHT, ACCENT_GREEN_HOVER)),
+                                                    // 版本号取 crate 版本（= 工作区版本），避免与 Cargo.toml 跄死
+                                                    .child(badge(
+                                                        concat!("v", env!("CARGO_PKG_VERSION")),
+                                                        ACCENT_GREEN_LIGHT,
+                                                        ACCENT_GREEN_HOVER,
+                                                    )),
                                             )
                                             .child(
                                                 div()
