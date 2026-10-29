@@ -188,11 +188,14 @@ impl SearchView {
                 if !appending {
                     songs.clear();
                 }
+                let start = songs.len();
                 songs.extend(page.items);
                 self.rows = Arc::new(build_rows(&songs));
                 self.songs = Arc::new(songs);
                 self.sizes = row_sizes(self.songs.len());
                 self.error = None;
+                let songs_for_quality = self.songs[start..].to_vec();
+                crate::views::tracks::request_qualities(&self.player, &self.backend, &songs_for_quality, cx);
             }
             Err(error) => {
                 tracing::warn!(%error, "搜索歌曲失败");
@@ -462,6 +465,7 @@ impl Render for SearchView {
         } else {
             let this = cx.entity();
             let sizes = self.sizes.clone();
+            let qualities = self.player.read(cx).qualities.clone();
             v_virtual_list(
                 this,
                 ElementId::Name(SharedString::new_static("search-results")),
@@ -481,6 +485,8 @@ impl Render for SearchView {
                                     backend: &view.backend,
                                     selected_index: None,
                                     on_select: None,
+                                    qualities: &qualities,
+                                    checked: None,
                                 },
                                 cur_hash.as_deref(),
                                 is_playing,

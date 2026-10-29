@@ -48,6 +48,12 @@ pub(crate) enum Msg {
     SettingsSaved(Result<(), String>),
     /// 移除歌曲结果
     TrackRemoved(Result<(), String>),
+    /// 收藏到「我喜欢」结果
+    Liked(Result<(), String>),
+    /// 添加到指定歌单结果
+    AddedToPlaylist(Result<(), String>),
+    /// 一批歌曲的真实最高音质（hash → Hi-Res / SQ / 空串）
+    Qualities(Vec<(String, &'static str)>),
     /// 当前曲目播放自然结束
     AudioEnded,
     /// 播放直链解析成功（附带请求序号，过期响应必须丢弃）
@@ -80,12 +86,12 @@ pub(crate) enum Msg {
     Toast(String),
     /// 已退出登录
     LoggedOut,
-    /// 触发从歌单移除单曲
-    RemoveTrack {
+    /// 触发从歌单批量移除单曲
+    RemoveTracks {
         /// 歌单 listid
         listid: String,
-        /// 歌曲 fileid
-        fileid: i64,
+        /// 歌曲内部 fileid 列表
+        fileids: Vec<i64>,
     },
 }
 

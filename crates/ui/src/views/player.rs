@@ -1,6 +1,6 @@
 //! 底部播放控制条与共享播放模型。
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
@@ -8,7 +8,7 @@ use std::time::Duration;
 use gpui_kit::assets::IconName;
 use gpui_kit::component::button::{Button, ButtonVariants};
 use gpui_kit::component::slider::{Slider, SliderEvent, SliderState, SliderValue};
-use gpui_kit::component::{Icon, Sizable as _, h_flex, v_flex};
+use gpui_kit::component::{Disableable as _, Icon, Sizable as _, h_flex, v_flex};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use lyra_api::model::Song;
@@ -18,8 +18,8 @@ use crate::bridge::{Backend, Msg, Nav};
 use crate::format::{format_duration, progress_percent};
 use crate::shell::AppShell;
 use crate::theme::{
-    ACCENT_GREEN, ACCENT_GREEN_HOVER, CARD_BG, TEXT_FAINT, TEXT_MUTED, TEXT_PRIMARY, badge, hex_rgb, song_cover,
-    sq_badge,
+    ACCENT_GREEN, ACCENT_GREEN_HOVER, CARD_BG, TEXT_FAINT, TEXT_MUTED, TEXT_PRIMARY, badge, hex_rgb, quality_badge,
+    song_cover,
 };
 use crate::views::tracks::{TrackRow, build_rows};
 
@@ -76,6 +76,22 @@ fn play_pause_icon(playing: bool) -> AnyElement {
         .into_any_element()
 }
 
+/// 循环切换至下一档音质（无损 → 高品 → 标准 → 无损）
+pub(crate) fn next_quality(current: &str) -> &'static str {
+    let choices = crate::format::QUALITY_CHOICES;
+    let index = choices.iter().position(|(id, _)| *id == current).unwrap_or(0);
+    choices[(index + 1) % choices.len()].0
+}
+
+/// 播放条上的紧凑音质标签（完整文案太长，放不下右侧控制区）
+fn quality_short(quality: &str) -> &'static str {
+    match quality {
+        "flac" => "无损",
+        "320" => "320K",
+        _ => "128K",
+    }
+}
+
 /// 播放状态共享数据模型
 pub(crate) struct PlayerModel {
     /// 音频引擎状态快照
@@ -90,6 +106,12 @@ pub(crate) struct PlayerModel {
     pub(crate) index: usize,
     /// 当前播放模式
     pub(crate) mode: PlayMode,
+    /// 当前全局音质偏好（播放取址与全局切换共用）
+    pub(crate) quality: String,
+    /// 是否处于红心漫游（私人电台）：此时播放模式固定为列表循环
+    pub(crate) radio: bool,
+    /// 歌曲真实最高音质缓存（hash → Hi-Res / SQ / 空串）
+    pub(crate) qualities: Arc<HashMap<String, &'static str>>,
     /// 随机播放用的伪随机状态（xorshift64*）
     ///
     /// 不能用纳秒时间戳：相邻两次调用可能落在同一纳秒，
@@ -99,7 +121,7 @@ pub(crate) struct PlayerModel {
 
 impl PlayerModel {
     /// 创建初始播放状态
-    pub(crate) fn new(has_engine: bool, mode: PlayMode, volume: f32) -> Self {
+    pub(crate) fn new(has_engine: bool, mode: PlayMode, volume: f32, quality: String) -> Self {
         Self {
             snapshot: Snapshot {
                 state: State::Idle,
@@ -113,6 +135,9 @@ impl PlayerModel {
             rows: Arc::new(Vec::new()),
             index: 0,
             mode,
+            quality,
+            radio: false,
+            qualities: Arc::new(HashMap::new()),
             // 用当前时间播种一次；之后完全由自身状态推进
             rng_state: AtomicU64::new(
                 std::time::SystemTime::now()
@@ -121,6 +146,25 @@ impl PlayerModel {
                     | 1,
             ),
         }
+    }
+
+    /// 合并一批歌曲的真实最高音质
+    pub(crate) fn apply_qualities(&mut self, list: Vec<(String, &'static str)>) {
+        let map = Arc::make_mut(&mut self.qualities);
+        for (hash, label) in list {
+            map.insert(hash, label);
+        }
+    }
+
+    /// 获取曲目真实最高音质标签（未知时为 `None`，不展示徽标）
+    pub(crate) fn quality_of(&self, hash: &str) -> Option<&'static str> {
+        self.qualities.get(hash).copied().filter(|label| !label.is_empty())
+    }
+
+    /// 切换全局音质偏好
+    pub(crate) fn cycle_quality(&mut self) -> String {
+        self.quality = next_quality(&self.quality).to_owned();
+        self.quality.clone()
     }
 
     /// 更新音量大小
@@ -138,8 +182,12 @@ impl PlayerModel {
         x.wrapping_mul(0x2545_F491_4F6C_DD1D)
     }
 
-    /// 循环切换播放模式
+    /// 循环切换播放模式（红心漫游期间锁定为列表循环）
     pub(crate) fn cycle_mode(&mut self) -> PlayMode {
+        if self.radio {
+            self.mode = PlayMode::ListLoop;
+            return self.mode;
+        }
         self.mode = next_mode(self.mode);
         self.mode
     }
@@ -567,7 +615,7 @@ fn value_single(value: SliderValue) -> f32 {
 
 impl Render for PlayerBar {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let (position, has_engine, volume, queue, current_index, play_mode) = {
+        let (position, has_engine, volume, queue, current_index, play_mode, radio) = {
             let model = self.player.read(cx);
             (
                 model.snapshot.position_ms,
@@ -578,6 +626,15 @@ impl Render for PlayerBar {
                 model.queue.clone(),
                 model.index,
                 model.mode,
+                model.radio,
+            )
+        };
+        // 当前曲目的真实最高音质与全局音质偏好（一次读取，渲染期零分配）
+        let (quality_badge_label, quality_pref) = {
+            let model = self.player.read(cx);
+            (
+                model.current_song().and_then(|song| model.quality_of(&song.hash)),
+                model.quality.clone(),
             )
         };
         let has_song = queue.get(current_index).is_some();
@@ -668,7 +725,9 @@ impl Render for PlayerBar {
                                             .truncate()
                                             .child(self.title.clone()),
                                     )
-                                    .when(has_song, |this| this.child(sq_badge())),
+                                    .when(quality_badge_label.is_some(), |this| {
+                                        this.child(quality_badge(quality_badge_label.unwrap_or_default()))
+                                    }),
                             )
                             .child(
                                 div()
@@ -683,7 +742,7 @@ impl Render for PlayerBar {
                             .ghost()
                             .small()
                             .icon(IconName::Heart)
-                            .tooltip("收藏当前歌曲")
+                            .tooltip("收藏当前歌曲到「我喜欢」")
                             .on_click(move |_event, _window, _cx| {
                                 let Some(song) = like_queue.get(current_index) else {
                                     return;
@@ -691,11 +750,26 @@ impl Render for PlayerBar {
                                 let song = song.clone();
                                 let app = like_backend.app();
                                 like_backend.spawn(async move {
-                                    match app.like(&song).await {
-                                        Ok(()) => Msg::Noop,
-                                        Err(error) => Msg::Toast(format!("收藏失败: {error}")),
-                                    }
+                                    Msg::Liked(app.like(&song).await.map_err(|error| error.to_string()))
                                 });
+                            }),
+                    )
+                    .child(
+                        Button::new("player_add_to")
+                            .ghost()
+                            .small()
+                            .icon(IconName::ListPlus)
+                            .tooltip("添加到歌单")
+                            .when(has_song, |this| {
+                                let shell = self.shell.clone();
+                                let queue = queue.clone();
+                                this.on_click(move |_event, _window, cx| {
+                                    let Some(song) = queue.get(current_index) else {
+                                        return;
+                                    };
+                                    let songs = vec![song.clone()];
+                                    shell.update(cx, |shell, cx| shell.open_add_to(songs, cx)).ok();
+                                })
                             }),
                     ),
             )
@@ -713,13 +787,14 @@ impl Render for PlayerBar {
                             .h(px(38.0))
                             .gap(px(12.0))
                             .items_center()
-                            // 切换播放模式
+                            // 切换播放模式（红心漫游期间固定列表循环，不可切换）
                             .child(
                                 Button::new("mode_toggle")
                                     .ghost()
                                     .small()
-                                    .icon(mode_icon(play_mode))
+                                    .icon(if radio { IconName::Repeat } else { mode_icon(play_mode) })
                                     .tooltip(self.mode_tip.clone())
+                                    .disabled(radio)
                                     .on_click(cx.listener(|this, _event, _window, cx| {
                                         let next = this.player.update(cx, |model, cx| {
                                             let m = model.cycle_mode();
@@ -734,7 +809,8 @@ impl Render for PlayerBar {
                                     .ghost()
                                     .small()
                                     .icon(IconName::SkipBack)
-                                    .tooltip("上一首")
+                                    .tooltip(if radio { "红心漫游不提供上一首" } else { "上一首" })
+                                    .disabled(radio)
                                     .on_click(move |_event, _window, cx| {
                                         shell_prev.update(cx, AppShell::play_prev).ok();
                                     }),
@@ -810,7 +886,6 @@ impl Render for PlayerBar {
                                     .child(position_text),
                             )
                             .child({
-                                let played_pct = progress_percent(position, self.player.read(cx).snapshot.duration_ms);
                                 div()
                                     .id("progress_scrub_wrap")
                                     .flex_1()
@@ -852,21 +927,13 @@ impl Render for PlayerBar {
                                         )
                                     })
                                     .when(has_song && !self.progress_hovered && !self.dragging, |this| {
-                                        // 正常播放状态：3px 极细条（无滑块手柄），高级克制美感
+                                        // 正常播放状态：3px 极细灰色条（无滑块手柄、无彩色填充）
                                         this.child(
                                             div()
                                                 .w_full()
                                                 .h(px(3.0))
                                                 .rounded_full()
-                                                .bg(hex_rgb(0xe5e7eb))
-                                                .overflow_hidden()
-                                                .child(
-                                                    div()
-                                                        .h_full()
-                                                        .rounded_full()
-                                                        .bg(ACCENT_GREEN)
-                                                        .w(relative(played_pct / 100.0)),
-                                                ),
+                                                .bg(hex_rgb(0xe5e7eb)),
                                         )
                                     })
                                     .when(has_song && (self.progress_hovered || self.dragging), |this| {
@@ -874,9 +941,10 @@ impl Render for PlayerBar {
                                         this.child(
                                             Slider::new(&self.progress)
                                                 .w_full()
-                                                // 必须显式着色：默认主题的滑块是近白色、手柄是黑色
-                                                .bg(ACCENT_GREEN)
-                                                .text_color(ACCENT_GREEN),
+                                                // 必须显式着色：默认主题的滑块是近白色、手柄是黑色；
+                                                // 这里统一走灰色，不保留绿色填充
+                                                .bg(hex_rgb(0xe5e7eb))
+                                                .text_color(hex_rgb(0xcbd5e1)),
                                         )
                                             .when_some(self.hover_scrub_ratio, |this, ratio| {
                                                 let duration = self.player.read(cx).snapshot.duration_ms;
@@ -913,10 +981,11 @@ impl Render for PlayerBar {
             // 音量与播放队列
             .child(
                 h_flex()
-                    .w(px(250.0))
+                    // 比左侧宽：音量滑轨 112px + 音质切换按钮 + 队列按钮都挤在这一侧
+                    .w(px(312.0))
                     .justify_end()
                     .items_center()
-                    .gap(px(10.0))
+                    .gap(px(8.0))
                     .when(!has_engine, |this| {
                         this.child(badge("无音频设备", hsla(0.0, 0.85, 0.95, 1.0), hsla(0.0, 0.85, 0.45, 1.0)))
                     })
@@ -995,9 +1064,10 @@ impl Render for PlayerBar {
                                     .child(
                                         Slider::new(&self.volume)
                                             .w_full()
-                                            // 默认主题的滑轨是近白色，白底上看不见已填充的部分
-                                            .bg(ACCENT_GREEN)
-                                            .text_color(ACCENT_GREEN),
+                                            // 默认主题的滑轨是近白色，白底上看不见已填充的部分；
+                                            // 统一走灰色，不保留绿色填充
+                                            .bg(hex_rgb(0xe5e7eb))
+                                            .text_color(hex_rgb(0xcbd5e1)),
                                     )
                                     // 数值气泡跟随滑块，拖拽时能直接看到落在哪个值上
                                     .when(self.volume_hovered || self.volume_dragging, |this| {
@@ -1028,6 +1098,30 @@ impl Render for PlayerBar {
                                     .child(format!("{vol_num}%")),
                             ),
                     )
+                    // 全局音质切换（播放区域直接切换，持久化到设置）
+                    .child(
+                        Button::new("quality_toggle")
+                            .ghost()
+                            .small()
+                            .label(quality_short(&quality_pref))
+                            .tooltip("点击切换全局音质偏好")
+                            .on_click(cx.listener(|this, _event, _window, cx| {
+                                let next = this.player.update(cx, |model, model_cx| {
+                                    let quality = model.cycle_quality();
+                                    model_cx.notify();
+                                    quality
+                                });
+                                let app = this.backend.app();
+                                this.backend.spawn(async move {
+                                    match app.update_settings(|settings| settings.quality = next) {
+                                        Ok(()) => Msg::Noop,
+                                        Err(error) => Msg::Toast(format!("保存音质失败: {error}")),
+                                    }
+                                });
+                                // 当前曲目立即用新音质重播，不用等下一首
+                                this.shell.update(cx, AppShell::replay_current).ok();
+                            })),
+                    )
                     // 播放队列开关
                     .child(
                         Button::new("queue_drawer_toggle")
@@ -1052,7 +1146,7 @@ mod tests {
 
     use lyra_api::model::Song;
 
-    use super::{PlayMode, PlayerModel};
+    use super::{PlayMode, PlayerModel, next_quality};
 
     /// 构建包含 3 首曲目的测试播放模型
     fn model(mode: PlayMode, index: usize) -> PlayerModel {
@@ -1063,7 +1157,7 @@ mod tests {
                 ..Song::default()
             })
             .collect();
-        let mut model = PlayerModel::new(true, mode, 0.8);
+        let mut model = PlayerModel::new(true, mode, 0.8, "flac".to_owned());
         model.set_queue(Arc::new(songs), index);
         model
     }
@@ -1071,28 +1165,84 @@ mod tests {
     #[test]
     fn persisted_mode_is_what_the_session_starts_with() {
         // 恢复持久化的播放模式
-        assert_eq!(PlayerModel::new(true, PlayMode::Shuffle, 0.8).mode, PlayMode::Shuffle);
         assert_eq!(
-            PlayerModel::new(true, PlayMode::SingleLoop, 0.8).mode,
+            PlayerModel::new(true, PlayMode::Shuffle, 0.8, "flac".to_owned()).mode,
+            PlayMode::Shuffle
+        );
+        assert_eq!(
+            PlayerModel::new(true, PlayMode::SingleLoop, 0.8, "flac".to_owned()).mode,
             PlayMode::SingleLoop
         );
-        assert_eq!(PlayerModel::new(true, PlayMode::ListLoop, 0.8).mode, PlayMode::ListLoop);
+        assert_eq!(
+            PlayerModel::new(true, PlayMode::ListLoop, 0.8, "flac".to_owned()).mode,
+            PlayMode::ListLoop
+        );
     }
 
     #[test]
     fn persisted_volume_is_what_the_session_starts_with() {
         // 恢复持久化的音量设置（含范围限制）
-        assert!((PlayerModel::new(true, PlayMode::ListLoop, 0.35).snapshot.volume - 0.35).abs() < f32::EPSILON);
-        assert!((PlayerModel::new(true, PlayMode::ListLoop, 1.5).snapshot.volume - 1.0).abs() < f32::EPSILON);
-        assert!((PlayerModel::new(true, PlayMode::ListLoop, -0.2).snapshot.volume - 0.0).abs() < f32::EPSILON);
+        assert!(
+            (PlayerModel::new(true, PlayMode::ListLoop, 0.35, "flac".to_owned())
+                .snapshot
+                .volume
+                - 0.35)
+                .abs()
+                < f32::EPSILON
+        );
+        assert!(
+            (PlayerModel::new(true, PlayMode::ListLoop, 1.5, "flac".to_owned())
+                .snapshot
+                .volume
+                - 1.0)
+                .abs()
+                < f32::EPSILON
+        );
+        assert!(
+            (PlayerModel::new(true, PlayMode::ListLoop, -0.2, "flac".to_owned())
+                .snapshot
+                .volume
+                - 0.0)
+                .abs()
+                < f32::EPSILON
+        );
     }
 
     #[test]
     fn cycling_visits_every_mode_and_wraps() {
-        let mut model = PlayerModel::new(true, PlayMode::ListLoop, 0.8);
+        let mut model = PlayerModel::new(true, PlayMode::ListLoop, 0.8, "flac".to_owned());
         assert_eq!(model.cycle_mode(), PlayMode::SingleLoop);
         assert_eq!(model.cycle_mode(), PlayMode::Shuffle);
         assert_eq!(model.cycle_mode(), PlayMode::ListLoop);
+    }
+
+    #[test]
+    fn quality_cycles_through_the_settings_choices_and_wraps() {
+        assert_eq!(next_quality("flac"), "320");
+        assert_eq!(next_quality("320"), "128");
+        assert_eq!(next_quality("128"), "flac");
+        // 未知/空值从第一档开始，不能停在一个非法音质上
+        assert_eq!(next_quality(""), "320");
+        let mut model = PlayerModel::new(true, PlayMode::ListLoop, 0.8, "flac".to_owned());
+        assert_eq!(model.cycle_quality(), "320");
+        assert_eq!(model.quality, "320", "切换结果必须写回共享模型（全局生效）");
+    }
+
+    #[test]
+    fn radio_locks_the_mode_to_list_loop() {
+        let mut model = PlayerModel::new(true, PlayMode::Shuffle, 0.8, "flac".to_owned());
+        model.radio = true;
+        assert_eq!(model.cycle_mode(), PlayMode::ListLoop);
+        assert_eq!(model.cycle_mode(), PlayMode::ListLoop, "漫游期间模式不得被改走");
+    }
+
+    #[test]
+    fn quality_labels_hide_the_badge_when_unknown() {
+        let mut model = PlayerModel::new(true, PlayMode::ListLoop, 0.8, "flac".to_owned());
+        assert_eq!(model.quality_of("abc"), None, "未知歌曲不展示徽标");
+        model.apply_qualities(vec![("abc".to_owned(), ""), ("sq".to_owned(), "SQ")]);
+        assert_eq!(model.quality_of("abc"), None, "查过但无高音质的歌也不展示");
+        assert_eq!(model.quality_of("sq"), Some("SQ"));
     }
 
     #[test]
@@ -1113,7 +1263,7 @@ mod tests {
 
     #[test]
     fn empty_queue_has_no_next_or_previous() {
-        let model = PlayerModel::new(true, PlayMode::ListLoop, 0.8);
+        let model = PlayerModel::new(true, PlayMode::ListLoop, 0.8, "flac".to_owned());
         assert_eq!(model.next_index(), None);
         assert_eq!(model.prev_index(), None);
         assert!(model.current_song().is_none());

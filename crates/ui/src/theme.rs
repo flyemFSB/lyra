@@ -87,8 +87,15 @@ pub(crate) fn badge(text: impl Into<SharedString>, bg: impl Into<Hsla>, fg: impl
         .child(text.into())
 }
 
-/// 构造 SQ 无损音质微标（极简低对比度中性灰底微标，参考 Apple Music）
-pub(crate) fn sq_badge() -> impl IntoElement {
+/// 构造音质微标（只接受真实最高音质：Hi-Res / SQ，其余不展示）
+///
+/// 标签是 `'static` 字面量：渲染期不分配字符串。
+pub(crate) fn quality_badge(label: &'static str) -> AnyElement {
+    let text = match label {
+        "Hi-Res" => SharedString::new_static("Hi-Res"),
+        "SQ" => SharedString::new_static("SQ"),
+        _ => return div().into_any_element(),
+    };
     div()
         .px(px(4.0))
         .py(px(0.5))
@@ -99,7 +106,8 @@ pub(crate) fn sq_badge() -> impl IntoElement {
         .text_color(hex_rgb(0x6b7280))
         .text_size(px(9.0))
         .font_weight(FontWeight::SEMIBOLD)
-        .child("SQ")
+        .child(text)
+        .into_any_element()
 }
 
 /// 构造骨架屏微光条纹占位组件（用于时长等未就绪数据，消除 0:00 悬空感）

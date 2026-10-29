@@ -1,8 +1,8 @@
 ; Lyra Windows Inno Setup 安装包制作脚本。
-; 支持命令行传入参数：ISCC /DAppVersion=0.2.0 /DSourceDir=..\target\release /DOutputDir=..\target\dist lyra.iss
+; 支持命令行传入参数：ISCC /DAppVersion=0.3.0 /DSourceDir=..\target\release /DOutputDir=..\target\dist lyra.iss
 
 #ifndef AppVersion
-  #define AppVersion "0.2.0"
+  #define AppVersion "0.3.0"
 #endif
 
 #ifndef SourceDir

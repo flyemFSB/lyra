@@ -1,10 +1,11 @@
 //! 通用曲目行与桌面端表格渲染组件。
 
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use gpui_kit::assets::IconName;
 use gpui_kit::component::button::{Button, ButtonVariants};
-use gpui_kit::component::{Sizable as _, h_flex};
+use gpui_kit::component::{Icon, Sizable as _, h_flex};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use lyra_api::model::Song;
@@ -14,7 +15,7 @@ use crate::format::format_duration;
 use crate::shell::AppShell;
 use crate::theme::{
     ACCENT_GREEN, CARD_BORDER, ROW_HEIGHT, SURFACE_HOVER, TEXT_FAINT, TEXT_MUTED, TEXT_PRIMARY, audio_equalizer,
-    friendly_error_message, hex_rgb, skeleton_shimmer, song_cover, sq_badge,
+    hex_rgb, quality_badge, skeleton_shimmer, song_cover,
 };
 use crate::views::player::PlayerModel;
 
@@ -71,6 +72,10 @@ pub(crate) struct RowContext<'a> {
     pub(crate) selected_index: Option<usize>,
     /// 单击行时的回调（同时写入选中态，供键盘导航复用）
     pub(crate) on_select: Option<SelectCallback>,
+    /// 歌曲真实最高音质缓存（hash → Hi-Res / SQ / 空串）
+    pub(crate) qualities: &'a HashMap<String, &'static str>,
+    /// 批量选择态：`Some` 表示处于批量模式，集合内为已勾选的行下标
+    pub(crate) checked: Option<&'a HashSet<usize>>,
 }
 
 /// 单击行回调函数类型
@@ -93,6 +98,34 @@ pub(crate) fn current_play_state(player: &Entity<PlayerModel>, cx: &App) -> (Opt
         model.current_song().map(|song| song.hash.clone()),
         model.snapshot.state == lyra_audio::State::Playing,
     )
+}
+
+/// 为一批歌曲请求真实最高音质（已查询过的 hash 不重复请求）
+///
+/// 结果以 `Msg::Qualities` 回到外壳并写入共享播放模型。
+/// 这里不能改走 `shell.update`：视图的 `on_*` 回调本身就在 shell 的一次
+/// update 里执行，重入 update 会直接 panic。
+pub(crate) fn request_qualities(player: &Entity<PlayerModel>, backend: &Backend, songs: &[Song], cx: &App) {
+    let known = player.read(cx).qualities.clone();
+    let mut seen = HashSet::new();
+    let pending: Vec<Song> = songs
+        .iter()
+        .filter(|song| !song.hash.is_empty() && !known.contains_key(&song.hash) && seen.insert(song.hash.clone()))
+        .cloned()
+        .collect();
+    if pending.is_empty() {
+        return;
+    }
+    let app = backend.app();
+    backend.spawn(async move {
+        match app.song_qualities(&pending).await {
+            Ok(list) => Msg::Qualities(list),
+            Err(error) => {
+                tracing::warn!(%error, "获取歌曲音质失败");
+                Msg::Noop
+            }
+        }
+    });
 }
 
 /// 桌面端表格表头（轻量 12px 浅灰表头，单行多列对齐）
@@ -172,6 +205,9 @@ pub(crate) fn track_row(
     let like_backend = ctx.backend.clone();
     let is_selected = ctx.selected_index == Some(index);
     let on_select = ctx.on_select.clone();
+    let batch = ctx.checked.is_some();
+    let is_checked = ctx.checked.is_some_and(|set| set.contains(&index));
+    let quality = ctx.qualities.get(&song.hash).copied().unwrap_or_default();
 
     let track = h_flex()
         .id(("track", index))
@@ -185,10 +221,10 @@ pub(crate) fn track_row(
         .cursor_pointer()
         .items_center()
         .when(is_current, |this| this.bg(hex_rgb(0xf0fdf4)))
-        .when(!is_current && is_selected, |this| {
+        .when(!is_current && (is_selected || is_checked), |this| {
             this.bg(hex_rgb(0xf3f4f6)).border_1().border_color(hex_rgb(0xd1d5db))
         })
-        .when(!is_current && !is_selected, |this| {
+        .when(!is_current && !is_selected && !is_checked, |this| {
             this.hover(|style| style.bg(SURFACE_HOVER))
         })
         .on_click(move |event, window, cx| {
@@ -200,11 +236,15 @@ pub(crate) fn track_row(
                 // 选中态只用于键盘导航高亮，单击仍然直接播放
                 select_fn(index, window, cx);
             }
+            // 批量模式下单击只勾选，不切歌
+            if batch {
+                return;
+            }
             play_shell
                 .update(cx, |shell, cx| shell.play_queue(play_queue.clone(), index, cx))
                 .ok();
         })
-        // 1. [ # 序号 / 3柱声波均衡器 (40px 固定居中) ]
+        // 1. [ 批量勾选框 / # 序号 / 3柱声波均衡器 (40px 固定居中) ]
         .child(
             div()
                 .w(px(40.0))
@@ -212,10 +252,16 @@ pub(crate) fn track_row(
                 .flex()
                 .items_center()
                 .justify_center()
-                .when(is_current, |this| {
+                .when(is_checked, |this| {
+                    this.child(Icon::new(IconName::SquareCheck).size(px(16.0)).text_color(ACCENT_GREEN))
+                })
+                .when(!is_checked && batch, |this| {
+                    this.child(Icon::new(IconName::Square).size(px(16.0)).text_color(TEXT_FAINT))
+                })
+                .when(!batch && is_current, |this| {
                     this.child(audio_equalizer(is_playing, ("track_eq", index)))
                 })
-                .when(!is_current, |this| {
+                .when(!batch && !is_current, |this| {
                     this.child(
                         div()
                             .text_xs()
@@ -256,7 +302,7 @@ pub(crate) fn track_row(
                                 .truncate()
                                 .child(row.title.clone()),
                         )
-                        .child(sq_badge()),
+                        .child(quality_badge(quality)),
                 ),
         )
         // 3. [ 歌手列 (25% 弹性拉伸)：单独一列，悬浮高亮 ]
@@ -289,6 +335,8 @@ pub(crate) fn track_row(
             let fileid = song.fileid;
             let title_for_more = row.title.clone();
             let singer_for_more = row.singer.clone();
+            let add_shell = ctx.shell.clone();
+            let add_song = song.clone();
 
             div()
                 .w(px(100.0))
@@ -312,7 +360,7 @@ pub(crate) fn track_row(
                             div().child(row.duration.clone()).into_any_element()
                         }),
                 )
-                // 鼠标 Hover 到该行时时长淡出，浮现 [ 爱心 ] 与 [ ··· 更多 ]
+                // 鼠标 Hover 到该行时时长淡出，浮现 [ 爱心 ] [ 添加 ] [ ··· 更多 ]
                 .child(
                     h_flex()
                         .absolute()
@@ -321,14 +369,17 @@ pub(crate) fn track_row(
                         .gap(px(2.0))
                         .opacity(0.0)
                         .group_hover("track_row", |s| s.opacity(1.0))
-                        // [ 爱心 ]
+                        // 按钮不能再屏蔽 behind hitbox：block_mouse_except_scroll 会让
+                        // 行自身的 hover 判定失效，按钮一被悬浮就整体淡出且点不到。
+                        // 改用 mouse-down 阻止冒泡，行不会收到点击，自然不会再切歌。
+                        .on_mouse_down(MouseButton::Left, |_event, _window, cx| cx.stop_propagation())
+                        // [ 爱心 ] 收藏到我喜欢
                         .child(
                             Button::new(("like", index))
                                 .ghost()
                                 .small()
                                 .icon(IconName::Heart)
-                                .tooltip("收藏到我喜欢")
-                                .block_mouse_except_scroll()
+                                .tooltip("收藏到「我喜欢」")
                                 .on_click(move |_event, _window, _cx| {
                                     let Some(song) = like_queue.get(index) else {
                                         return;
@@ -336,33 +387,34 @@ pub(crate) fn track_row(
                                     let song = song.clone();
                                     let app = like_backend.app();
                                     like_backend.spawn(async move {
-                                        match app.like(&song).await {
-                                            Ok(()) => Msg::Toast("已添加到我喜欢".to_owned()),
-                                            Err(error) => {
-                                                tracing::warn!(%error, "收藏歌曲失败");
-                                                Msg::Toast(friendly_error_message(&error.to_string()))
-                                            }
-                                        }
+                                        Msg::Liked(app.like(&song).await.map_err(|error| error.to_string()))
                                     });
                                 }),
                         )
-                        // [ ··· 更多操作 ]（从歌单移除 / 复制歌名，拒绝常驻垃圾桶图标）
+                        // [ 添加 ] 添加到任意自建歌单
+                        .child(
+                            Button::new(("add_to", index))
+                                .ghost()
+                                .small()
+                                .icon(IconName::ListPlus)
+                                .tooltip("添加到歌单")
+                                .on_click(move |_event, _window, cx| {
+                                    let songs = vec![add_song.clone()];
+                                    add_shell.update(cx, |shell, cx| shell.open_add_to(songs, cx)).ok();
+                                }),
+                        )
+                        // [ ··· 更多操作 ]（从歌单移除 / 复制歌名）
                         .child(
                             Button::new(("more", index))
                                 .ghost()
                                 .small()
                                 .icon(IconName::Ellipsis)
-                                .tooltip(if removable.is_some() {
-                                    "从歌单移除"
-                                } else {
-                                    "复制歌名"
-                                })
-                                .block_mouse_except_scroll()
+                                .tooltip(if removable.is_some() { "从歌单移除" } else { "复制歌名" })
                                 .on_click(move |_event, _window, cx| {
                                     if let Some(listid) = &removable {
-                                        remove_backend.send(Msg::RemoveTrack {
+                                        remove_backend.send(Msg::RemoveTracks {
                                             listid: listid.to_string(),
-                                            fileid,
+                                            fileids: vec![fileid],
                                         });
                                     } else {
                                         cx.write_to_clipboard(ClipboardItem::new_string(format!(

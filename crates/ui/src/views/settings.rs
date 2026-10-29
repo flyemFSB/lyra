@@ -16,6 +16,8 @@ use crate::theme::{
     VIP_GOLD_MUTED, VIP_GOLD_TEXT, badge, hex_rgb, title,
 };
 
+use crate::views::player::PlayerModel;
+
 /// 缓存容量预设选项
 const CACHE_PRESETS: &[(&str, u64)] = &[
     ("512 MiB", 512 * 1024 * 1024),
@@ -30,6 +32,8 @@ const DEFAULT_MAX_CACHE_BYTES: u64 = CACHE_PRESETS[2].1;
 /// 设置视图
 pub(crate) struct SettingsView {
     backend: Backend,
+    /// 共享播放模型：音质偏好以它为准，设置页与播放条双向同步
+    player: Entity<PlayerModel>,
     quality: String,
     cache_dir: Entity<InputState>,
     saved_cache_dir: String,
@@ -42,7 +46,12 @@ pub(crate) struct SettingsView {
 
 impl SettingsView {
     /// 创建设置视图
-    pub(crate) fn new(backend: Backend, window: &mut Window, cx: &mut Context<Self>) -> Self {
+    pub(crate) fn new(
+        backend: Backend,
+        player: Entity<PlayerModel>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Self {
         let settings = backend.app().settings().ok();
         let quality = settings
             .as_ref()
@@ -62,6 +71,7 @@ impl SettingsView {
         });
         Self {
             backend,
+            player,
             quality,
             cache_dir,
             saved_cache_dir,
@@ -74,6 +84,12 @@ impl SettingsView {
 
     /// 确保会员状态已加载
     pub(crate) fn ensure(&mut self, cx: &mut Context<Self>) {
+        // 音质可能已在播放条上切换过：进入设置页时以共享模型为准
+        let current = self.player.read(cx).quality.clone();
+        if current != self.quality {
+            self.quality = current;
+            cx.notify();
+        }
         if self.loaded {
             return;
         }
@@ -144,6 +160,11 @@ impl SettingsView {
     /// 修改音质偏好并持久化
     fn set_quality(&mut self, quality: &str, cx: &mut Context<Self>) {
         quality.clone_into(&mut self.quality);
+        // 同步到共享播放模型：正在播放的取址与播放条标签立即生效
+        self.player.update(cx, |model, model_cx| {
+            quality.clone_into(&mut model.quality);
+            model_cx.notify();
+        });
         let app = self.backend.app();
         let chosen = self.quality.clone();
         self.backend.spawn(async move {

@@ -16,7 +16,7 @@ use crate::bridge::Backend;
 use crate::format::lyric_index;
 use crate::palette::{AlbumPalette, fallback_palette};
 use crate::shell::AppShell;
-use crate::theme::{TEXT_MUTED, TEXT_PRIMARY, hex_rgb, notice_with_icon, song_cover, sq_badge};
+use crate::theme::{TEXT_MUTED, TEXT_PRIMARY, hex_rgb, notice_with_icon, quality_badge, song_cover};
 use crate::views::player::PlayerModel;
 
 /// 歌词视图
@@ -417,6 +417,12 @@ impl Render for LyricsView {
         let current = lyric_index(&self.lines, position);
         self.schedule_follow(current, window, cx);
         let shell_exit = self.shell.clone();
+        // 当前曲目的真实最高音质（Hi-Res / SQ / 不展示）
+        let quality = self
+            .current_hash
+            .as_deref()
+            .and_then(|hash| self.player.read(cx).quality_of(hash))
+            .unwrap_or_default();
 
         let turntable_stage = self.vinyl_turntable_stage(is_playing);
         let lyric_stream = self.lyric_stream(current, cx);
@@ -447,7 +453,7 @@ impl Render for LyricsView {
                                     .truncate()
                                     .child(self.title.clone()),
                             )
-                            .child(sq_badge()),
+                            .child(quality_badge(quality)),
                     )
                     .child(
                         div()

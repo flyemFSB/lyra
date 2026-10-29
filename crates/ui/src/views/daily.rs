@@ -32,6 +32,8 @@ pub(crate) struct DailyView {
     focus_handle: FocusHandle,
     /// 选中的曲目索引（键盘导航/单击选中）
     pub(crate) selected_index: Option<usize>,
+    /// 上一次观察到的播放曲目哈希（用于清除过期选中态）
+    last_current: Option<String>,
     loading: bool,
     loaded: bool,
     error: Option<SharedString>,
@@ -46,7 +48,14 @@ impl DailyView {
         player: Entity<PlayerModel>,
         cx: &mut Context<Self>,
     ) -> Self {
-        let sub = cx.observe(&player, |_this, _player, cx| {
+        let sub = cx.observe(&player, |this, player, cx| {
+            // 切歌后旧的灰色选中态必须清掉，否则上一首会同时留着灰底，
+            // 让人误以为两首同时在播。
+            let current = player.read(cx).current_hash().map(str::to_owned);
+            if current != this.last_current {
+                this.last_current = current;
+                this.selected_index = None;
+            }
             cx.notify();
         });
         Self {
@@ -59,6 +68,7 @@ impl DailyView {
             scroll_handle: VirtualListScrollHandle::new(),
             focus_handle: cx.focus_handle(),
             selected_index: None,
+            last_current: None,
             loading: false,
             loaded: false,
             error: None,
@@ -73,6 +83,7 @@ impl DailyView {
         self.sizes = row_sizes(0);
         self.scroll_handle = VirtualListScrollHandle::new();
         self.selected_index = None;
+        self.last_current = None;
         self.loading = false;
         self.loaded = false;
         self.error = None;
@@ -109,6 +120,8 @@ impl DailyView {
                 self.sizes = row_sizes(self.songs.len());
                 self.loaded = true;
                 self.error = None;
+                let songs_for_quality = (*self.songs).clone();
+                crate::views::tracks::request_qualities(&self.player, &self.backend, &songs_for_quality, cx);
             }
             Err(error) => {
                 tracing::warn!(%error, "获取每日推荐失败");
@@ -322,6 +335,7 @@ impl Render for DailyView {
             let this = cx.entity();
             let sizes = self.sizes.clone();
             let this_for_select = this.clone();
+            let qualities = self.player.read(cx).qualities.clone();
             v_virtual_list(
                 this,
                 ElementId::Name(SharedString::new_static("daily-tracks")),
@@ -348,6 +362,8 @@ impl Render for DailyView {
                                     backend: &view.backend,
                                     selected_index: view.selected_index,
                                     on_select: Some(on_select.clone()),
+                                    qualities: &qualities,
+                                    checked: None,
                                 },
                                 cur_hash.as_deref(),
                                 is_playing,

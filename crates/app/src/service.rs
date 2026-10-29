@@ -17,6 +17,9 @@ use crate::policy::{is_replacement, pick_quality};
 /// 换源搜索候选上限
 const REPLACEMENT_CANDIDATES: u32 = 10;
 
+/// 单次音乐质查询的歌曲上限（上游对单请求资源数有限制）
+const QUALITY_BATCH: usize = 50;
+
 /// 搜索结果单页条数（与上游默认一致）
 const SEARCH_PAGE_SIZE: u32 = 30;
 
@@ -384,6 +387,30 @@ impl Kugou {
         Ok(playlist::add_songs(&self.api, Playlist::LIKED_LISTID, std::slice::from_ref(song)).await?)
     }
 
+    /// 添加指定歌曲至任意歌单
+    pub async fn add_to_playlist(&self, listid: &str, songs: &[Song]) -> Result<()> {
+        Ok(playlist::add_songs(&self.api, listid, songs).await?)
+    }
+
+    /// 批量查询歌曲的真实最高音质标签
+    ///
+    /// 返回与入参一一对应的 `(hash, 标签)`：标签只可能是 `Hi-Res`、`SQ` 或空串，
+    /// 供列表在歌名后展示真实音质而不是固定徽标。
+    pub async fn song_qualities(&self, songs: &[Song]) -> Result<Vec<(String, &'static str)>> {
+        let mut out = Vec::with_capacity(songs.len());
+        for chunk in songs.chunks(QUALITY_BATCH) {
+            let items: Vec<privilege::RightRequest> = chunk.iter().map(privilege::RightRequest::from_song).collect();
+            let rights = privilege::privilege(&self.api, &items, Some("all")).await?;
+            out.extend(
+                chunk
+                    .iter()
+                    .map(|song| song.hash.clone())
+                    .zip(rights.iter().map(top_quality_label)),
+            );
+        }
+        Ok(out)
+    }
+
     /// 从指定歌单中移除歌曲
     pub async fn remove(&self, listid: &str, fileids: &[i64]) -> Result<()> {
         Ok(playlist::delete_songs(&self.api, listid, fileids).await?)
@@ -550,6 +577,31 @@ impl Kugou {
     }
 }
 
+/// 从音质权益矩阵中取出该曲目的真实最高音质标签
+///
+/// 只区分 `Hi-Res`（高解析及以上）与 `SQ`（无损），标准/高品音质不展示徽标。
+/// 判定依据是上游是否**存在**该音质，而不是当前账号能否播放：
+/// 徽标描述的是这首歌本身的最高规格。
+#[must_use]
+pub fn top_quality_label(rights: &SongRights) -> &'static str {
+    let best = rights
+        .qualities
+        .iter()
+        .filter(|quality| quality.exists)
+        .max_by_key(|quality| {
+            privilege::QUALITY_ORDER
+                .iter()
+                .position(|order| *order == quality.quality)
+                .unwrap_or(0)
+        })
+        .map(|quality| quality.quality.as_str());
+    match best {
+        Some("high" | "super" | "viper_clear" | "viper_tape" | "viper_atmos" | "multitrack") => "Hi-Res",
+        Some("flac") => "SQ",
+        _ => "",
+    }
+}
+
 /// 校验是否为 11 位有效手机号
 #[must_use]
 pub fn is_mobile(mobile: &str) -> bool {
@@ -600,6 +652,52 @@ mod tests {
         assert!(!is_mobile("138001380000"), "12 位不合法");
         assert!(!is_mobile("1380013800a"));
         assert!(!is_mobile(""));
+    }
+
+    #[test]
+    fn top_quality_only_reports_hi_res_or_sq() {
+        use lyra_api::model::QualityRight;
+
+        let right = |quality: &str| QualityRight {
+            quality: quality.to_owned(),
+            exists: true,
+            ..QualityRight::default()
+        };
+        let label = |qualities: Vec<QualityRight>| {
+            top_quality_label(&SongRights {
+                qualities,
+                ..SongRights::default()
+            })
+        };
+
+        assert_eq!(label(vec![right("128"), right("320")]), "", "标准音质不挂徽标");
+        assert_eq!(label(vec![right("128"), right("flac")]), "SQ");
+        assert_eq!(
+            label(vec![right("flac"), right("viper_tape")]),
+            "Hi-Res",
+            "母带压过无损"
+        );
+        assert_eq!(label(vec![right("high")]), "Hi-Res");
+        // 上游存在但账号无权播放的音质也属于这首歌的最高规格
+        assert_eq!(
+            label(vec![QualityRight {
+                quality: "flac".to_owned(),
+                exists: true,
+                obtainable: false,
+                ..QualityRight::default()
+            }]),
+            "SQ"
+        );
+        // 上游没有的音质不能参与判定
+        assert_eq!(
+            label(vec![QualityRight {
+                quality: "flac".to_owned(),
+                exists: false,
+                ..QualityRight::default()
+            }]),
+            ""
+        );
+        assert_eq!(label(vec![]), "");
     }
 
     #[test]

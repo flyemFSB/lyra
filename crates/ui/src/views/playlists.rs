@@ -1,12 +1,16 @@
 //! 歌单详情与曲目列表视图。
 
+use std::collections::HashSet;
 use std::rc::Rc;
 use std::sync::Arc;
 
 use gpui_kit::assets::IconName;
 use gpui_kit::component::button::{Button, ButtonVariants};
 use gpui_kit::component::scroll::ScrollableElement as _;
-use gpui_kit::component::{Disableable as _, Icon, VirtualListScrollHandle, h_flex, v_flex, v_virtual_list};
+use gpui_kit::component::{
+    Disableable as _, Icon, Sizable as _, VirtualListScrollHandle, h_flex, v_flex, v_virtual_list,
+};
+use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use lyra_api::model::{Playlist, Song};
 
@@ -17,7 +21,9 @@ use crate::theme::{
     hex_rgb, notice_with_icon, row_sizes, song_cover,
 };
 use crate::views::player::PlayerModel;
-use crate::views::tracks::{RowContext, TrackRow, build_rows, current_play_state, table_header, track_row};
+use crate::views::tracks::{
+    RowContext, SelectCallback, TrackRow, build_rows, current_play_state, table_header, track_row,
+};
 
 /// 歌单分类标签页
 #[derive(Clone, Copy, PartialEq, Eq, Default)]
@@ -62,6 +68,10 @@ pub(crate) struct PlaylistsView {
     listid: Option<String>,
     /// 请求序号（用于丢弃过期响应）
     request_seq: u64,
+    /// 是否处于批量选择模式
+    batch: bool,
+    /// 批量选择的行下标（Arc 让每帧读取零分配）
+    checked: Arc<HashSet<usize>>,
     /// 标签页切换序号（驱动过渡动效）
     pub(crate) tab_seq: u64,
     _sub: Subscription,
@@ -97,6 +107,8 @@ impl PlaylistsView {
             heading: SharedString::new_static("歌单"),
             listid: None,
             request_seq: 0,
+            batch: false,
+            checked: Arc::new(HashSet::new()),
             tab_seq: 1,
             _sub: sub,
         }
@@ -140,6 +152,8 @@ impl PlaylistsView {
         self.error = None;
         self.heading = SharedString::new_static("歌单");
         self.listid = None;
+        self.batch = false;
+        self.checked = Arc::new(HashSet::new());
         self.request_seq += 1;
         cx.notify();
     }
@@ -214,6 +228,8 @@ impl PlaylistsView {
         self.listid = Some(list.listid.clone());
         self.loading_tracks = true;
         self.error = None;
+        self.batch = false;
+        self.checked = Arc::new(HashSet::new());
         self.scroll_handle = VirtualListScrollHandle::new();
         self.request_seq += 1;
         let seq = self.request_seq;
@@ -236,6 +252,8 @@ impl PlaylistsView {
             Ok(songs) => {
                 self.rows = Arc::new(build_rows(&songs));
                 self.sizes = row_sizes(songs.len());
+                // 只为尚未查询过的歌曲拉取真实最高音质（仅 Hi-Res / SQ 展示徽标）
+                crate::views::tracks::request_qualities(&self.player, &self.backend, &songs, cx);
                 self.songs = Arc::new(songs);
                 self.error = None;
             }
@@ -257,8 +275,68 @@ impl PlaylistsView {
         }
     }
 
+    /// 进入/退出批量选择模式
+    fn toggle_batch(&mut self, cx: &mut Context<Self>) {
+        self.batch = !self.batch;
+        self.checked = Arc::new(HashSet::new());
+        cx.notify();
+    }
+
+    /// 切换单行勾选状态（批量模式下的单击行为）
+    fn toggle_checked(&mut self, index: usize, cx: &mut Context<Self>) {
+        let checked = Arc::make_mut(&mut self.checked);
+        if !checked.remove(&index) {
+            checked.insert(index);
+        }
+        cx.notify();
+    }
+
+    /// 全选当前已加载的全部曲目
+    fn check_all(&mut self, cx: &mut Context<Self>) {
+        self.checked = Arc::new((0..self.songs.len()).collect());
+        cx.notify();
+    }
+
+    /// 当前勾选的歌曲（按列表顺序）
+    fn checked_songs(&self) -> Vec<Song> {
+        let mut indices: Vec<usize> = self.checked.iter().copied().collect();
+        indices.sort_unstable();
+        indices
+            .into_iter()
+            .filter_map(|index| self.songs.get(index).cloned())
+            .collect()
+    }
+
+    /// 从当前歌单批量移除勾选的歌曲
+    fn remove_checked(&mut self, _cx: &mut Context<Self>) {
+        let Some(listid) = self.listid.clone() else {
+            return;
+        };
+        let mut indices: Vec<usize> = self.checked.iter().copied().collect();
+        indices.sort_unstable();
+        let fileids: Vec<i64> = indices
+            .into_iter()
+            .filter_map(|index| self.songs.get(index).map(|song| song.fileid))
+            .filter(|fileid| *fileid != 0)
+            .collect();
+        if fileids.is_empty() {
+            self.backend.send(Msg::Toast("所选歌曲缺少可移除的内部 ID".to_owned()));
+            return;
+        }
+        self.backend.send(Msg::RemoveTracks { listid, fileids });
+    }
+
     /// 渲染单首曲目行
-    fn row(&self, index: usize, cur_hash: Option<&str>, is_playing: bool, listid: Option<&SharedString>) -> AnyElement {
+    fn row(
+        &self,
+        index: usize,
+        play: (Option<&str>, bool),
+        listid: Option<&SharedString>,
+        qualities: &std::collections::HashMap<String, &'static str>,
+        checked: Option<&HashSet<usize>>,
+        on_select: Option<SelectCallback>,
+    ) -> AnyElement {
+        let (cur_hash, is_playing) = play;
         let this_hash = self.songs.get(index).map(|s| s.hash.as_str());
         let is_current = cur_hash.is_some() && cur_hash == this_hash;
         let Some(row) = self.rows.get(index) else {
@@ -273,7 +351,9 @@ impl PlaylistsView {
                 shell: &self.shell,
                 backend: &self.backend,
                 selected_index: None,
-                on_select: None,
+                on_select,
+                qualities,
+                checked,
             },
             listid,
             is_current,
@@ -340,7 +420,8 @@ impl PlaylistsView {
         let songs_for_play = self.songs.clone();
         let shell_for_play = self.shell.clone();
         let has_songs = !self.songs.is_empty();
-
+        let batch = self.batch;
+        let checked_count = self.checked.len();
         let header = h_flex()
             .w_full()
             .p_6()
@@ -396,45 +477,110 @@ impl PlaylistsView {
                             .child(div().text_color(TEXT_FAINT).child("·"))
                             .child(div().child(meta_count_text)),
                     )
-                    // 操作工具条：[ ▷ 播放全部 (主色胶囊) ]、[ 随机播放 ]、[ 批量操作 ]、[ ··· 更多 ]
+                    // 操作工具条：播放/批量管理与更多操作
                     .child(
-                        h_flex()
+                        div()
+                            .relative()
                             .pt_2()
-                            .gap(px(10.0))
-                            .items_center()
                             .child(
-                                Button::new("playlist_play_all")
-                                    .primary()
-                                    .icon(IconName::Play)
-                                    .label("播放全部")
-                                    .tooltip("从第一首开始播放此歌单")
-                                    .disabled(!has_songs)
-                                    .on_click(move |_event, _window, cx| {
-                                        shell_for_play
-                                            .update(cx, |shell, cx| shell.play_queue(songs_for_play.clone(), 0, cx))
-                                            .ok();
+                                h_flex()
+                                    .gap(px(10.0))
+                                    .items_center()
+                                    .child(
+                                        Button::new("playlist_play_all")
+                                            .primary()
+                                            .icon(IconName::Play)
+                                            .label("播放全部")
+                                            .tooltip("从第一首开始播放此歌单")
+                                            .disabled(!has_songs)
+                                            .on_click(move |_event, _window, cx| {
+                                                shell_for_play
+                                                    .update(cx, |shell, cx| {
+                                                        shell.play_queue(songs_for_play.clone(), 0, cx);
+                                                    })
+                                                    .ok();
+                                            }),
+                                    )
+                                    .when(!batch, |this| {
+                                        this.child(
+                                            Button::new("playlist_batch")
+                                                .ghost()
+                                                .icon(IconName::ListChecks)
+                                                .label("批量操作")
+                                                .tooltip("多选歌曲后批量添加或移除")
+                                                .disabled(!has_songs)
+                                                .on_click(cx.listener(|view, _event, _window, cx| {
+                                                    view.toggle_batch(cx);
+                                                })),
+                                        )
+                                    })
+                                    .when(batch, |this| {
+                                        this.child(badge(
+                                            format!("已选 {checked_count} 首"),
+                                            ACCENT_GREEN_LIGHT,
+                                            ACCENT_GREEN,
+                                        ))
+                                        .child(
+                                            Button::new("playlist_check_all")
+                                                .ghost()
+                                                .small()
+                                                .icon(IconName::ListChecks)
+                                                .label("全选")
+                                                .tooltip("勾选当前已加载的全部歌曲")
+                                                .on_click(cx.listener(|view, _event, _window, cx| {
+                                                    view.check_all(cx);
+                                                })),
+                                        )
+                                        .child(
+                                            Button::new("playlist_batch_add")
+                                                .secondary()
+                                                .small()
+                                                .icon(IconName::ListPlus)
+                                                .label("添加到歌单")
+                                                .disabled(checked_count == 0)
+                                                .on_click(cx.listener(|view, _event, _window, cx| {
+                                                    let songs = view.checked_songs();
+                                                    if songs.is_empty() {
+                                                        return;
+                                                    }
+                                                    view.shell
+                                                        .update(cx, |shell, cx| shell.open_add_to(songs, cx))
+                                                        .ok();
+                                                })),
+                                        )
+                                        .child(
+                                            Button::new("playlist_batch_remove")
+                                                .danger()
+                                                .small()
+                                                .icon(IconName::Trash)
+                                                .label("移除所选")
+                                                .disabled(checked_count == 0)
+                                                .on_click(cx.listener(|view, _event, _window, cx| {
+                                                    view.remove_checked(cx);
+                                                })),
+                                        )
+                                        .child(
+                                            Button::new("playlist_batch_exit")
+                                                .ghost()
+                                                .small()
+                                                .icon(IconName::X)
+                                                .label("退出批量")
+                                                .on_click(cx.listener(|view, _event, _window, cx| {
+                                                    view.toggle_batch(cx);
+                                                })),
+                                        )
                                     }),
-                            )
-                            .child(
-                                Button::new("playlist_batch")
-                                    .ghost()
-                                    .icon(IconName::ListMusic)
-                                    .label("批量操作")
-                                    .tooltip("批量管理歌曲")
-                                    .on_click(cx.listener(|_view, _event, _window, cx| {
-                                        cx.notify();
-                                    })),
-                            )
-                            .child(
-                                Button::new("playlist_more")
-                                    .ghost()
-                                    .icon(IconName::Ellipsis)
-                                    .tooltip("更多歌单操作")
-                                    .on_click(cx.listener(|_view, _event, _window, cx| {
-                                        cx.notify();
-                                    })),
                             ),
-                    ),
+                    )
+                    // 批量模式下提示单击勾选
+                    .when(batch, |this| {
+                        this.child(
+                            div()
+                                .text_size(px(11.0))
+                                .text_color(TEXT_FAINT)
+                                .child("单击任意歌曲勾选/取消，双击仍可直接播放"),
+                        )
+                    }),
             );
 
         // 移除按钮需要的歌单 ID：整个列表共用一份，不在每行重新构造
@@ -450,6 +596,11 @@ impl PlaylistsView {
             let this = cx.entity();
             let sizes = self.sizes.clone();
             let listid = listid.clone();
+            // 音质缓存是 Arc：克隆仅递增引用计数，渲染期零分配
+            let qualities = self.player.read(cx).qualities.clone();
+            let batch = self.batch;
+            let checked = self.checked.clone();
+            let this_for_select = this.clone();
             v_virtual_list(
                 this,
                 ElementId::Name(SharedString::new_static("playlist-tracks")),
@@ -457,9 +608,25 @@ impl PlaylistsView {
                 move |view, range, _window, cx| {
                     let app: &App = cx;
                     let (cur_hash, is_playing) = current_play_state(&view.player, app);
+                    // 批量模式下单击只勾选，不切歌
+                    let on_select: Option<SelectCallback> = batch.then(|| {
+                        let daily = this_for_select.clone();
+                        Rc::new(move |index: usize, _window: &mut Window, cx: &mut App| {
+                            daily.update(cx, |view, cx| view.toggle_checked(index, cx));
+                        }) as SelectCallback
+                    });
                     range
                         .clone()
-                        .map(|index| view.row(index, cur_hash.as_deref(), is_playing, listid.as_ref()))
+                        .map(|index| {
+                            view.row(
+                                index,
+                                (cur_hash.as_deref(), is_playing),
+                                listid.as_ref(),
+                                &qualities,
+                                batch.then_some(checked.as_ref()),
+                                on_select.clone(),
+                            )
+                        })
                         .collect::<Vec<_>>()
                 },
             )

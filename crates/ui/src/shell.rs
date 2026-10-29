@@ -17,12 +17,12 @@ use crate::bridge::{Backend, Msg, Nav};
 use crate::theme::{
     ACCENT_GREEN, ACCENT_GREEN_BORDER, ACCENT_GREEN_HOVER, ACCENT_GREEN_LIGHT, CANVAS_BG, CARD_BG, CARD_BORDER,
     SURFACE_HOVER, TEXT_FAINT, TEXT_MUTED, TEXT_PRIMARY, badge, cover_box, friendly_error_message, hex_rgb, main_card,
-    notice, notice_with_icon, song_cover,
+    notice, notice_with_icon, quality_badge, song_cover,
 };
 use crate::views::daily::DailyView;
 use crate::views::login::LoginView;
 use crate::views::lyrics::LyricsView;
-use crate::views::player::{PlayerBar, PlayerModel, mode_label};
+use crate::views::player::{PlayMode, PlayerBar, PlayerModel, mode_label};
 use crate::views::playlists::{PlaylistEntry, PlaylistTab, PlaylistsView};
 use crate::views::search::SearchView;
 use crate::views::settings::SettingsView;
@@ -99,6 +99,15 @@ pub(crate) struct AppShell {
     created_playlists_expanded: bool,
     /// 侧边栏“收藏的歌单”折叠状态
     collected_playlists_expanded: bool,
+    /// 「添加到歌单」浮层：待添加的歌曲（None 表示未打开）
+    add_to: Option<Vec<Song>>,
+    /// 进入红心漫游前的播放模式（退出后恢复）
+    fm_mode_backup: Option<PlayMode>,
+    /// 播放模型变更订阅（队列抽屉的当前曲目标记靠它才能跟上切歌）
+    player_sub: Option<Subscription>,
+    /// 上一次渲染时看到的当前曲目哈希与队列长度（只在真正切歌/换队列时重绘外壳）
+    shown_track: Option<String>,
+    shown_queue_len: usize,
     _drain: Task<()>,
 }
 
@@ -144,8 +153,12 @@ impl AppShell {
         let mode = backend.app().play_mode();
         let volume = backend.app().volume();
         let muted = backend.app().is_muted();
+        let quality = backend
+            .app()
+            .settings()
+            .map_or_else(|_| "flac".to_owned(), |settings| settings.quality);
         let initial_volume = if muted { 0.0 } else { volume };
-        let player = cx.new(|_| PlayerModel::new(has_engine, mode, initial_volume));
+        let player = cx.new(|_| PlayerModel::new(has_engine, mode, initial_volume, quality));
         // 事件驱动收取后台消息：通道为空时任务挂起，不占用 CPU，
         // 也不需要用固定间隔去轮询。
         let drain = cx.spawn(async move |this, cx| {
@@ -189,6 +202,11 @@ impl AppShell {
             awaiting_personal_fm: false,
             created_playlists_expanded: true,
             collected_playlists_expanded: true,
+            add_to: None,
+            fm_mode_backup: None,
+            player_sub: None,
+            shown_track: None,
+            shown_queue_len: 0,
             _drain: drain,
         }
     }
@@ -206,7 +224,7 @@ impl AppShell {
         let playlists = cx.new(|cx| PlaylistsView::new(backend.clone(), shell.clone(), player.clone(), cx));
         let daily = cx.new(|cx| DailyView::new(backend.clone(), shell.clone(), player.clone(), cx));
         let search = cx.new(|cx| SearchView::new(backend.clone(), shell.clone(), player.clone(), window, cx));
-        let settings = cx.new(|cx| SettingsView::new(backend.clone(), window, cx));
+        let settings = cx.new(|cx| SettingsView::new(backend.clone(), player.clone(), window, cx));
         let login = cx.new(|cx| LoginView::new(backend.clone(), window, cx));
         let lyrics = cx.new(|cx| LyricsView::new(backend, shell.clone(), player, cx));
 
@@ -238,6 +256,19 @@ impl AppShell {
         });
         self.top_search = Some(top_search);
         self.top_search_sub = Some(top_search_sub);
+        // 队列抽屉在本视图内渲染：不订阅播放模型的话，切歌后它的当前曲目高亮会停在上一首。
+        // 只在真正切歌或队列长度变化时重绘，不跟着 180ms 一次的播放进度徒劳重绘。
+        self.player_sub = Some(cx.observe(&self.player, |this, player, cx| {
+            let (track, len) = {
+                let model = player.read(cx);
+                (model.current_hash().map(str::to_owned), model.queue.len())
+            };
+            if track != this.shown_track || len != this.shown_queue_len {
+                this.shown_track = track;
+                this.shown_queue_len = len;
+                cx.notify();
+            }
+        }));
 
         self.views = Some(Views {
             player_bar,
@@ -312,6 +343,15 @@ impl AppShell {
                     self.set_toast(friendly_error_message(&error), cx);
                 }
             },
+            Msg::Liked(result) => self.on_liked(result, cx),
+            Msg::AddedToPlaylist(result) => self.on_added_to_playlist(result, cx),
+            // 歌曲真实最高音质的批量结果：写入共享播放模型，各列表自行重渲染
+            Msg::Qualities(list) => {
+                self.player.update(cx, |model, model_cx| {
+                    model.apply_qualities(list);
+                    model_cx.notify();
+                });
+            }
             // 播放请求：过期的响应必须丢弃，否则旧歌会抢在新歌之前起播
             Msg::PlayReady {
                 seq,
@@ -366,7 +406,7 @@ impl AppShell {
             Msg::Noop => {}
             Msg::Toast(text) => self.set_toast(text, cx),
             Msg::LoggedOut => self.on_logged_out(cx),
-            Msg::RemoveTrack { listid, fileid } => self.remove_track(&listid, fileid),
+            Msg::RemoveTracks { listid, fileids } => self.remove_tracks(&listid, &fileids),
         }
     }
 
@@ -486,16 +526,33 @@ impl AppShell {
         if index >= songs.len() {
             return;
         }
-        self.is_personal_fm_active = false;
-        self.is_starting_personal_fm = false;
-        self.awaiting_personal_fm = false;
+        // 换成普通队列就意味着退出红心漫游：恢复记忆的播放模式
+        self.leave_radio(cx);
         self.auto_skips = 0;
+        self.request_qualities(&songs, cx);
         self.player.update(cx, |model, model_cx| {
             model.set_queue(songs, index);
             model_cx.notify();
         });
         self.play_index(cx);
         self.load_lyrics(cx);
+    }
+
+    /// 退出红心漫游并恢复进入前的播放模式
+    fn leave_radio(&mut self, cx: &mut Context<Self>) {
+        let was_radio = self.is_personal_fm_active || self.player.read(cx).radio;
+        self.is_personal_fm_active = false;
+        self.is_starting_personal_fm = false;
+        self.awaiting_personal_fm = false;
+        if !was_radio {
+            return;
+        }
+        let mode = self.fm_mode_backup.take().unwrap_or(PlayMode::ListLoop);
+        self.player.update(cx, |model, model_cx| {
+            model.radio = false;
+            model.mode = mode;
+            model_cx.notify();
+        });
     }
 
     /// 在现有队列内跳转播放
@@ -517,15 +574,22 @@ impl AppShell {
         self.check_fm_prefetch(cx);
     }
 
+    /// 用最新音质重新取址并播放当前曲目（切换音质后立即可听出差别）
+    pub(crate) fn replay_current(&mut self, cx: &mut Context<Self>) {
+        if self.player.read(cx).current_song().is_none() {
+            return;
+        }
+        self.play_index(cx);
+    }
+
     /// 播放当前选中歌曲
     fn play_index(&mut self, cx: &mut Context<Self>) {
         let Some(song) = self.player.read(cx).current_song().cloned() else {
             return;
         };
         let app = self.backend.app();
-        let quality = app
-            .settings()
-            .map_or_else(|_| "flac".to_owned(), |settings| settings.quality);
+        // 全局音质偏好以播放模型为准（设置页与播放条切换后立即生效）
+        let quality = self.player.read(cx).quality.clone();
         // 携带歌曲哈希与请求序号：过期的取址结果必须被丢弃，
         // 否则先发后到的旧请求会抢在新歌之前起播。
         let hash = song.hash.clone();
@@ -618,6 +682,15 @@ impl AppShell {
         self.is_starting_personal_fm = true;
         self.awaiting_personal_fm = false;
         self.personal_fm_mark = None;
+        // 漫游是无限流：播放模式固定为列表循环，并记住原模式供退出时恢复。
+        // 已在漫游中再次点击时不能用当前（被锁定的）模式覆盖备份。
+        let remembered = self.player.read(cx).mode;
+        self.fm_mode_backup.get_or_insert(remembered);
+        self.player.update(cx, |model, model_cx| {
+            model.radio = true;
+            model.mode = PlayMode::ListLoop;
+            model_cx.notify();
+        });
         self.prefetch_personal_fm(cx);
     }
 
@@ -658,13 +731,14 @@ impl AppShell {
                 if self.is_starting_personal_fm {
                     self.is_starting_personal_fm = false;
                     if songs.is_empty() {
-                        self.is_personal_fm_active = false;
+                        self.leave_radio(cx);
                         if self.player.read(cx).queue.is_empty() {
                             self.set_toast("未获取到推荐电台歌曲，请稍后重试".to_owned(), cx);
                         }
                         return;
                     }
                     self.auto_skips = 0;
+                    self.request_qualities(&songs, cx);
                     self.player.update(cx, |model, model_cx| {
                         model.set_queue(Arc::new(songs), 0);
                         model_cx.notify();
@@ -679,10 +753,11 @@ impl AppShell {
                     return;
                 }
                 let first_new = self.player.update(cx, |player, model_cx| {
-                    let first = player.append_songs(songs);
+                    let first = player.append_songs(songs.clone());
                     model_cx.notify();
                     first
                 });
+                self.request_qualities(&songs, cx);
                 // 队尾空窗期拿到新歌：立即续播，而不是停在原地等下一次切歌
                 if self.awaiting_personal_fm {
                     if let Some(idx) = first_new {
@@ -704,8 +779,7 @@ impl AppShell {
             Err(error) => {
                 tracing::warn!(%error, "获取红心电台失败");
                 if self.is_starting_personal_fm {
-                    self.is_starting_personal_fm = false;
-                    self.is_personal_fm_active = false;
+                    self.leave_radio(cx);
                 }
                 self.set_toast(friendly_error_message(&error), cx);
             }
@@ -765,13 +839,65 @@ impl AppShell {
             .spawn(async move { Msg::Lyrics(seq, app.lyrics(&song).await.map_err(|error| error.to_string())) });
     }
 
-    /// 从歌单中移除指定歌曲
-    fn remove_track(&mut self, listid: &str, fileid: i64) {
+    /// 从歌单中批量移除歌曲
+    fn remove_tracks(&mut self, listid: &str, fileids: &[i64]) {
+        if fileids.is_empty() {
+            return;
+        }
         let app = self.backend.app();
         let listid = listid.to_owned();
+        let fileids = fileids.to_vec();
         self.backend.spawn(async move {
-            Msg::TrackRemoved(app.remove(&listid, &[fileid]).await.map_err(|error| error.to_string()))
+            Msg::TrackRemoved(app.remove(&listid, &fileids).await.map_err(|error| error.to_string()))
         });
+    }
+
+    /// 处理收藏到「我喜欢」的结果
+    fn on_liked(&mut self, result: Result<(), String>, cx: &mut Context<Self>) {
+        match result {
+            Ok(()) => {
+                self.set_toast("已添加到「我喜欢」".to_owned(), cx);
+                if let Some(views) = self.views.as_ref() {
+                    // 歌单封面区显示的是曲目数，收藏后必须刷新侧栏与详情
+                    views.playlists.update(cx, PlaylistsView::reload);
+                }
+            }
+            Err(error) => {
+                tracing::warn!(%error, "收藏歌曲失败");
+                self.set_toast(format!("收藏失败: {}", friendly_error_message(&error)), cx);
+            }
+        }
+    }
+
+    /// 处理添加到指定歌单的结果
+    fn on_added_to_playlist(&mut self, result: Result<(), String>, cx: &mut Context<Self>) {
+        match result {
+            Ok(()) => {
+                self.set_toast("已添加到歌单".to_owned(), cx);
+                if let Some(views) = self.views.as_ref() {
+                    views.playlists.update(cx, PlaylistsView::reload);
+                    views.playlists.update(cx, PlaylistsView::refresh_current);
+                }
+            }
+            Err(error) => {
+                tracing::warn!(%error, "添加到歌单失败");
+                self.set_toast(format!("添加失败: {}", friendly_error_message(&error)), cx);
+            }
+        }
+    }
+
+    /// 打开「添加到歌单」浮层
+    pub(crate) fn open_add_to(&mut self, songs: Vec<Song>, cx: &mut Context<Self>) {
+        if songs.is_empty() {
+            return;
+        }
+        self.add_to = Some(songs);
+        cx.notify();
+    }
+
+    /// 批量查询歌曲真实最高音质（已查询过的 hash 不重复请求）
+    pub(crate) fn request_qualities(&mut self, songs: &[Song], cx: &mut Context<Self>) {
+        crate::views::tracks::request_qualities(&self.player, &self.backend, songs, cx);
     }
 
     /// 处理登录成功事件
@@ -1490,13 +1616,172 @@ impl AppShell {
         )
     }
 
+    /// 渲染「添加到歌单」浮层
+    fn add_to_overlay(&self, cx: &Context<Self>) -> Option<AnyElement> {
+        let songs = self.add_to.as_ref()?;
+        let views = self.views.as_ref()?;
+        let playlists = views.playlists.read(cx).playlists.clone();
+        let shell = cx.entity().downgrade();
+        let backend = self.backend.clone();
+
+        let summary = if songs.len() == 1 {
+            SharedString::from(
+                songs
+                    .first()
+                    .map_or_else(String::new, |song| song.display_title().to_owned()),
+            )
+        } else {
+            SharedString::from(format!("{} 首歌曲", songs.len()))
+        };
+
+        let mut list = v_flex()
+            .id("add_to_scroll")
+            .max_h(px(320.0))
+            .overflow_y_scrollbar()
+            .gap(px(2.0));
+        for (idx, playlist) in playlists.iter().filter(|p| p.is_liked() || p.kind != 1).enumerate() {
+            let listid = playlist.listid.clone();
+            let name = SharedString::from(playlist.name.as_str());
+            let count = SharedString::from(playlist.count.to_string());
+            let liked = playlist.is_liked();
+            let songs_for_click = songs.clone();
+            let shell_for_click = shell.clone();
+            let backend_for_click = backend.clone();
+            list = list.child(
+                h_flex()
+                    .id(("add_to_item", idx))
+                    .role(Role::Button)
+                    .w_full()
+                    .px_2()
+                    .py_2()
+                    .rounded(px(7.0))
+                    .gap(px(10.0))
+                    .items_center()
+                    .cursor_pointer()
+                    .hover(|s| s.bg(SURFACE_HOVER))
+                    .on_click(move |_event, _window, cx| {
+                        shell_for_click
+                            .update(cx, |shell, cx| {
+                                shell.add_to = None;
+                                cx.notify();
+                            })
+                            .ok();
+                        let app = backend_for_click.app();
+                        let songs = songs_for_click.clone();
+                        let listid = listid.clone();
+                        backend_for_click.spawn(async move {
+                            Msg::AddedToPlaylist(
+                                app.add_to_playlist(&listid, &songs)
+                                    .await
+                                    .map_err(|error| error.to_string()),
+                            )
+                        });
+                    })
+                    .child(if liked {
+                        div()
+                            .w(px(30.0))
+                            .h(px(30.0))
+                            .flex_shrink_0()
+                            .rounded(px(6.0))
+                            .bg(hex_rgb(0xffe4e6))
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .child(Icon::new(IconName::Heart).size(px(14.0)).text_color(hex_rgb(0xef4444)))
+                            .into_any_element()
+                    } else {
+                        cover_box(&name, 30.0)
+                    })
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w(px(0.0))
+                            .text_xs()
+                            .text_color(TEXT_PRIMARY)
+                            .truncate()
+                            .child(name),
+                    )
+                    .child(div().text_size(px(10.5)).text_color(TEXT_FAINT).child(count)),
+            );
+        }
+
+        let card = v_flex()
+            .w(px(380.0))
+            .max_h(px(440.0))
+            .p_4()
+            .gap(px(10.0))
+            .rounded(px(12.0))
+            .bg(CARD_BG)
+            .border_1()
+            .border_color(CARD_BORDER)
+            .shadow_lg()
+            // 卡片内的点击不能穿透到背景遮罩（否则点歌单会直接把浮层关掉）
+            .on_mouse_down(MouseButton::Left, |_event, _window, cx| cx.stop_propagation())
+            .child(
+                h_flex()
+                    .w_full()
+                    .items_center()
+                    .justify_between()
+                    .child(
+                        v_flex()
+                            .gap(px(2.0))
+                            .child(
+                                div()
+                                    .text_sm()
+                                    .font_weight(FontWeight::BOLD)
+                                    .text_color(TEXT_PRIMARY)
+                                    .child("添加到歌单"),
+                            )
+                            .child(div().text_xs().text_color(TEXT_MUTED).child(summary)),
+                    )
+                    .child({
+                        let shell = shell.clone();
+                        Button::new("add_to_close")
+                            .ghost()
+                            .small()
+                            .icon(IconName::X)
+                            .tooltip("取消")
+                            .on_click(move |_event, _window, cx| {
+                                shell
+                                    .update(cx, |shell, cx| {
+                                        shell.add_to = None;
+                                        cx.notify();
+                                    })
+                                    .ok();
+                            })
+                    }),
+            )
+            .child(list);
+
+        Some(
+            div()
+                .id("add_to_backdrop")
+                .absolute()
+                .inset_0()
+                .bg(hsla(0.0, 0.0, 0.0, 0.28))
+                .flex()
+                .items_center()
+                .justify_center()
+                .on_click(move |_event, _window, cx| {
+                    shell
+                        .update(cx, |shell, cx| {
+                            shell.add_to = None;
+                            cx.notify();
+                        })
+                        .ok();
+                })
+                .child(card)
+                .into_any_element(),
+        )
+    }
+
     /// 渲染右侧播放队列抽屉
     fn queue_drawer(&self, cx: &Context<Self>) -> Option<AnyElement> {
         if !self.show_queue {
             return None;
         }
 
-        let (queue, rows, current_idx, is_playing, mode) = {
+        let (queue, rows, current_idx, is_playing, mode, qualities) = {
             let model = self.player.read(cx);
             (
                 model.queue.clone(),
@@ -1504,6 +1789,7 @@ impl AppShell {
                 model.index,
                 model.snapshot.state == lyra_audio::State::Playing,
                 model.mode,
+                model.qualities.clone(),
             )
         };
 
@@ -1581,6 +1867,10 @@ impl AppShell {
                 let shell = cx.entity().downgrade();
                 // 展示文本已在队列入队时预格式化：渲染期不再拼字符串
                 let row = rows.get(idx);
+                let quality = queue
+                    .get(idx)
+                    .and_then(|song| qualities.get(&song.hash).copied())
+                    .unwrap_or_default();
 
                 list = list.child(
                     h_flex()
@@ -1634,18 +1924,27 @@ impl AppShell {
                                 .min_w(px(0.0))
                                 .gap(px(1.0))
                                 .child(
-                                    div()
-                                        .text_xs()
-                                        .font_weight(if is_current {
-                                            FontWeight::BOLD
-                                        } else {
-                                            FontWeight::MEDIUM
-                                        })
-                                        .text_color(TEXT_PRIMARY)
-                                        .truncate()
+                                    h_flex()
+                                        .gap(px(5.0))
+                                        .items_center()
                                         .child(
-                                            row.map_or_else(|| SharedString::new_static(""), |row| row.title.clone()),
-                                        ),
+                                            div()
+                                                .flex_1()
+                                                .min_w(px(0.0))
+                                                .text_xs()
+                                                .font_weight(if is_current {
+                                                    FontWeight::BOLD
+                                                } else {
+                                                    FontWeight::MEDIUM
+                                                })
+                                                .text_color(TEXT_PRIMARY)
+                                                .truncate()
+                                                .child(row.map_or_else(
+                                                    || SharedString::new_static(""),
+                                                    |row| row.title.clone(),
+                                                )),
+                                        )
+                                        .child(quality_badge(quality)),
                                 )
                                 .child(
                                     div().text_xs().text_color(TEXT_MUTED).truncate().child(
@@ -1698,7 +1997,8 @@ impl Render for AppShell {
                         .w_full()
                         .p(px(8.0))
                         .child(lyrics_card)
-                        .children(self.queue_drawer(cx)),
+                        .children(self.queue_drawer(cx))
+                        .children(self.add_to_overlay(cx)),
                 )
                 .child(views.player_bar.clone())
                 .children(self.toast_element(cx))
@@ -1775,7 +2075,8 @@ impl Render for AppShell {
                             ))),
                     )
                     .children(lyrics_exit_overlay)
-                    .children(self.queue_drawer(cx)),
+                    .children(self.queue_drawer(cx))
+                    .children(self.add_to_overlay(cx)),
             )
             .child(views.player_bar.clone())
             .children(self.toast_element(cx))
