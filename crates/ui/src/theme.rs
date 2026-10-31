@@ -87,27 +87,43 @@ pub(crate) fn badge(text: impl Into<SharedString>, bg: impl Into<Hsla>, fg: impl
         .child(text.into())
 }
 
-/// 构造音质微标（只接受真实最高音质：Hi-Res / SQ，其余不展示）
+/// 构造音质微标（只接受真实最高音质：Hi-Res 小金标 / SQ 蓝标，其余不展示）
 ///
 /// 标签是 `'static` 字面量：渲染期不分配字符串。
 pub(crate) fn quality_badge(label: &'static str) -> AnyElement {
-    let text = match label {
-        "Hi-Res" => SharedString::new_static("Hi-Res"),
-        "SQ" => SharedString::new_static("SQ"),
-        _ => return div().into_any_element(),
-    };
-    div()
-        .px(px(4.0))
-        .py(px(0.5))
-        .rounded(px(3.0))
-        .bg(hex_rgb(0xf3f4f6))
-        .border_1()
-        .border_color(hex_rgb(0xe5e7eb))
-        .text_color(hex_rgb(0x6b7280))
-        .text_size(px(9.0))
-        .font_weight(FontWeight::SEMIBOLD)
-        .child(text)
-        .into_any_element()
+    match label {
+        // 小金标：Hi-Res Audio 认证标志的金色渐变质感
+        "Hi-Res" => div()
+            .px(px(5.0))
+            .py(px(1.0))
+            .rounded(px(3.0))
+            .bg(linear_gradient(
+                135.0,
+                linear_color_stop(hex_rgb(0xffe08a), 0.0),
+                linear_color_stop(hex_rgb(0xe0b03a), 1.0),
+            ))
+            .border_1()
+            .border_color(hex_rgb(0xc9982b))
+            .text_color(hex_rgb(0x5b4200))
+            .text_size(px(9.0))
+            .font_weight(FontWeight::BOLD)
+            .child(SharedString::new_static("Hi-Res"))
+            .into_any_element(),
+        // SQ（无损）蓝标
+        "SQ" => div()
+            .px(px(4.0))
+            .py(px(0.5))
+            .rounded(px(3.0))
+            .bg(hex_rgb(0xeff6ff))
+            .border_1()
+            .border_color(hex_rgb(0xbfdbfe))
+            .text_color(hex_rgb(0x2563eb))
+            .text_size(px(9.0))
+            .font_weight(FontWeight::SEMIBOLD)
+            .child(SharedString::new_static("SQ"))
+            .into_any_element(),
+        _ => div().into_any_element(),
+    }
 }
 
 /// 构造骨架屏微光条纹占位组件（用于时长等未就绪数据，消除 0:00 悬空感）

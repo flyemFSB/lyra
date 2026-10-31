@@ -22,6 +22,8 @@ const RING_MS: u32 = 200;
 /// 解码线程控制命令
 enum Command {
     Play(TrackRef),
+    /// 从指定毫秒位置开播（切音质时保持进度）
+    PlayAt(TrackRef, u64),
     Toggle,
     Seek(u64),
     Shutdown,
@@ -53,6 +55,11 @@ impl Engine {
     /// 播放指定曲目
     pub fn play(&self, track: TrackRef) {
         self.send(Command::Play(track));
+    }
+
+    /// 从指定毫秒位置开始播放（切音质不回到开头）
+    pub fn play_at(&self, track: TrackRef, position_ms: u64) {
+        self.send(Command::PlayAt(track, position_ms));
     }
 
     /// 切换播放与暂停状态
@@ -400,7 +407,8 @@ impl Player {
 
     fn handle(&mut self, cmd: Command) -> bool {
         match cmd {
-            Command::Play(track) => self.start(&track),
+            Command::Play(track) => self.start(&track, 0),
+            Command::PlayAt(track, ms) => self.start(&track, ms),
             Command::Toggle => match self.state {
                 State::Playing => self.set_state(State::Paused),
                 State::Paused => self.set_state(State::Playing),
@@ -412,15 +420,29 @@ impl Player {
         true
     }
 
-    fn start(&mut self, track: &TrackRef) {
+    fn start(&mut self, track: &TrackRef, position_ms: u64) {
         // 更新加载态与当前曲目
         self.set_state(State::Loading);
         self.ctx.shared.set_track(track.clone());
 
         match Session::open(&self.ctx, track) {
-            Ok(session) => {
+            Ok(mut session) => {
+                // 从指定位置起播：顺序解码丢弃前置样本，不重新从 0 开始
+                if position_ms > 0
+                    && let Err(error) = session.advance_to(position_ms)
+                {
+                    self.session = None;
+                    self.emit(Event::Failed {
+                        message: format!("定位失败: {error}"),
+                    });
+                    self.set_state(State::Idle);
+                    return;
+                }
+                if position_ms > 0 {
+                    session.pushed_frames = position_ms.saturating_mul(u64::from(self.ctx.sample_rate)) / 1000;
+                }
                 self.session = Some(session);
-                self.ctx.shared.set_position(0, track.duration_ms);
+                self.ctx.shared.set_position(position_ms, track.duration_ms);
                 // 切歌请求刷新缓冲区，避免混入前一首尾音
                 self.ctx.shared.request_flush();
                 self.set_state(State::Playing);

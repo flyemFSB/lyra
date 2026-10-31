@@ -325,6 +325,23 @@ impl AppShell {
             Msg::Daily(result) => daily.update(cx, |view, cx| view.on_daily(result, cx)),
             Msg::PersonalFm(result) => self.on_personal_fm(result, cx),
             Msg::Search(seq, result) => search.update(cx, |view, cx| view.on_search(seq, result, cx)),
+            Msg::SearchAlbums(seq, result) => search.update(cx, |view, cx| view.on_albums(seq, result, cx)),
+            Msg::SearchArtists(seq, result) => search.update(cx, |view, cx| view.on_artists(seq, result, cx)),
+            Msg::SearchPlaylists(seq, result) => search.update(cx, |view, cx| view.on_playlists(seq, result, cx)),
+            // 搜索结果里点了专辑/歌手/歌单：拿到的整批曲目直接开播
+            Msg::SearchPlay(result) => {
+                search.update(cx, SearchView::on_play_loaded);
+                match result {
+                    Ok(songs) if !songs.is_empty() => {
+                        self.play_queue(Arc::new(songs), 0, cx);
+                    }
+                    Ok(_) => self.set_toast("没有可播放的曲目".to_owned(), cx),
+                    Err(error) => {
+                        tracing::warn!(%error, "加载搜索结果曲目失败");
+                        self.set_toast(friendly_error_message(&error), cx);
+                    }
+                }
+            }
             Msg::Lyrics(seq, result) => {
                 // 忽略过期请求的歌词响应
                 if seq == self.lyrics_seq {
@@ -358,6 +375,7 @@ impl AppShell {
                 hash,
                 track,
                 preview_ms,
+                resume_ms,
             } => {
                 if seq != self.play_seq {
                     return;
@@ -372,7 +390,12 @@ impl AppShell {
                     return;
                 }
                 if let Some(engine) = self.backend.engine() {
-                    engine.play(track);
+                    // 切音质：带着当前进度起播，而不是从 0 重来
+                    if resume_ms > 0 {
+                        engine.play_at(track, resume_ms);
+                    } else {
+                        engine.play(track);
+                    }
                 }
                 // 上游仅授权试听片段
                 if preview_ms > 0 {
@@ -574,16 +597,22 @@ impl AppShell {
         self.check_fm_prefetch(cx);
     }
 
-    /// 用最新音质重新取址并播放当前曲目（切换音质后立即可听出差别）
+    /// 用最新音质重新取址并播放当前曲目（切音质后从当前进度继续，不回到开头）
     pub(crate) fn replay_current(&mut self, cx: &mut Context<Self>) {
         if self.player.read(cx).current_song().is_none() {
             return;
         }
-        self.play_index(cx);
+        let resume_ms = self.player.read(cx).snapshot.position_ms;
+        self.play_index_at(resume_ms, cx);
     }
 
     /// 播放当前选中歌曲
     fn play_index(&mut self, cx: &mut Context<Self>) {
+        self.play_index_at(0, cx);
+    }
+
+    /// 从指定进度开始播放当前选中的曲目
+    fn play_index_at(&mut self, resume_ms: u64, cx: &mut Context<Self>) {
         let Some(song) = self.player.read(cx).current_song().cloned() else {
             return;
         };
@@ -602,6 +631,12 @@ impl AppShell {
                     hash,
                     track,
                     preview_ms: playback.preview_ms,
+                    // 试听片段的时长更短，定位点不能超前于片段结尾
+                    resume_ms: if playback.preview_ms > 0 {
+                        resume_ms.min(playback.preview_ms.saturating_sub(1_000))
+                    } else {
+                        resume_ms
+                    },
                 },
                 Err(error) => Msg::PlayFailed {
                     seq,

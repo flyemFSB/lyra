@@ -73,6 +73,26 @@ fn seek_moves_the_position_forward_and_backward() {
 }
 
 #[test]
+fn play_at_starts_from_the_requested_position() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("sine.wav");
+    write_sine_wav(&path, 20);
+    let Some(engine) = engine_for(&path) else {
+        return;
+    };
+
+    // 切音质时用它带着当前进度起播，不能从 0 重来
+    engine.play_at(track("wav", 20_000), 8_000);
+    std::thread::sleep(Duration::from_millis(400));
+    assert_eq!(engine.snapshot().state, State::Playing);
+    let position = engine.snapshot().position_ms;
+    assert!(
+        (8_000..10_000).contains(&position),
+        "play_at 应从 8s 起播，实际 {position}"
+    );
+}
+
+#[test]
 fn seek_on_a_real_ogg_file_keeps_the_engine_alive() {
     let Ok(path) = std::env::var("LYRA_PROBE_OGG") else {
         return;

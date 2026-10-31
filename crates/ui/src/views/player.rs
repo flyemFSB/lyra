@@ -76,19 +76,28 @@ fn play_pause_icon(playing: bool) -> AnyElement {
         .into_any_element()
 }
 
-/// 循环切换至下一档音质（无损 → 高品 → 标准 → 无损）
+/// 循环切换至下一档音质（从标准逐级升级，到顶回到标准）
 pub(crate) fn next_quality(current: &str) -> &'static str {
     let choices = crate::format::QUALITY_CHOICES;
-    let index = choices.iter().position(|(id, _)| *id == current).unwrap_or(0);
-    choices[(index + 1) % choices.len()].0
+    let index = choices
+        .iter()
+        .position(|(id, _)| *id == current)
+        .map_or(0, |index| (index + 1) % choices.len());
+    choices[index].0
 }
 
 /// 播放条上的紧凑音质标签（完整文案太长，放不下右侧控制区）
 fn quality_short(quality: &str) -> &'static str {
     match quality {
+        "high" => "Hi-Res",
         "flac" => "无损",
         "320" => "320K",
-        _ => "128K",
+        "128" => "128K",
+        "viper_clear" => "超清",
+        "viper_tape" => "母带",
+        "viper_atmos" => "全景",
+        "multitrack" => "多轨",
+        _ => "未知",
     }
 }
 
@@ -615,10 +624,11 @@ fn value_single(value: SliderValue) -> f32 {
 
 impl Render for PlayerBar {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let (position, has_engine, volume, queue, current_index, play_mode, radio) = {
+        let (position, duration, has_engine, volume, queue, current_index, play_mode, radio) = {
             let model = self.player.read(cx);
             (
                 model.snapshot.position_ms,
+                model.snapshot.duration_ms,
                 model.has_engine,
                 model.snapshot.volume,
                 // 队列是 Arc：克隆只是引用计数递增。
@@ -638,6 +648,8 @@ impl Render for PlayerBar {
             )
         };
         let has_song = queue.get(current_index).is_some();
+        // 未悬停时也要看得见进度：已播部分的比例（0..=1）
+        let played_ratio = progress_percent(position, duration) / 100.0;
 
         // 进度每帧都在变：复用缓冲区格式化，再转成可廉价克隆的 SharedString
         crate::format::write_duration(&mut self.pos_buf, position);
@@ -927,13 +939,34 @@ impl Render for PlayerBar {
                                         )
                                     })
                                     .when(has_song && !self.progress_hovered && !self.dragging, |this| {
-                                        // 正常播放状态：3px 极细灰色条（无滑块手柄、无彩色填充）
+                                        // 常态：3px 极细灰轨 + 已播进度填充 + 进度点（不悬停也看得到播放位置）
                                         this.child(
                                             div()
                                                 .w_full()
                                                 .h(px(3.0))
                                                 .rounded_full()
-                                                .bg(hex_rgb(0xe5e7eb)),
+                                                .bg(hex_rgb(0xe5e7eb))
+                                                .relative()
+                                                .child(
+                                                    div()
+                                                        .absolute()
+                                                        .left(px(0.0))
+                                                        .top(px(0.0))
+                                                        .h_full()
+                                                        .rounded_full()
+                                                        .bg(ACCENT_GREEN)
+                                                        .w(relative(played_ratio)),
+                                                )
+                                                .child(
+                                                    div()
+                                                        .absolute()
+                                                        .left(relative(played_ratio))
+                                                        .top(px(-2.5))
+                                                        .ml(px(-3.0))
+                                                        .size(px(8.0))
+                                                        .rounded_full()
+                                                        .bg(ACCENT_GREEN),
+                                                ),
                                         )
                                     })
                                     .when(has_song && (self.progress_hovered || self.dragging), |this| {
@@ -1218,14 +1251,16 @@ mod tests {
 
     #[test]
     fn quality_cycles_through_the_settings_choices_and_wraps() {
-        assert_eq!(next_quality("flac"), "320");
-        assert_eq!(next_quality("320"), "128");
-        assert_eq!(next_quality("128"), "flac");
+        assert_eq!(next_quality("128"), "320");
+        assert_eq!(next_quality("320"), "flac");
+        assert_eq!(next_quality("flac"), "high");
+        assert_eq!(next_quality("high"), "viper_clear");
+        assert_eq!(next_quality("multitrack"), "128", "最末一档回到标准");
         // 未知/空值从第一档开始，不能停在一个非法音质上
-        assert_eq!(next_quality(""), "320");
+        assert_eq!(next_quality(""), "128");
         let mut model = PlayerModel::new(true, PlayMode::ListLoop, 0.8, "flac".to_owned());
-        assert_eq!(model.cycle_quality(), "320");
-        assert_eq!(model.quality, "320", "切换结果必须写回共享模型（全局生效）");
+        assert_eq!(model.cycle_quality(), "high");
+        assert_eq!(model.quality, "high", "切换结果必须写回共享模型（全局生效）");
     }
 
     #[test]

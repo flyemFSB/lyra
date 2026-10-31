@@ -16,28 +16,20 @@ pub(crate) fn index_label(index: usize) -> SharedString {
         .unwrap_or_else(|| SharedString::from(format!("{index:02}")))
 }
 
-/// 音质标识 → 展示文本
-#[allow(dead_code)]
-const QUALITY_LABELS: &[(&str, &str)] = &[
-    ("flac", "无损"),
-    ("320", "高品 320K"),
+/// 设置页与播放条支持的音质选项
+///
+/// 实测上游音质权益矩阵后确定的真实可选类型：128 / 320 / flac / high
+/// 以及蝰蛇系（超清、母带、全景）与多轨；`super` 在实测样本里从未出现，故不提供。
+pub(crate) const QUALITY_CHOICES: &[(&str, &str)] = &[
     ("128", "标准 128K"),
+    ("320", "高品 320K"),
+    ("flac", "无损"),
+    ("high", "Hi-Res"),
+    ("viper_clear", "蝰蛇超清"),
     ("viper_tape", "蝰蛇母带"),
-    ("viper_clear", "蝰蛇全景"),
-    ("viper_atmos", "蝰蛇环绕"),
+    ("viper_atmos", "蝰蛇全景"),
+    ("multitrack", "多轨"),
 ];
-
-/// 设置页支持的音质选项列表
-pub(crate) const QUALITY_CHOICES: &[(&str, &str)] = &[("flac", "无损"), ("320", "高品 320K"), ("128", "标准 128K")];
-
-/// 获取音质编码对应的展示文本
-#[allow(dead_code)]
-pub(crate) fn quality_label(quality: &str) -> &'static str {
-    QUALITY_LABELS
-        .iter()
-        .find(|(id, _)| *id == quality)
-        .map_or("标准", |(_, label)| *label)
-}
 
 /// 毫秒时间格式化写入已有缓冲区（不额外分配）
 pub(crate) fn write_duration(buf: &mut String, ms: u64) {
@@ -161,9 +153,21 @@ mod tests {
     }
 
     #[test]
-    fn quality_labels_cover_known_and_unknown() {
-        assert_eq!(quality_label("flac"), "无损");
-        assert_eq!(quality_label("320"), "高品 320K");
-        assert_eq!(quality_label("weird"), "标准");
+    fn quality_choices_cover_every_upstream_type_we_measured() {
+        // 实网音质矩阵里出现过的类型必须都在选项里，否则切不到；
+        // super 在实测样本中从未出现，因此不提供。
+        for id in [
+            "128",
+            "320",
+            "flac",
+            "high",
+            "viper_clear",
+            "viper_tape",
+            "viper_atmos",
+            "multitrack",
+        ] {
+            assert!(QUALITY_CHOICES.iter().any(|(choice, _)| *choice == id), "缺少 {id}");
+        }
+        assert!(!QUALITY_CHOICES.iter().any(|(choice, _)| *choice == "super"));
     }
 }

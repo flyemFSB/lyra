@@ -4,7 +4,9 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use lyra_api::endpoint::{audio, flow, library, lyrics, playlist, privilege, search, session};
-use lyra_api::model::{LyricLine, Page, Playlist, Song, SongRights, SongUrl, Station, StationClass, VipStatus};
+use lyra_api::model::{
+    Album, Artist, LyricLine, Page, Playlist, Song, SongRights, SongUrl, Station, StationClass, VipStatus,
+};
 use lyra_api::transport::Transport;
 use lyra_api::{Api, Session};
 use lyra_audio::{Engine, Event, TrackRef};
@@ -544,6 +546,42 @@ impl Kugou {
         Ok(lyra_api::endpoint::search::songs(&self.api, keyword, page, SEARCH_PAGE_SIZE, None).await?)
     }
 
+    /// 搜索专辑列表
+    pub async fn search_albums(&self, keyword: &str, page: u32) -> Result<Page<Album>> {
+        Ok(lyra_api::endpoint::search::albums(&self.api, keyword, page, SEARCH_PAGE_SIZE).await?)
+    }
+
+    /// 搜索歌手列表
+    pub async fn search_artists(&self, keyword: &str, page: u32) -> Result<Page<Artist>> {
+        Ok(lyra_api::endpoint::search::artists(&self.api, keyword, page, SEARCH_PAGE_SIZE).await?)
+    }
+
+    /// 搜索歌单列表
+    pub async fn search_playlists(&self, keyword: &str, page: u32) -> Result<Page<Playlist>> {
+        Ok(lyra_api::endpoint::search::playlists(&self.api, keyword, page, SEARCH_PAGE_SIZE).await?)
+    }
+
+    /// 取整张专辑的曲目（顺序翻页直到取完）
+    pub async fn album_tracks(&self, album_id: &str) -> Result<Vec<Song>> {
+        const PAGE_SIZE: u32 = 100;
+        const MAX_PAGES: u32 = 20;
+        let mut songs = Vec::new();
+        for page in 1..=MAX_PAGES {
+            let chunk = lyra_api::endpoint::search::album_tracks(&self.api, album_id, page, PAGE_SIZE).await?;
+            let last = chunk.len() < PAGE_SIZE as usize;
+            songs.extend(chunk);
+            if last {
+                break;
+            }
+        }
+        Ok(songs)
+    }
+
+    /// 取歌手的热门曲目（首页 50 首）
+    pub async fn artist_tracks(&self, artist_id: &str) -> Result<Vec<Song>> {
+        Ok(lyra_api::endpoint::search::artist_tracks(&self.api, artist_id, 1, 50).await?)
+    }
+
     /// 获取推荐电台频道列表
     pub async fn stations(&self) -> Result<Vec<Station>> {
         catalog_stations(&self.api).await
@@ -579,26 +617,25 @@ impl Kugou {
 
 /// 从音质权益矩阵中取出该曲目的真实最高音质标签
 ///
-/// 只区分 `Hi-Res`（高解析及以上）与 `SQ`（无损），标准/高品音质不展示徽标。
+/// 只区分 `Hi-Res`（真实高解析母带）与 `SQ`（无损）：
+/// 蝰蛇系与多轨属于特效/分离音源，虽然上游几乎每首歌都挂了一个条目，
+/// 但并不代表这首歌真的有高解析母带，因此不能当作 Hi-Res 徽标。
 /// 判定依据是上游是否**存在**该音质，而不是当前账号能否播放：
 /// 徽标描述的是这首歌本身的最高规格。
 #[must_use]
 pub fn top_quality_label(rights: &SongRights) -> &'static str {
-    let best = rights
-        .qualities
-        .iter()
-        .filter(|quality| quality.exists)
-        .max_by_key(|quality| {
-            privilege::QUALITY_ORDER
-                .iter()
-                .position(|order| *order == quality.quality)
-                .unwrap_or(0)
-        })
-        .map(|quality| quality.quality.as_str());
-    match best {
-        Some("high" | "super" | "viper_clear" | "viper_tape" | "viper_atmos" | "multitrack") => "Hi-Res",
-        Some("flac") => "SQ",
-        _ => "",
+    let exists = |id: &str| {
+        rights
+            .qualities
+            .iter()
+            .any(|quality| quality.exists && quality.quality == id)
+    };
+    if exists("high") || exists("super") {
+        "Hi-Res"
+    } else if exists("flac") {
+        "SQ"
+    } else {
+        ""
     }
 }
 
@@ -674,10 +711,20 @@ mod tests {
         assert_eq!(label(vec![right("128"), right("flac")]), "SQ");
         assert_eq!(
             label(vec![right("flac"), right("viper_tape")]),
+            "SQ",
+            "蝰蛇母带是特效音源，每次上游都给，不能当 Hi-Res"
+        );
+        assert_eq!(
+            label(vec![right("flac"), right("high")]),
             "Hi-Res",
-            "母带压过无损"
+            "真实高解析母带才是 Hi-Res"
         );
         assert_eq!(label(vec![right("high")]), "Hi-Res");
+        assert_eq!(
+            label(vec![right("128"), right("viper_clear"), right("multitrack")]),
+            "",
+            "只有蝰蛇系/多轨的歌不挂任何高音质徽标"
+        );
         // 上游存在但账号无权播放的音质也属于这首歌的最高规格
         assert_eq!(
             label(vec![QualityRight {

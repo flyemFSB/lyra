@@ -285,19 +285,25 @@ impl Playlist {
     /// 「我喜欢」歌单固定 ID
     pub const LIKED_LISTID: &'static str = "2";
 
-    /// 从上游 JSON 解析歌单信息
+    /// 从上游 JSON 解析歌单信息（兼容歌单搜索的 special 形态）
     #[must_use]
     pub fn from_value(value: &Value) -> Option<Self> {
-        let listid = codec::pick_str(value, &["listid", "list_id", "id"]);
+        let listid = codec::pick_str(value, &["listid", "list_id", "specialid", "id"]);
         if listid.is_empty() {
             return None;
         }
         Some(Self {
             listid,
-            name: codec::pick_str(value, &["name", "listname", "list_name"]),
+            name: strip_highlight(&codec::pick_str(
+                value,
+                &["name", "listname", "list_name", "specialname"],
+            )),
             count: codec::pick_u64(value, &["count", "song_count", "total"]),
             kind: codec::pick_i64(value, &["type", "list_type"]),
-            global_collection_id: codec::pick_str(value, &["global_collection_id", "global_collectionid", "global_id"]),
+            global_collection_id: codec::pick_str(
+                value,
+                &["global_collection_id", "global_collectionid", "global_id", "gid"],
+            ),
             cover: codec::pick_str_paths(value, &[&["cover"], &["img"], &["pic"]]),
         })
     }
@@ -307,6 +313,104 @@ impl Playlist {
     pub fn is_liked(&self) -> bool {
         self.listid == Self::LIKED_LISTID
     }
+}
+
+/// 专辑搜索结果模型
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[allow(clippy::struct_field_names)]
+pub struct Album {
+    /// 专辑 ID
+    pub album_id: String,
+    /// 专辑名称
+    pub name: String,
+    /// 歌手名
+    pub singer: String,
+    /// 曲目数量
+    pub song_count: u64,
+    /// 发行日期（上游原样文本）
+    pub publish_time: String,
+    /// 封面 URL（可能含 `{size}` 占位符）
+    pub cover: String,
+}
+
+impl Album {
+    /// 从上游 JSON 解析专辑
+    #[must_use]
+    pub fn from_value(value: &Value) -> Option<Self> {
+        let album_id = scalar_of(codec::pick(value, &["albumid", "album_id"]));
+        let name = strip_highlight(&codec::pick_str(value, &["albumname", "album_name", "name"]));
+        if album_id.is_empty() || name.is_empty() {
+            return None;
+        }
+        Some(Self {
+            album_id,
+            name,
+            singer: strip_highlight(&codec::pick_str(value, &["singer", "singername", "author_name"])),
+            song_count: codec::pick_u64(value, &["songcount", "song_count", "count"]),
+            publish_time: codec::pick_str(value, &["publish_time", "publish_date"]),
+            cover: codec::pick_str_paths(value, &[&["img"], &["cover"], &["pic"]]),
+        })
+    }
+
+    /// 获取指定分辨率的封面 URL
+    #[must_use]
+    pub fn cover_at(&self, size: u32) -> String {
+        self.cover.replace("{size}", &size.to_string())
+    }
+}
+
+/// 歌手搜索结果模型
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Artist {
+    /// 歌手 ID
+    pub artist_id: String,
+    /// 歌手名
+    pub name: String,
+    /// 歌曲总数
+    pub song_count: u64,
+    /// 专辑总数
+    pub album_count: u64,
+    /// 粉丝数
+    pub fans: u64,
+    /// 头像 URL（可能含 `{size}` 占位符）
+    pub avatar: String,
+}
+
+impl Artist {
+    /// 从上游 JSON 解析歌手
+    #[must_use]
+    pub fn from_value(value: &Value) -> Option<Self> {
+        let artist_id = scalar_of(codec::pick(value, &["AuthorId", "authorid", "author_id", "singerid"]));
+        let name = strip_highlight(&codec::pick_str(
+            value,
+            &["AuthorName", "author_name", "singername", "name"],
+        ));
+        if artist_id.is_empty() || name.is_empty() {
+            return None;
+        }
+        Some(Self {
+            artist_id,
+            name,
+            song_count: codec::pick_u64(value, &["AudioCount", "audio_count", "song_count"]),
+            album_count: codec::pick_u64(value, &["AlbumCount", "album_count"]),
+            fans: codec::pick_u64(value, &["FansNum", "fans_num", "fans"]),
+            avatar: codec::pick_str(value, &["Avatar", "FirstFrameImage", "avatar", "img"]),
+        })
+    }
+
+    /// 获取指定分辨率的头像 URL
+    #[must_use]
+    pub fn avatar_at(&self, size: u32) -> String {
+        self.avatar.replace("{size}", &size.to_string())
+    }
+}
+
+/// 去掉搜索接口在命名字段里插入的 `<em>` 高亮标签
+fn strip_highlight(text: &str) -> String {
+    if !text.contains('<') {
+        return text.to_owned();
+    }
+    text.replace("<em>", "").replace("</em>", "")
 }
 
 /// 电台频道模型

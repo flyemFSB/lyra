@@ -2,7 +2,7 @@
 
 use async_channel::Sender;
 
-use lyra_api::model::{LyricLine, Page, Playlist, Song, VipStatus};
+use lyra_api::model::{Album, Artist, LyricLine, Page, Playlist, Song, VipStatus};
 use lyra_app::Kugou;
 
 /// 导航页面枚举
@@ -38,6 +38,14 @@ pub(crate) enum Msg {
     PersonalFm(Result<Page<Song>, String>),
     /// 搜索结果分页（附带请求序号）
     Search(u64, Result<Page<Song>, String>),
+    /// 专辑搜索结果（附带请求序号）
+    SearchAlbums(u64, Result<Page<Album>, String>),
+    /// 歌手搜索结果（附带请求序号）
+    SearchArtists(u64, Result<Page<Artist>, String>),
+    /// 歌单搜索结果（附带请求序号）
+    SearchPlaylists(u64, Result<Page<Playlist>, String>),
+    /// 搜索结果下的专辑/歌手/歌单点击后：取到曲目就直接开播
+    SearchPlay(Result<Vec<Song>, String>),
     /// 歌词获取结果（附带请求序号）
     Lyrics(u64, Result<Vec<LyricLine>, String>),
     /// 会员状态查询结果
@@ -66,6 +74,8 @@ pub(crate) enum Msg {
         track: lyra_audio::TrackRef,
         /// 试听片段时长（毫秒，0 表示完整曲）
         preview_ms: u64,
+        /// 起播位置（毫秒）：切音质时沿用当前进度，普通切歌为 0
+        resume_ms: u64,
     },
     /// 播放直链解析失败
     PlayFailed {
