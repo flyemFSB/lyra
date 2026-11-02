@@ -498,6 +498,18 @@ impl Render for LyricsView {
             .child(mesh_glow_2)
             .child(turntable_stage)
             .child(right_lyrics_section)
+            // 顶部拖拽区：沉浸页没有顶栏，必须自带一块可拖动窗口的区域。
+            // 左侧让出返回按钮的命中范围，避免窗口控件的命中区盖住按钮。
+            .child(
+                div()
+                    .id("lyrics_drag_area")
+                    .absolute()
+                    .top(px(0.0))
+                    .left(px(64.0))
+                    .right_0()
+                    .h(px(40.0))
+                    .window_control_area(WindowControlArea::Drag),
+            )
             // 返回按钮
             .child(
                 div()

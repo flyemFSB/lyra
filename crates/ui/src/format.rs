@@ -18,17 +18,14 @@ pub(crate) fn index_label(index: usize) -> SharedString {
 
 /// 设置页与播放条支持的音质选项
 ///
-/// 实测上游音质权益矩阵后确定的真实可选类型：128 / 320 / flac / high
-/// 以及蝰蛇系（超清、母带、全景）与多轨；`super` 在实测样本里从未出现，故不提供。
+/// 只保留最常用的四档（标准 / 高品 / 无损 / Hi-Res）。
+/// 蝰蛇系（超清、母带、全景）与多轨在实测里几乎不可用，已从可选列表移除；
+/// 旧版本持久化的这些值仍能正常取址播放，只是不再出现在切换菜单里。
 pub(crate) const QUALITY_CHOICES: &[(&str, &str)] = &[
     ("128", "标准 128K"),
     ("320", "高品 320K"),
     ("flac", "无损"),
     ("high", "Hi-Res"),
-    ("viper_clear", "蝰蛇超清"),
-    ("viper_tape", "蝰蛇母带"),
-    ("viper_atmos", "蝰蛇全景"),
-    ("multitrack", "多轨"),
 ];
 
 /// 毫秒时间格式化写入已有缓冲区（不额外分配）
@@ -153,21 +150,12 @@ mod tests {
     }
 
     #[test]
-    fn quality_choices_cover_every_upstream_type_we_measured() {
-        // 实网音质矩阵里出现过的类型必须都在选项里，否则切不到；
-        // super 在实测样本中从未出现，因此不提供。
-        for id in [
-            "128",
-            "320",
-            "flac",
-            "high",
-            "viper_clear",
-            "viper_tape",
-            "viper_atmos",
-            "multitrack",
-        ] {
-            assert!(QUALITY_CHOICES.iter().any(|(choice, _)| *choice == id), "缺少 {id}");
+    fn quality_choices_keep_only_the_four_common_tiers() {
+        let ids: Vec<&str> = QUALITY_CHOICES.iter().map(|(id, _)| *id).collect();
+        assert_eq!(ids, vec!["128", "320", "flac", "high"]);
+        // 蝰蛇系与多轨不再出现在可选档位里（旧设置仍可继续播放）
+        for id in ["viper_clear", "viper_tape", "viper_atmos", "multitrack"] {
+            assert!(!ids.contains(&id), "不应再提供 {id}");
         }
-        assert!(!QUALITY_CHOICES.iter().any(|(choice, _)| *choice == "super"));
     }
 }

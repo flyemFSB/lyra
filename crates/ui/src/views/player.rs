@@ -15,11 +15,11 @@ use lyra_api::model::Song;
 use lyra_audio::{Snapshot, State};
 
 use crate::bridge::{Backend, Msg, Nav};
-use crate::format::{format_duration, progress_percent};
+use crate::format::{QUALITY_CHOICES, format_duration, progress_percent};
 use crate::shell::AppShell;
 use crate::theme::{
-    ACCENT_GREEN, ACCENT_GREEN_HOVER, CARD_BG, TEXT_FAINT, TEXT_MUTED, TEXT_PRIMARY, badge, hex_rgb, quality_badge,
-    song_cover,
+    ACCENT_GREEN, ACCENT_GREEN_HOVER, CARD_BG, SURFACE_HOVER, TEXT_FAINT, TEXT_MUTED, TEXT_PRIMARY, badge, hex_rgb,
+    quality_badge, song_cover,
 };
 use crate::views::tracks::{TrackRow, build_rows};
 
@@ -76,16 +76,6 @@ fn play_pause_icon(playing: bool) -> AnyElement {
         .into_any_element()
 }
 
-/// 循环切换至下一档音质（从标准逐级升级，到顶回到标准）
-pub(crate) fn next_quality(current: &str) -> &'static str {
-    let choices = crate::format::QUALITY_CHOICES;
-    let index = choices
-        .iter()
-        .position(|(id, _)| *id == current)
-        .map_or(0, |index| (index + 1) % choices.len());
-    choices[index].0
-}
-
 /// 播放条上的紧凑音质标签（完整文案太长，放不下右侧控制区）
 fn quality_short(quality: &str) -> &'static str {
     match quality {
@@ -93,6 +83,7 @@ fn quality_short(quality: &str) -> &'static str {
         "flac" => "无损",
         "320" => "320K",
         "128" => "128K",
+        // 旧版本可选的档位：已从菜单移除，但旧设置仍要能正确显示
         "viper_clear" => "超清",
         "viper_tape" => "母带",
         "viper_atmos" => "全景",
@@ -171,9 +162,8 @@ impl PlayerModel {
     }
 
     /// 切换全局音质偏好
-    pub(crate) fn cycle_quality(&mut self) -> String {
-        self.quality = next_quality(&self.quality).to_owned();
-        self.quality.clone()
+    pub(crate) fn set_quality(&mut self, quality: &str) {
+        quality.clone_into(&mut self.quality);
     }
 
     /// 更新音量大小
@@ -372,6 +362,8 @@ pub(crate) struct PlayerBar {
     last_mode: PlayMode,
     /// 记录最近一次非静音时的音量（供再次点击静音按钮时无损恢复）
     last_unmuted_volume: f32,
+    /// 音质选择菜单是否展开（向上弹出）
+    quality_open: bool,
     /// 进度文本复用缓冲区（进度每帧都在变）
     pos_buf: String,
     _subs: Vec<Subscription>,
@@ -472,6 +464,7 @@ impl PlayerBar {
             last_queue_len: 0,
             last_mode: PlayMode::ListLoop,
             last_unmuted_volume,
+            quality_open: false,
             pos_buf: String::new(),
             _subs: vec![progress_sub, volume_sub],
         }
@@ -585,6 +578,31 @@ impl PlayerBar {
                 Err(error) => Msg::Toast(format!("保存播放模式失败: {error}")),
             }
         });
+    }
+
+    /// 选定音质：写入设置并立即用新音质重播当前曲目
+    ///
+    /// 重播保持当前播放/暂停状态（暂停时切音质不会自己继续播）。
+    fn choose_quality(&mut self, quality: &str, cx: &mut Context<Self>) {
+        self.quality_open = false;
+        // 先读出当前值再放开借用，避免在 update 里再碰一次播放模型
+        let current = self.player.read(cx).quality.clone();
+        if current != quality {
+            self.player.update(cx, |model, model_cx| {
+                model.set_quality(quality);
+                model_cx.notify();
+            });
+            let app = self.backend.app();
+            let chosen = quality.to_owned();
+            self.backend.spawn(async move {
+                match app.update_settings(|settings| settings.quality = chosen) {
+                    Ok(()) => Msg::Noop,
+                    Err(error) => Msg::Toast(format!("保存音质失败: {error}")),
+                }
+            });
+            self.shell.update(cx, AppShell::replay_current).ok();
+        }
+        cx.notify();
     }
 
     /// 统一调整音量与静音状态，即时通知 UI 并按需持久化
@@ -974,10 +992,9 @@ impl Render for PlayerBar {
                                         this.child(
                                             Slider::new(&self.progress)
                                                 .w_full()
-                                                // 必须显式着色：默认主题的滑块是近白色、手柄是黑色；
-                                                // 这里统一走灰色，不保留绿色填充
-                                                .bg(hex_rgb(0xe5e7eb))
-                                                .text_color(hex_rgb(0xcbd5e1)),
+                                                // 悬停/拖拽时已播部分与手柄仍为品牌绿，不随轨道变色
+                                                .bg(ACCENT_GREEN)
+                                                .text_color(ACCENT_GREEN),
                                         )
                                             .when_some(self.hover_scrub_ratio, |this, ratio| {
                                                 let duration = self.player.read(cx).snapshot.duration_ms;
@@ -1131,29 +1148,71 @@ impl Render for PlayerBar {
                                     .child(format!("{vol_num}%")),
                             ),
                     )
-                    // 全局音质切换（播放区域直接切换，持久化到设置）
+                    // 全局音质切换（点击后向上展开档位，选中即生效并持久化）
                     .child(
-                        Button::new("quality_toggle")
-                            .ghost()
-                            .small()
-                            .label(quality_short(&quality_pref))
-                            .tooltip("点击切换全局音质偏好")
-                            .on_click(cx.listener(|this, _event, _window, cx| {
-                                let next = this.player.update(cx, |model, model_cx| {
-                                    let quality = model.cycle_quality();
-                                    model_cx.notify();
-                                    quality
-                                });
-                                let app = this.backend.app();
-                                this.backend.spawn(async move {
-                                    match app.update_settings(|settings| settings.quality = next) {
-                                        Ok(()) => Msg::Noop,
-                                        Err(error) => Msg::Toast(format!("保存音质失败: {error}")),
-                                    }
-                                });
-                                // 当前曲目立即用新音质重播，不用等下一首
-                                this.shell.update(cx, AppShell::replay_current).ok();
-                            })),
+                        div()
+                            .relative()
+                            // 点菜单外面收起，否则会一直挡着
+                            .on_mouse_down_out(cx.listener(|this, _event, _window, cx| {
+                                if this.quality_open {
+                                    this.quality_open = false;
+                                    cx.notify();
+                                }
+                            }))
+                            .child(
+                                Button::new("quality_toggle")
+                                    .ghost()
+                                    .small()
+                                    .label(quality_short(&quality_pref))
+                                    .dropdown_caret(true)
+                                    .tooltip("选择音质")
+                                    .on_click(cx.listener(|this, _event, _window, cx| {
+                                        this.quality_open = !this.quality_open;
+                                        cx.notify();
+                                    })),
+                            )
+                            .when(self.quality_open, |this| {
+                                let mut menu = v_flex()
+                                    .absolute()
+                                    .bottom(px(30.0))
+                                    .right(px(0.0))
+                                    .w(px(124.0))
+                                    .p_1()
+                                    .gap(px(1.0))
+                                    .rounded(px(8.0))
+                                    .bg(CARD_BG)
+                                    .border_1()
+                                    .border_color(hex_rgb(0xe5e7eb))
+                                    .shadow_lg();
+                                for (index, (id, label)) in QUALITY_CHOICES.iter().copied().enumerate() {
+                                    let active = quality_pref == id;
+                                    menu = menu.child(
+                                        div()
+                                            .id(("quality_option", index))
+                                            .role(Role::Button)
+                                            .cursor_pointer()
+                                            .w_full()
+                                            .h(px(28.0))
+                                            .px_2()
+                                            .rounded(px(6.0))
+                                            .flex()
+                                            .items_center()
+                                            .justify_between()
+                                            .text_xs()
+                                            .text_color(if active { ACCENT_GREEN } else { TEXT_PRIMARY })
+                                            .when(active, |this| this.font_weight(FontWeight::MEDIUM))
+                                            .hover(|s| s.bg(SURFACE_HOVER))
+                                            .on_click(cx.listener(move |this, _event, _window, cx| {
+                                                this.choose_quality(id, cx);
+                                            }))
+                                            .child(label)
+                                            .when(active, |this| {
+                                                this.child(Icon::new(IconName::Check).size(px(12.0)))
+                                            }),
+                                    );
+                                }
+                                this.child(menu)
+                            }),
                     )
                     // 播放队列开关
                     .child(
@@ -1179,7 +1238,7 @@ mod tests {
 
     use lyra_api::model::Song;
 
-    use super::{PlayMode, PlayerModel, next_quality};
+    use super::{PlayMode, PlayerModel};
 
     /// 构建包含 3 首曲目的测试播放模型
     fn model(mode: PlayMode, index: usize) -> PlayerModel {
@@ -1247,20 +1306,6 @@ mod tests {
         assert_eq!(model.cycle_mode(), PlayMode::SingleLoop);
         assert_eq!(model.cycle_mode(), PlayMode::Shuffle);
         assert_eq!(model.cycle_mode(), PlayMode::ListLoop);
-    }
-
-    #[test]
-    fn quality_cycles_through_the_settings_choices_and_wraps() {
-        assert_eq!(next_quality("128"), "320");
-        assert_eq!(next_quality("320"), "flac");
-        assert_eq!(next_quality("flac"), "high");
-        assert_eq!(next_quality("high"), "viper_clear");
-        assert_eq!(next_quality("multitrack"), "128", "最末一档回到标准");
-        // 未知/空值从第一档开始，不能停在一个非法音质上
-        assert_eq!(next_quality(""), "128");
-        let mut model = PlayerModel::new(true, PlayMode::ListLoop, 0.8, "flac".to_owned());
-        assert_eq!(model.cycle_quality(), "high");
-        assert_eq!(model.quality, "high", "切换结果必须写回共享模型（全局生效）");
     }
 
     #[test]

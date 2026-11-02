@@ -364,6 +364,7 @@ impl Render for DailyView {
                                     on_select: Some(on_select.clone()),
                                     qualities: &qualities,
                                     checked: None,
+                                    in_liked: false,
                                 },
                                 cur_hash.as_deref(),
                                 is_playing,

@@ -342,6 +342,11 @@ impl PlaylistsView {
         let Some(row) = self.rows.get(index) else {
             return div().into_any_element();
         };
+        // 「我喜欢」里的歌已经在收藏里，不再展示收藏按钮
+        let in_liked = self
+            .selected
+            .and_then(|idx| self.playlists.get(idx))
+            .is_some_and(Playlist::is_liked);
         track_row(
             index,
             row,
@@ -354,6 +359,7 @@ impl PlaylistsView {
                 on_select,
                 qualities,
                 checked,
+                in_liked,
             },
             listid,
             is_current,

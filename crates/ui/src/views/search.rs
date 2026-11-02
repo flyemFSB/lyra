@@ -698,6 +698,7 @@ impl Render for SearchView {
                                     on_select: None,
                                     qualities: &qualities,
                                     checked: None,
+                                    in_liked: false,
                                 },
                                 cur_hash.as_deref(),
                                 is_playing,

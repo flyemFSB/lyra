@@ -38,6 +38,16 @@ const TOAST_TTL: Duration = Duration::from_millis(2600);
 /// 自动续播允许连续跳过的曲目上限（避免死循环）
 const MAX_AUTO_SKIPS: usize = 5;
 
+/// 歌曲行三点菜单（点击行尾「···」时弹出）
+pub(crate) struct RowMenu {
+    /// 待操作的歌曲
+    song: Song,
+    /// 歌曲所在歌单（`Some` 时菜单提供「从歌单移除」）
+    listid: Option<String>,
+    /// 弹出锚点（窗口坐标）
+    position: Point<Pixels>,
+}
+
 /// 缓存的子视图实体集合
 struct Views {
     player_bar: Entity<PlayerBar>,
@@ -101,6 +111,10 @@ pub(crate) struct AppShell {
     collected_playlists_expanded: bool,
     /// 「添加到歌单」浮层：待添加的歌曲（None 表示未打开）
     add_to: Option<Vec<Song>>,
+    /// 歌曲行三点菜单（None 表示未打开）
+    row_menu: Option<RowMenu>,
+    /// 切音质重播时应保持暂停（切音质不改变当前播放状态）
+    replay_paused: bool,
     /// 进入红心漫游前的播放模式（退出后恢复）
     fm_mode_backup: Option<PlayMode>,
     /// 播放模型变更订阅（队列抽屉的当前曲目标记靠它才能跟上切歌）
@@ -203,6 +217,8 @@ impl AppShell {
             created_playlists_expanded: true,
             collected_playlists_expanded: true,
             add_to: None,
+            row_menu: None,
+            replay_paused: false,
             fm_mode_backup: None,
             player_sub: None,
             shown_track: None,
@@ -396,6 +412,10 @@ impl AppShell {
                     } else {
                         engine.play(track);
                     }
+                    // 起播必然进入播放态：暂停中切音质要把暂停状态还原回去
+                    if std::mem::take(&mut self.replay_paused) {
+                        engine.toggle();
+                    }
                 }
                 // 上游仅授权试听片段
                 if preview_ms > 0 {
@@ -406,6 +426,7 @@ impl AppShell {
                 if seq != self.play_seq {
                     return;
                 }
+                self.replay_paused = false;
                 self.on_play_failed(&hash, &message, cx);
             }
             Msg::AudioEnded => {
@@ -599,15 +620,24 @@ impl AppShell {
 
     /// 用最新音质重新取址并播放当前曲目（切音质后从当前进度继续，不回到开头）
     pub(crate) fn replay_current(&mut self, cx: &mut Context<Self>) {
-        if self.player.read(cx).current_song().is_none() {
-            return;
-        }
-        let resume_ms = self.player.read(cx).snapshot.position_ms;
+        let (resume_ms, paused) = {
+            let model = self.player.read(cx);
+            if model.current_song().is_none() {
+                return;
+            }
+            // 暂停中切音质：重新取址后仍保持暂停，不自己接着播
+            (
+                model.snapshot.position_ms,
+                model.snapshot.state == lyra_audio::State::Paused,
+            )
+        };
+        self.replay_paused = paused;
         self.play_index_at(resume_ms, cx);
     }
 
     /// 播放当前选中歌曲
     fn play_index(&mut self, cx: &mut Context<Self>) {
+        self.replay_paused = false;
         self.play_index_at(0, cx);
     }
 
@@ -895,6 +925,8 @@ impl AppShell {
                 if let Some(views) = self.views.as_ref() {
                     // 歌单封面区显示的是曲目数，收藏后必须刷新侧栏与详情
                     views.playlists.update(cx, PlaylistsView::reload);
+                    // 正在看「我喜欢」时，曲目列表也必须立刻重拉，否则收藏像是没生效
+                    views.playlists.update(cx, PlaylistsView::refresh_current);
                 }
             }
             Err(error) => {
@@ -928,6 +960,25 @@ impl AppShell {
         }
         self.add_to = Some(songs);
         cx.notify();
+    }
+
+    /// 在鼠标位置展开歌曲行的三点菜单
+    pub(crate) fn open_row_menu(
+        &mut self,
+        song: Song,
+        listid: Option<String>,
+        position: Point<Pixels>,
+        cx: &mut Context<Self>,
+    ) {
+        self.row_menu = Some(RowMenu { song, listid, position });
+        cx.notify();
+    }
+
+    /// 收起歌曲行三点菜单
+    fn close_row_menu(&mut self, cx: &mut Context<Self>) {
+        if self.row_menu.take().is_some() {
+            cx.notify();
+        }
     }
 
     /// 批量查询歌曲真实最高音质（已查询过的 hash 不重复请求）
@@ -1651,6 +1702,107 @@ impl AppShell {
         )
     }
 
+    /// 渲染歌曲行三点菜单（点击行尾「···」后在鼠标位置展开）
+    fn row_menu_overlay(&self, window: &Window, cx: &Context<Self>) -> Option<AnyElement> {
+        let menu = self.row_menu.as_ref()?;
+        let viewport = window.viewport_size();
+        // 从点击点向左下方展开，并夹在窗口内，避免菜单溢出被裁掉
+        let width = 156.0_f32;
+        let height = if menu.listid.is_some() { 76.0 } else { 44.0 };
+        let x = f32::from(menu.position.x);
+        let y = f32::from(menu.position.y);
+        let screen_width = f32::from(viewport.width);
+        let screen_height = f32::from(viewport.height);
+        let left = (x - width).clamp(8.0, (screen_width - width - 8.0).max(8.0));
+        let top = (y + 6.0).clamp(8.0, (screen_height - height - 8.0).max(8.0));
+
+        let song = menu.song.clone();
+        let listid = menu.listid.clone();
+        let backend = self.backend.clone();
+        let fileid = song.fileid;
+
+        let mut items = v_flex().w_full().gap(px(1.0));
+        items = items.child(
+            div()
+                .id("row_menu_add")
+                .role(Role::Button)
+                .cursor_pointer()
+                .w_full()
+                .h(px(30.0))
+                .px_2()
+                .gap(px(8.0))
+                .rounded(px(6.0))
+                .flex()
+                .items_center()
+                .text_xs()
+                .text_color(TEXT_PRIMARY)
+                .hover(|s| s.bg(SURFACE_HOVER))
+                .on_click(cx.listener(move |shell, _event, _window, cx| {
+                    shell.row_menu = None;
+                    shell.open_add_to(vec![song.clone()], cx);
+                }))
+                .child(Icon::new(IconName::ListPlus).size(px(13.0)).text_color(TEXT_MUTED))
+                .child("添加到歌单"),
+        );
+        if let Some(listid) = listid {
+            items = items.child(
+                div()
+                    .id("row_menu_remove")
+                    .role(Role::Button)
+                    .cursor_pointer()
+                    .w_full()
+                    .h(px(30.0))
+                    .px_2()
+                    .gap(px(8.0))
+                    .rounded(px(6.0))
+                    .flex()
+                    .items_center()
+                    .text_xs()
+                    .text_color(TEXT_PRIMARY)
+                    .hover(|s| s.bg(SURFACE_HOVER))
+                    .on_click(cx.listener(move |shell, _event, _window, cx| {
+                        shell.close_row_menu(cx);
+                        if fileid != 0 {
+                            backend.send(Msg::RemoveTracks {
+                                listid: listid.clone(),
+                                fileids: vec![fileid],
+                            });
+                        } else {
+                            backend.send(Msg::Toast("这首歌缺少可移除的内部 ID".to_owned()));
+                        }
+                    }))
+                    .child(Icon::new(IconName::Trash).size(px(13.0)).text_color(TEXT_MUTED))
+                    .child("从歌单移除"),
+            );
+        }
+
+        Some(
+            div()
+                .id("row_menu_backdrop")
+                .absolute()
+                .inset_0()
+                .on_click(cx.listener(|shell, _event, _window, cx| shell.close_row_menu(cx)))
+                .child(
+                    v_flex()
+                        .id("row_menu_panel")
+                        .absolute()
+                        .left(px(left))
+                        .top(px(top))
+                        .w(px(width))
+                        .p_1()
+                        .rounded(px(8.0))
+                        .bg(CARD_BG)
+                        .border_1()
+                        .border_color(CARD_BORDER)
+                        .shadow_lg()
+                        // 菜单项的点击不能冒泡到背景，否则点下去会先把自己关掉
+                        .on_mouse_down(MouseButton::Left, |_event, _window, cx| cx.stop_propagation())
+                        .child(items),
+                )
+                .into_any_element(),
+        )
+    }
+
     /// 渲染「添加到歌单」浮层
     fn add_to_overlay(&self, cx: &Context<Self>) -> Option<AnyElement> {
         let songs = self.add_to.as_ref()?;
@@ -1738,6 +1890,13 @@ impl AppShell {
                     )
                     .child(div().text_size(px(10.5)).text_color(TEXT_FAINT).child(count)),
             );
+        }
+        // 歌单还没拉回来时给一句明确提示，别让浮层看起来像空的、点不动
+        if playlists.is_empty() {
+            list = list.child(notice_with_icon(
+                IconName::ListMusic,
+                "歌单列表还没加载完成，请稍后再试",
+            ));
         }
 
         let card = v_flex()
@@ -2037,6 +2196,8 @@ impl Render for AppShell {
                 )
                 .child(views.player_bar.clone())
                 .children(self.toast_element(cx))
+                // 菜单用窗口坐标定位，必须挂在窗口根节点下
+                .children(self.row_menu_overlay(window, cx))
                 .into_any_element();
         }
 
@@ -2115,6 +2276,8 @@ impl Render for AppShell {
             )
             .child(views.player_bar.clone())
             .children(self.toast_element(cx))
+            // 菜单用窗口坐标定位，必须挂在窗口根节点下
+            .children(self.row_menu_overlay(window, cx))
             .into_any_element()
     }
 }

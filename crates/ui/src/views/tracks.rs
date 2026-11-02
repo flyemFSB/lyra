@@ -76,6 +76,8 @@ pub(crate) struct RowContext<'a> {
     pub(crate) qualities: &'a HashMap<String, &'static str>,
     /// 批量选择态：`Some` 表示处于批量模式，集合内为已勾选的行下标
     pub(crate) checked: Option<&'a HashSet<usize>>,
+    /// 当前列表是否为「我喜欢」：里面的歌已在收藏里，不再展示收藏按钮
+    pub(crate) in_liked: bool,
 }
 
 /// 单击行回调函数类型
@@ -330,13 +332,11 @@ pub(crate) fn track_row(
         )
         // 5. [ 时长 & Hover-to-Reveal 交互区 (100px 固定靠右) ]
         .child({
-            let remove_backend = ctx.backend.clone();
-            let removable = removable_listid.cloned();
-            let fileid = song.fileid;
-            let title_for_more = row.title.clone();
-            let singer_for_more = row.singer.clone();
-            let add_shell = ctx.shell.clone();
-            let add_song = song.clone();
+            let removable_listid = removable_listid.cloned();
+            let menu_shell = ctx.shell.clone();
+            let menu_song = song.clone();
+            // 「我喜欢」里的歌本来就在该歌单里，不再提供收藏按钮
+            let in_liked = ctx.in_liked;
 
             div()
                 .w(px(100.0))
@@ -360,7 +360,7 @@ pub(crate) fn track_row(
                             div().child(row.duration.clone()).into_any_element()
                         }),
                 )
-                // 鼠标 Hover 到该行时时长淡出，浮现 [ 爱心 ] [ 添加 ] [ ··· 更多 ]
+                // 鼠标 Hover 到该行时时长淡出，浮现 [ 红心 ] [ ··· 更多 ]
                 .child(
                     h_flex()
                         .absolute()
@@ -373,57 +373,40 @@ pub(crate) fn track_row(
                         // 行自身的 hover 判定失效，按钮一被悬浮就整体淡出且点不到。
                         // 改用 mouse-down 阻止冒泡，行不会收到点击，自然不会再切歌。
                         .on_mouse_down(MouseButton::Left, |_event, _window, cx| cx.stop_propagation())
-                        // [ 爱心 ] 收藏到我喜欢
-                        .child(
-                            Button::new(("like", index))
-                                .ghost()
-                                .small()
-                                .icon(IconName::Heart)
-                                .tooltip("收藏到「我喜欢」")
-                                .on_click(move |_event, _window, _cx| {
-                                    let Some(song) = like_queue.get(index) else {
-                                        return;
-                                    };
-                                    let song = song.clone();
-                                    let app = like_backend.app();
-                                    like_backend.spawn(async move {
-                                        Msg::Liked(app.like(&song).await.map_err(|error| error.to_string()))
-                                    });
-                                }),
-                        )
-                        // [ 添加 ] 添加到任意自建歌单
-                        .child(
-                            Button::new(("add_to", index))
-                                .ghost()
-                                .small()
-                                .icon(IconName::ListPlus)
-                                .tooltip("添加到歌单")
-                                .on_click(move |_event, _window, cx| {
-                                    let songs = vec![add_song.clone()];
-                                    add_shell.update(cx, |shell, cx| shell.open_add_to(songs, cx)).ok();
-                                }),
-                        )
-                        // [ ··· 更多操作 ]（从歌单移除 / 复制歌名）
+                        // [ 红心 ] 收藏到「我喜欢」
+                        .when(!in_liked, |this| {
+                            this.child(
+                                Button::new(("like", index))
+                                    .ghost()
+                                    .small()
+                                    .icon(IconName::Heart)
+                                    .tooltip("收藏到「我喜欢」")
+                                    .on_click(move |_event, _window, _cx| {
+                                        let Some(song) = like_queue.get(index) else {
+                                            return;
+                                        };
+                                        let song = song.clone();
+                                        let app = like_backend.app();
+                                        like_backend.spawn(async move {
+                                            Msg::Liked(app.like(&song).await.map_err(|error| error.to_string()))
+                                        });
+                                    }),
+                            )
+                        })
+                        // [ ··· 更多 ] 展开菜单：添加到歌单 / 从歌单移除
                         .child(
                             Button::new(("more", index))
                                 .ghost()
                                 .small()
                                 .icon(IconName::Ellipsis)
-                                .tooltip(if removable.is_some() { "从歌单移除" } else { "复制歌名" })
-                                .on_click(move |_event, _window, cx| {
-                                    if let Some(listid) = &removable {
-                                        remove_backend.send(Msg::RemoveTracks {
-                                            listid: listid.to_string(),
-                                            fileids: vec![fileid],
-                                        });
-                                    } else {
-                                        cx.write_to_clipboard(ClipboardItem::new_string(format!(
-                                            "{singer_for_more} - {title_for_more}"
-                                        )));
-                                        remove_backend.send(Msg::Toast(format!(
-                                            "已复制: {singer_for_more} - {title_for_more}"
-                                        )));
-                                    }
+                                .tooltip("更多操作")
+                                .on_click(move |event, _window, cx| {
+                                    let position = event.position();
+                                    let song = menu_song.clone();
+                                    let listid = removable_listid.as_ref().map(ToString::to_string);
+                                    menu_shell
+                                        .update(cx, |shell, cx| shell.open_row_menu(song, listid, position, cx))
+                                        .ok();
                                 }),
                         ),
                 )
